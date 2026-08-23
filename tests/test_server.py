@@ -9,6 +9,19 @@ def test_page_is_valid_html():
     assert "/run" in server.PAGE  # the UI posts prompts here
 
 
+def test_page_has_realtime_log_and_scorecard_ui():
+    # The live log + scorecard + tools UI must be present (the whole point of the GUI).
+    for hook in ("id=\"log\"", "getReader", "/tools", "scorecard", "accuracy"):
+        assert hook in server.PAGE, f"GUI missing {hook!r}"
+
+
+def test_build_broker_respects_allow_web():
+    on = Config(); on.allow_web = True
+    off = Config(); off.allow_web = False
+    assert server._build_broker(on) is not None
+    assert server._build_broker(off) is None
+
+
 def test_run_prompt_dry_run_produces_answer(monkeypatch):
     # Force the dry-run stub so no backend/network is needed.
     import ag.server as S
