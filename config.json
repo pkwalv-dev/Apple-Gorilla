@@ -1,0 +1,24 @@
+{
+  "backend": "auto",
+  "model": "claude-opus-5",
+  "ollama_model": "qwen2.5:7b",
+  "ollama_host": "http://localhost:11434",
+  "effort": "high",
+  "max_output_tokens": 32000,
+  "meta_output_tokens": 16000,
+  "max_iterations": 2,
+  "critic_pass_threshold": 8.0,
+  "autonomy_level": "guarded",
+  "allow_external_tools": false,
+  "allow_web": true,
+  "egress_only": true,
+  "max_snapshots": 20,
+  "max_runs": 100,
+  "evolve_branch": "ag/evolve",
+  "evolvable_paths": [
+    "ag/prompts.py",
+    "ag/tools/web.py",
+    "profile/principles.md",
+    "config.json"
+  ]
+}
