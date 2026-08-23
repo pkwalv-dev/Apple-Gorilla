@@ -79,7 +79,8 @@ python -m ag run "draft a launch email for our beta" --verbose
 ## Commands
 
 ```bash
-python -m ag run "<prompt>" [--verbose] [--show-prompt] [--model claude-opus-5]
+python -m ag run "<prompt>" [--verbose] [--show-prompt] [--tools] [--model ...]
+python -m ag memory add "<fact>" | recall "<query>" | list | clear   # persistent memory
 python -m ag ingest <export>   # distill a claude.ai data export into your profile
 python -m ag evolve            # attempt a test-gated self-improvement
 python -m ag tools [-v|--json] # inventory tools/apps + integration & friction ratings
@@ -89,6 +90,38 @@ python -m ag rollback <id>     # restore a snapshot instantly
 python -m ag profile           # show the loaded intelligence principles
 python -m ag doctor            # environment / readiness check
 ```
+
+## Beyond search — memory, tools, and a reasoning loop
+
+Plain `run` optimizes → executes → critiques → iterates a *text* answer. Two switches
+let AG actually **compute and act**, so it is useful even with the internet off:
+
+- **Persistent memory** (`use_memory`, on by default). AG recalls durable facts into
+  context each run, so sessions aren't cold-started. Manage it with `ag memory add/recall/
+  list/clear`; the reasoning loop can also `remember`/`recall` mid-task. Stored under
+  `state/memory/` (git-ignored, capped at `max_memories`).
+- **Local tools + reasoning loop** (`--tools`, or `allow_local_tools`). AG runs a bounded
+  reason → act → observe loop (`max_tool_steps`) and can call: `calc` (exact arithmetic,
+  fixing the small-model math weakness), `read_file`/`list_dir` (gated `filesystem_read`),
+  `python_exec` (gated `code_exec`, sandboxed subprocess with a timeout), and memory. It
+  degrades to a single answer if the model calls nothing.
+
+```bash
+python -m ag run "Compute 3847 * 2913 exactly." --tools --no-web -v
+#   [reason] tool: calc({"expr": "3847*2913"})  ->  observation: 11206311
+```
+
+> **Safety:** file access and `python_exec` are powerful and **off by default** — they
+> require `--tools`/`allow_local_tools` (which grants `filesystem_read` + `code_exec`
+> through the default-deny broker) and `allow_external_tools`. `python_exec` runs real
+> Python on this machine; only enable tools for prompts you trust.
+
+**What the `evolve` loop can and can't do (honest scope).** `evolve` only rewrites files
+in `evolvable_paths` (prompts, the web tool, the GUI theme, principles, config) and only
+adopts changes that pass the test suite. It is a bounded prompt/parameter/design *tuner*,
+not a system that can architect new subsystems like memory or tool execution — those are
+built as real, tested code, and only their tunable surfaces are exposed to `evolve` (e.g.
+the GUI look via `ag/theme.py`).
 
 ## Backends — run with or without an API key
 

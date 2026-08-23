@@ -23,6 +23,9 @@ Apple-Gorilla/
 │   ├── scoring.py              accuracy/quality/speed scorecard (directs evolution)
 │   ├── inventory.py            tool/app inventory + integration & friction ratings
 │   ├── update.py               on-demand Ollama model update check + pull (no polling)
+│   ├── memory.py               persistent memory: remember / recall (keyword overlap)
+│   ├── reason.py               bounded reason->act->observe tool-use loop
+│   ├── theme.py          [evolvable] web app look (fonts/palette) — AG may tune it
 │   ├── server.py               built-in web app: streaming realtime log + scorecard
 │   ├── prompts.py         [evolvable] the meta-prompts (AG's "brain")
 │   ├── profile.py              loads the user principles
@@ -32,7 +35,8 @@ Apple-Gorilla/
 │   ├── host.py                 host introspection + egress-only posture
 │   ├── agents.py               bounded, gated sub-agents
 │   └── tools/
-│       └── web.py         [evolvable] permission-gated internet (search/fetch)
+│       ├── web.py         [evolvable] permission-gated internet (search/fetch)
+│       └── local.py            offline tools: calc / file read / python_exec / memory
 ├── profile/
 │   ├── principles.md      [evolvable] the intelligence bar AG judges against
 │   └── about_me.md             user context (from your claude.ai export)
@@ -45,15 +49,18 @@ Apple-Gorilla/
 ## Four roles (the real organizing principle)
 
 1. **Evolvable brain** — the only files AG may rewrite (`evolvable_paths` in config):
-   `ag/prompts.py`, `ag/tools/web.py`, `profile/principles.md`, `config.json`.
-   Small, high-churn, safe to iterate. Internet code lives here on purpose.
+   `ag/prompts.py`, `ag/tools/web.py`, `ag/theme.py`, `profile/principles.md`,
+   `config.json`. Small, high-churn, safe to iterate. Internet code and the GUI look
+   live here on purpose so AG can tune its own retrieval and design within the gate.
 
 2. **Immutable safety core** — never in `evolvable_paths`, so AG cannot touch it:
    `permissions.py`, `backup.py`, `evolve.py`, `host.py`, `model.py`.
    These enforce the gate, the rollback, and egress-only. Load-bearing — keep them out.
 
-3. **Orchestration** — the wiring: `pipeline.py`, `cli.py`, `agents.py`, `server.py`,
-   `scoring.py`, `inventory.py`, `update.py`. Not evolvable (they run the loop and score it).
+3. **Orchestration & capabilities** — the wiring and the tools: `pipeline.py`, `cli.py`,
+   `agents.py`, `server.py`, `scoring.py`, `inventory.py`, `update.py`, `memory.py`,
+   `reason.py`, `tools/local.py`. Not evolvable (they run the loop and provide the
+   capabilities the loop uses).
 
 4. **Generated state** — everything AG produces at runtime: `state/`. Bounded and
    git-ignored; see below.

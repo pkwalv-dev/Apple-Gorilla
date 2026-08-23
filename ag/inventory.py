@@ -133,6 +133,26 @@ def _report_host(cfg: Config) -> ToolReport:
                       "AG's own work. Zero setup, no external service.")
 
 
+def _report_local_tools(cfg: Config) -> ToolReport:
+    # calc/memory work with no grant; file + code tools need allow_local_tools.
+    if cfg.allow_local_tools:
+        return ToolReport("local tools (calc/file/code)", "capability", "available",
+                          8, 8, "Offline reason->act loop: exact arithmetic, file "
+                          "read/list, and gated python_exec. Enabled (allow_local_tools).")
+    return ToolReport("local tools (calc/file/code)", "capability", "degraded", 8, 6,
+                      "Wired but off by default. Enable with `run --tools` or "
+                      "allow_local_tools=true to let AG compute/run code offline.")
+
+
+def _report_memory(cfg: Config) -> ToolReport:
+    from . import memory
+    n = len(memory.all_memories())
+    state = "available" if cfg.use_memory else "degraded"
+    return ToolReport("persistent memory", "capability", state, 9, 9,
+                      f"Durable facts recalled into context ({n} stored). "
+                      + ("Recall on." if cfg.use_memory else "Recall off (use_memory=false)."))
+
+
 def _report_evolve_gate(cfg: Config) -> ToolReport:
     from .evolve import gate_available
     if gate_available():
@@ -156,11 +176,16 @@ _SCAFFOLDED = {
 }
 
 
+# Gated capabilities that now HAVE drivers (reported by their own tool entries),
+# so they are not listed among the scaffolded/unwired ones.
+_WIRED_CAPS = {"network", "filesystem_read", "code_exec"}
+
+
 def _report_scaffolded(cfg: Config) -> List[ToolReport]:
     out = []
     for cap in sorted(GATED):
-        if cap == "network":
-            continue  # covered by the web retrieval report
+        if cap in _WIRED_CAPS:
+            continue  # covered by web / local-tools reports
         note = _SCAFFOLDED.get(cap, "Gated capability; no driver wired.")
         out.append(ToolReport(cap, "capability", "unavailable", 2, 3,
                               "Scaffolded (default-deny gate present, driver absent, "
@@ -177,6 +202,8 @@ def inventory(cfg: Optional[Config] = None) -> List[ToolReport]:
         _report_dry(cfg),
         _report_web(cfg),
         _report_subagents(cfg),
+        _report_local_tools(cfg),
+        _report_memory(cfg),
         _report_host(cfg),
         _report_evolve_gate(cfg),
     ]
