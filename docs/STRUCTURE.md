@@ -11,12 +11,16 @@ Apple-Gorilla/
 ├── requirements.txt       one dep (anthropic), only for the Claude backend
 ├── conftest.py            makes `ag` importable in tests
 ├── docs/
-│   └── STRUCTURE.md        this file
+│   ├── STRUCTURE.md        this file
+│   └── MODALITY.md         web app vs. other modalities — analysis + recommendation
 ├── ag/                    the package
 │   ├── __main__.py / cli.py    entry point + commands
 │   ├── config.py               config + paths
 │   ├── model.py                backend clients (Claude / Ollama / dry-run)
-│   ├── pipeline.py             optimize → execute → critique → iterate
+│   ├── pipeline.py             optimize → execute → critique → iterate (+ live events)
+│   ├── scoring.py              accuracy/quality/speed scorecard (directs evolution)
+│   ├── inventory.py            tool/app inventory + integration & friction ratings
+│   ├── server.py               built-in web app: streaming realtime log + scorecard
 │   ├── prompts.py         [evolvable] the meta-prompts (AG's "brain")
 │   ├── profile.py              loads the user principles
 │   ├── evolve.py               self-improvement loop (snapshot→test→adopt/rollback)
@@ -45,7 +49,8 @@ Apple-Gorilla/
    `permissions.py`, `backup.py`, `evolve.py`, `host.py`, `model.py`.
    These enforce the gate, the rollback, and egress-only. Load-bearing — keep them out.
 
-3. **Orchestration** — the wiring: `pipeline.py`, `cli.py`, `agents.py`.
+3. **Orchestration** — the wiring: `pipeline.py`, `cli.py`, `agents.py`, `server.py`,
+   `scoring.py`, `inventory.py`. Not evolvable (they run the loop and score it).
 
 4. **Generated state** — everything AG produces at runtime: `state/`. Bounded and
    git-ignored; see below.
