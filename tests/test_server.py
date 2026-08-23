@@ -15,6 +15,16 @@ def test_page_has_realtime_log_and_scorecard_ui():
         assert hook in server.PAGE, f"GUI missing {hook!r}"
 
 
+def test_page_uses_the_theme():
+    # The evolvable theme (professional font + palette) must be wired into the page,
+    # with no unsubstituted placeholders.
+    from ag import theme
+    assert "Inter" in server.PAGE and "fonts.googleapis" in server.PAGE
+    assert "--accent" in server.PAGE  # design tokens present
+    assert "__THEME__" not in server.PAGE and "__FONTS__" not in server.PAGE
+    assert theme.THEME_CSS in server.PAGE
+
+
 def test_page_has_update_banner_and_check():
     # The one-click yes/no model-update flow must be wired into the page.
     for hook in ("id=\"update\"", "/update/check", "applyUpdate", "/update/apply"):

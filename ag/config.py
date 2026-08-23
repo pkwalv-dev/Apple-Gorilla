@@ -46,6 +46,7 @@ class Config:
     evolvable_paths: List[str] = field(default_factory=lambda: [
         "ag/prompts.py",
         "ag/tools/web.py",       # internet code self-improves (highest-churn area)
+        "ag/theme.py",           # the web app's look — AG may iterate its own design
         "profile/principles.md",
         "config.json",
     ])
