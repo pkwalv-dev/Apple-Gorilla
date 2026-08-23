@@ -38,6 +38,12 @@ python -m ag serve --open              # local web app in your browser
 python -m ag serve --host 0.0.0.0      # also reachable from your phone on the same wifi
 ```
 
+The web app streams a **realtime log** of AG's run as it happens — the optimize →
+execute → critique → score stages, every web search/fetch, revisions, and errors —
+plus live **accuracy / quality / speed** scorecard bars and a **Tools & friction**
+inventory panel. See [docs/MODALITY.md](docs/MODALITY.md) for why AG stays a web app
+and what modality comes next (MCP).
+
 One-command install + launch (clones, checks, points at Ollama, starts the app):
 
 ```powershell
@@ -76,6 +82,7 @@ python -m ag run "draft a launch email for our beta" --verbose
 python -m ag run "<prompt>" [--verbose] [--show-prompt] [--model claude-opus-5]
 python -m ag ingest <export>   # distill a claude.ai data export into your profile
 python -m ag evolve            # attempt a test-gated self-improvement
+python -m ag tools [-v|--json] # inventory tools/apps + integration & friction ratings
 python -m ag versions          # list source snapshots
 python -m ag rollback <id>     # restore a snapshot instantly
 python -m ag profile           # show the loaded intelligence principles
@@ -186,6 +193,20 @@ The gate runs the suite with **pytest** (the tests use its fixtures), so `evolve
 requires it — it ships in `requirements.txt` and the installers add it. If pytest is
 absent the gate **fails closed**: `evolve` refuses to run (rather than adopting
 unverified code), and `ag doctor` reports `evolve gate: UNAVAILABLE`.
+
+### Directed evolution — scoring + tool inventory steer the loop
+
+Every run is scored on three axes (0–10): **accuracy** and **quality** are judged by
+the critic; **speed** is *measured* by AG from wall-clock and token cost against
+`speed_budget_s` (a model can't judge its own latency). The blend is stored per run
+(`config.json → score_weights`). Separately, `ag tools` inventories every backend,
+retrieval/agent/host tool, and scaffolded capability, rating each on **integration**
+(how wired-in) and **friction** (10 = frictionless).
+
+`evolve` feeds both into the evolver as a *directed-evolution briefing*: it identifies
+the weakest score axis across recent runs and the highest-friction wired tool, and asks
+for the single smallest change that lifts one of them. Self-improvement aims at the real
+bottleneck instead of editing blindly.
 
 Autonomy is a dial in `config.json`:
 
