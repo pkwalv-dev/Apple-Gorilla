@@ -28,6 +28,7 @@
   "evolvable_paths": [
     "ag/prompts.py",
     "ag/tools/web.py",
+    "ag/theme.py",
     "profile/principles.md",
     "config.json"
   ]

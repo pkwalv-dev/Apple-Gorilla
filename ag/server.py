@@ -21,70 +21,36 @@ from .config import Config
 from .model import make_client
 from .pipeline import run as run_pipeline
 
-PAGE = """<!doctype html>
-<html><head><meta charset="utf-8">
+_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Apple-Gorilla</title>
-<style>
- :root{color-scheme:light dark;--bd:#8884;--muted:#8889;
-   --tool:#3b82f6;--web:#14b8a6;--err:#ef4444;--res:#22c55e;--info:#9ca3af}
- *{box-sizing:border-box}
- body{font-family:system-ui,sans-serif;max-width:860px;margin:0 auto;padding:16px}
- h1{font-size:1.3rem;margin:.2rem 0}
- .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
- textarea{width:100%;min-height:80px;font-size:1rem;padding:8px;border-radius:8px;
-   border:1px solid var(--bd);background:transparent;color:inherit}
- button{font-size:.95rem;padding:9px 15px;cursor:pointer;border-radius:8px;
-   border:1px solid var(--bd);background:transparent;color:inherit}
- button.primary{background:#2563eb;color:#fff;border-color:#2563eb}
- .meta{color:var(--muted);font-size:.85rem}
- label.web{font-size:.85rem;color:var(--muted);display:flex;gap:5px;align-items:center}
- h2{font-size:.9rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
-   margin:18px 0 6px}
- #log{border:1px solid var(--bd);border-radius:8px;padding:8px;max-height:320px;
-   overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem}
- .ev{padding:3px 8px;border-left:3px solid var(--info);margin:2px 0;white-space:pre-wrap}
- .ev .tag{display:inline-block;min-width:74px;color:var(--muted)}
- .ev.tool{border-color:var(--tool)} .ev.web{border-color:var(--web)}
- .ev.error{border-color:var(--err);color:var(--err)}
- .ev.result{border-color:var(--res)}
- #cards{display:none;gap:14px;margin-top:8px}
- .card{flex:1;min-width:120px}
- .card .n{font-size:1.5rem;font-weight:600} .card .l{font-size:.75rem;color:var(--muted)}
- .bar{height:6px;border-radius:3px;background:var(--bd);margin-top:4px;overflow:hidden}
- .bar>i{display:block;height:100%;background:var(--res)}
- #answer{white-space:pre-wrap;margin-top:6px;padding:12px;border:1px solid var(--bd);
-   border-radius:8px;min-height:40px}
- #tools{display:none;margin-top:8px;font-size:.85rem;border-collapse:collapse;width:100%}
- #tools th,#tools td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--bd)}
- #tools td.n{text-align:right}
- .pill{font-size:.72rem;padding:1px 7px;border-radius:20px;border:1px solid var(--bd)}
- .pill.available{color:var(--res)} .pill.degraded{color:#f59e0b}
- .pill.unavailable{color:var(--muted)}
- #update{display:none;margin-top:10px;padding:10px 12px;border:1px solid #f59e0b;
-   border-radius:8px;background:#f59e0b22;align-items:center;gap:10px}
- #update .g{flex:1;font-size:.9rem}
- #update button{padding:6px 12px}
- #update .yes{background:#f59e0b;color:#000;border-color:#f59e0b}
-</style></head><body>
-<h1>🦍 Apple-Gorilla</h1>
-<div class="meta" id="status">ready</div>
-<div id="update" class="row">
+__FONTS__
+<style>__THEME__</style></head><body>
+<div class="wrap">
+<header>
+  <div class="logo">🦍</div>
+  <div class="brand"><h1>Apple-Gorilla</h1>
+    <div class="sub">self-improving prompt executor</div></div>
+  <div id="status">ready</div>
+</header>
+
+<div id="update">
   <span class="g" id="updmsg"></span>
   <button class="yes" onclick="applyUpdate()">Yes, update</button>
-  <button onclick="document.getElementById('update').style.display='none'">No</button>
-</div>
-<textarea id="p" placeholder="Ask AG anything..."></textarea>
-<div class="row" style="margin-top:8px">
-  <button class="primary" id="runbtn" onclick="go()">Run</button>
-  <button onclick="loadTools()">Tools &amp; friction</button>
-  <label class="web"><input type="checkbox" id="web" checked> use internet</label>
+  <button onclick="document.getElementById('update').style.display='none'">Dismiss</button>
 </div>
 
-<table id="tools"></table>
+<div class="panel">
+  <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
+  <div class="controls">
+    <button class="primary" id="runbtn" onclick="go()">Run</button>
+    <button onclick="loadTools()">Tools &amp; friction</button>
+    <label class="toggle"><input type="checkbox" id="web" checked> use internet</label>
+  </div>
+</div>
 
-<h2>Live log — thoughts · tool calls · internet · errors</h2>
-<div id="log"></div>
+<table id="tools" class="panel"></table>
 
 <div id="cards">
   <div class="card"><div class="n" id="acc">–</div><div class="l">accuracy</div>
@@ -97,8 +63,12 @@ PAGE = """<!doctype html>
     <div class="bar"><i id="ovrb"></i></div></div>
 </div>
 
+<h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
+<div class="panel" style="padding:8px"><div id="log"></div></div>
+
 <h2>Answer</h2>
-<div id="answer"></div>
+<div class="panel" id="answer"></div>
+</div>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -180,12 +150,23 @@ async function loadTools(){
   for(const x of d.tools){ h+='<tr><td>'+escapeHtml(x.name)+'</td><td>'+x.category
     +'</td><td><span class="pill '+x.status+'">'+x.status+'</span></td>'
     +'<td class="n">'+x.integration+'</td><td class="n">'+x.friction+'</td></tr>'; }
-  h+='<tr><td colspan="5" class="meta">avg integration '+d.avg_integration
+  h+='<tr><td colspan="5">avg integration '+d.avg_integration
     +' · avg friction '+d.avg_friction+' · best evolve target: '
     +escapeHtml(d.highest_friction_wired||'–')+'</td></tr>';
   t.innerHTML=h; t.style.display='table';
 }
 </script></body></html>"""
+
+
+def _render_page() -> str:
+    """Assemble the page from the evolvable theme (fonts + CSS) and the template."""
+    from . import theme
+    return (_PAGE_TEMPLATE
+            .replace("__FONTS__", theme.FONT_LINK)
+            .replace("__THEME__", theme.THEME_CSS))
+
+
+PAGE = _render_page()
 
 
 def _build_broker(cfg: Config):
