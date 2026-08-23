@@ -123,6 +123,9 @@ def cmd_doctor(args) -> int:
         pass
     print(f"ollama:           {ollama_status}")
     print(f"snapshots:        {len(backup.list_snapshots())}")
+    from .evolve import gate_available
+    gate = "ready" if gate_available() else "UNAVAILABLE (pip install pytest)"
+    print(f"evolve gate:      {gate}")
 
     # Effective backend for a plain `run`.
     if cfg.backend == "auto":

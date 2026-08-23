@@ -19,6 +19,14 @@ PY=python3; command -v "$PY" >/dev/null 2>&1 || PY=python
 "$PY" -m ag --dry-run run "install check" >/dev/null || { echo "AG failed - need Python 3.10+"; exit 1; }
 echo "AG installed OK"
 
+# 2b. Enable the self-improvement test gate (best-effort; ag evolve needs pytest).
+if "$PY" -c "import pytest" >/dev/null 2>&1; then
+  echo "evolve gate: pytest present"
+else
+  echo "installing pytest (self-improvement test gate)..."
+  "$PY" -m pip install -q pytest || echo "could not install pytest - 'ag evolve' will stay disabled until you: pip install pytest"
+fi
+
 # 3. Point at Ollama; pull model if present.
 "$PY" -m ag setup-ollama --model qwen2.5:7b >/dev/null
 if command -v ollama >/dev/null 2>&1; then
