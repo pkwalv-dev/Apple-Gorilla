@@ -24,12 +24,18 @@ def test_every_report_is_well_formed():
 
 def test_scaffolded_capabilities_are_reported_unavailable():
     reports = {r.name: r for r in inventory.inventory(Config())}
-    # Every gated capability except 'network' surfaces as a scaffolded, unavailable tool.
+    # Gated caps that still have no driver surface as scaffolded/unavailable. The
+    # now-wired ones (network, filesystem_read, code_exec) are reported elsewhere.
     for cap in GATED:
-        if cap == "network":
+        if cap in inventory._WIRED_CAPS:
             continue
         assert cap in reports, f"scaffolded capability {cap!r} not inventoried"
         assert reports[cap].status == "unavailable"
+
+
+def test_new_capabilities_are_inventoried():
+    names = " ".join(r.name for r in inventory.inventory(Config()))
+    assert "local tools" in names and "persistent memory" in names
 
 
 def test_web_status_tracks_allow_web():
