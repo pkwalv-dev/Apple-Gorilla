@@ -26,6 +26,21 @@ def _client(args, cfg):
                        dry_run=getattr(args, "dry_run", False))
 
 
+def _make_broker(cfg, *, web: bool, tools: bool):
+    """Build a permission broker granting exactly what this run is allowed to use."""
+    if not (web or tools):
+        return None
+    from .permissions import PermissionBroker
+    broker = PermissionBroker(allow_external_tools=True)
+    if web:
+        broker.grant("network")
+    if tools:
+        # calc/recall/remember need no grant; these enable file + code tools.
+        broker.grant("filesystem_read")
+        broker.grant("code_exec")
+    return broker
+
+
 def cmd_run(args) -> int:
     cfg = Config.load()
     if args.model:
@@ -33,13 +48,16 @@ def cmd_run(args) -> int:
     client = _client(args, cfg)
     # Permanent internet is on via cfg.allow_web; --web / --no-web override per run.
     web_effective = cfg.allow_web if args.web is None else args.web
-    broker = None
-    if web_effective:
-        from .permissions import PermissionBroker
-        broker = PermissionBroker(allow_external_tools=True)
-        broker.grant("network")
+    tools_effective = cfg.allow_local_tools or getattr(args, "tools", False)
+    cfg.allow_local_tools = tools_effective
+    broker = _make_broker(cfg, web=web_effective, tools=tools_effective)
+    trace = None
+    if args.verbose:
+        def trace(ev):  # surface tool/memory/web activity live on stderr
+            if ev.get("stage") in ("reason", "memory", "web") or ev.get("level") == "error":
+                print(f"[{ev['stage']}] {ev['msg']}", file=sys.stderr)
     rec = run_pipeline(client, cfg, args.prompt, verbose=args.verbose,
-                       web=web_effective, broker=broker)
+                       web=web_effective, broker=broker, emit=trace)
     if args.show_prompt:
         print("=== ENGINEERED PROMPT ===")
         print(rec.engineered_prompt)
@@ -211,6 +229,27 @@ def cmd_setup_ollama(args) -> int:
     return 0
 
 
+def cmd_memory(args) -> int:
+    from . import memory
+    if args.action == "add":
+        m = memory.remember(args.text or "", max_memories=Config.load().max_memories)
+        print(f"remembered: {m.text}" if m else "nothing to remember")
+    elif args.action == "recall":
+        hits = memory.recall(args.text or "", k=args.k)
+        if not hits:
+            print("(no relevant memories)")
+        for m in hits:
+            print(f"- {m.text}")
+    elif args.action == "list":
+        mems = memory.all_memories()
+        print(f"{len(mems)} memory item(s):")
+        for m in mems:
+            print(f"  [{m.id}] {m.text}")
+    elif args.action == "clear":
+        print(f"cleared {memory.clear()} memory item(s)")
+    return 0
+
+
 def cmd_update(args) -> int:
     from . import update
     cfg = Config.load()
@@ -275,6 +314,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force internet access on for this run")
     r.add_argument("--no-web", dest="web", action="store_false",
                    help="force internet access off for this run")
+    r.add_argument("--tools", action="store_true",
+                   help="enable local tools (calc/file-read/python-exec/memory) + "
+                        "the reasoning loop for this run")
     r.set_defaults(func=cmd_run)
 
     e = sub.add_parser("evolve", help="attempt a test-gated self-improvement")
@@ -316,6 +358,12 @@ def build_parser() -> argparse.ArgumentParser:
     so.add_argument("--host", default=None,
                     help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
+
+    mem = sub.add_parser("memory", help="AG's persistent memory (add/recall/list/clear)")
+    mem.add_argument("action", choices=["add", "recall", "list", "clear"])
+    mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
+    mem.add_argument("-k", type=int, default=5, help="recall: max items")
+    mem.set_defaults(func=cmd_memory)
 
     up = sub.add_parser("update",
                         help="check/apply an Ollama model update (on demand, no polling)")

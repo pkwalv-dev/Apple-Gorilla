@@ -169,12 +169,17 @@ def _render_page() -> str:
 PAGE = _render_page()
 
 
-def _build_broker(cfg: Config):
-    if not cfg.allow_web:
+def _build_broker(cfg: Config, *, web=None):
+    web = cfg.allow_web if web is None else web
+    if not (web or cfg.allow_local_tools):
         return None
     from .permissions import PermissionBroker
     broker = PermissionBroker(allow_external_tools=True)
-    broker.grant("network")
+    if web:
+        broker.grant("network")
+    if cfg.allow_local_tools:
+        broker.grant("filesystem_read")
+        broker.grant("code_exec")
     return broker
 
 
@@ -261,7 +266,7 @@ class _Handler(BaseHTTPRequestHandler):
         write = self._ndjson_writer()
         cfg = self.cfg
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
-        broker = _build_broker(cfg) if web_eff else None
+        broker = _build_broker(cfg, web=web_eff)
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,

@@ -40,6 +40,10 @@ class Config:
     autonomy_level: str = "guarded"           # manual | guarded | never
     allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
     allow_web: bool = True                     # AG's standing internet access
+    allow_local_tools: bool = False           # calc/file-read/python-exec/memory tools
+    max_tool_steps: int = 4                    # reason->act->observe loop bound
+    use_memory: bool = True                    # recall durable memory into context
+    max_memories: int = 200                    # cap on retained memories
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main
