@@ -123,6 +123,31 @@ def test_ollama_client_builds_without_server():
     assert c._model == cfg.ollama_model
 
 
+def test_ollama_payload_carries_keep_alive_and_options(monkeypatch):
+    # keep_alive + tuned options must reach the Ollama request (efficiency knobs).
+    import json as _json
+    from ag.model import OllamaClient
+    cfg = Config()
+    cfg.ollama_keep_alive = "45m"
+    cfg.ollama_options = {"num_ctx": 8192}
+    captured = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"message":{"content":"ok"},"eval_count":1}'
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = _json.loads(req.data.decode("utf-8"))
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    OllamaClient(cfg).complete(system="s", user="u", cfg=cfg, max_tokens=123)
+    assert captured["body"]["keep_alive"] == "45m"
+    assert captured["body"]["options"]["num_ctx"] == 8192
+    assert captured["body"]["options"]["num_predict"] == 123
+
+
 def test_config_json_on_disk_is_valid():
     from ag.config import CONFIG_PATH
     data = json.loads(CONFIG_PATH.read_text())

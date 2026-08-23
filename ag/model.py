@@ -131,6 +131,11 @@ class OllamaClient:
         import urllib.error
         import urllib.request
 
+        # Merge tuned options (num_ctx, num_gpu, temperature, ...) from config; the
+        # answer-length cap always wins. keep_alive keeps the model resident across
+        # the pipeline's 3-4 calls per run, avoiding costly reloads (big latency win).
+        options = dict(getattr(cfg, "ollama_options", {}) or {})
+        options["num_predict"] = max_tokens or cfg.max_output_tokens
         payload = {
             "model": self._model,
             "messages": [
@@ -138,7 +143,8 @@ class OllamaClient:
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "options": {"num_predict": max_tokens or cfg.max_output_tokens},
+            "keep_alive": getattr(cfg, "ollama_keep_alive", "30m"),
+            "options": options,
         }
         req = urllib.request.Request(
             f"{self._host}/api/chat",
