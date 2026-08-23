@@ -23,6 +23,8 @@ class Config:
     model: str = "claude-opus-5"
     ollama_model: str = "llama3.1"            # used when backend == ollama
     ollama_host: str = "http://localhost:11434"
+    ollama_keep_alive: str = "30m"            # keep the model resident between calls
+    ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     effort: str = "high"                      # low | medium | high | xhigh | max
     max_output_tokens: int = 32000            # main answer generation
     meta_output_tokens: int = 16000           # optimizer / critic / evolve calls

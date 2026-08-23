@@ -209,6 +209,27 @@ def cmd_setup_ollama(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    from . import update
+    cfg = Config.load()
+    model = args.model or cfg.ollama_model
+    status = update.check_model_update(cfg, model)
+    print(f"model:  {model}")
+    print(f"status: {status.state} — {status.reason}")
+    if args.apply:
+        if status.state == "up-to-date":
+            print("already up to date; nothing to pull.")
+            return 0
+        print(f"pulling {model} ...")
+        ok, final = update.pull_model(cfg, model,
+                                      emit=lambda ev: print("  " + ev["msg"]))
+        print(("updated: " if ok else "failed: ") + final)
+        return 0 if ok else 1
+    if status.available:
+        print("a newer build is available — run `ag update --apply` to update now.")
+    return 0
+
+
 def cmd_ingest(args) -> int:
     from . import ingest
     cfg = Config.load()
@@ -293,6 +314,13 @@ def build_parser() -> argparse.ArgumentParser:
     so.add_argument("--host", default=None,
                     help="ollama host URL (default http://localhost:11434)")
     so.set_defaults(func=cmd_setup_ollama)
+
+    up = sub.add_parser("update",
+                        help="check/apply an Ollama model update (on demand, no polling)")
+    up.add_argument("--apply", action="store_true", help="pull the newer build now")
+    up.add_argument("--model", default=None,
+                    help="model tag to check (default: config ollama_model)")
+    up.set_defaults(func=cmd_update)
 
     ing = sub.add_parser("ingest",
                          help="distill a claude.ai data export into your profile")

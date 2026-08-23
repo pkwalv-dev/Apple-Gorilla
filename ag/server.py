@@ -61,9 +61,19 @@ PAGE = """<!doctype html>
  .pill{font-size:.72rem;padding:1px 7px;border-radius:20px;border:1px solid var(--bd)}
  .pill.available{color:var(--res)} .pill.degraded{color:#f59e0b}
  .pill.unavailable{color:var(--muted)}
+ #update{display:none;margin-top:10px;padding:10px 12px;border:1px solid #f59e0b;
+   border-radius:8px;background:#f59e0b22;align-items:center;gap:10px}
+ #update .g{flex:1;font-size:.9rem}
+ #update button{padding:6px 12px}
+ #update .yes{background:#f59e0b;color:#000;border-color:#f59e0b}
 </style></head><body>
 <h1>🦍 Apple-Gorilla</h1>
 <div class="meta" id="status">ready</div>
+<div id="update" class="row">
+  <span class="g" id="updmsg"></span>
+  <button class="yes" onclick="applyUpdate()">Yes, update</button>
+  <button onclick="document.getElementById('update').style.display='none'">No</button>
+</div>
 <textarea id="p" placeholder="Ask AG anything..."></textarea>
 <div class="row" style="margin-top:8px">
   <button class="primary" id="runbtn" onclick="go()">Run</button>
@@ -126,6 +136,7 @@ function handle(ev){
     const d=ev.data||{}; $('answer').textContent=d.answer||'(no answer)';
     $('status').textContent='done · '+(d.iterations||0)+' iter · '+(d.elapsed_s||0)+'s'
       +(d.dry_run?' · dry-run':'');
+    checkUpdate();   // one on-demand check AFTER the run — never a background poll
     return;
   }
   addEv(ev);
@@ -133,6 +144,32 @@ function handle(ev){
   if(sc){ $('cards').style.display='flex';
     setCard('acc',sc.accuracy); setCard('qual',sc.quality);
     setCard('spd',sc.speed); setCard('ovr',sc.overall); }
+}
+async function checkUpdate(){
+  try{
+    const s=await (await fetch('/update/check')).json();
+    if(s.available){
+      $('updmsg').textContent='A newer build of '+s.model+' is available. Update now?';
+      $('update').style.display='flex';
+    }
+  }catch(e){ /* check is best-effort; stay silent on failure */ }
+}
+async function applyUpdate(){
+  $('update').style.display='none';
+  addEv({stage:'update',level:'tool',msg:'starting model update…'});
+  try{
+    const r=await fetch('/update/apply',{method:'POST'});
+    const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    while(true){
+      const {value,done}=await reader.read(); if(done)break;
+      buf+=dec.decode(value,{stream:true}); let nl;
+      while((nl=buf.indexOf('\\n'))>=0){
+        const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+        if(!line)continue; const ev=JSON.parse(line);
+        addEv(ev.stage==='done'?{stage:'update',level:ev.level,msg:'update: '+ev.msg}:ev);
+      }
+    }
+  }catch(e){ addEv({stage:'error',level:'error',msg:'update failed: '+e}); }
 }
 async function loadTools(){
   const t=$('tools');
@@ -178,10 +215,18 @@ class _Handler(BaseHTTPRequestHandler):
             from . import inventory
             self._send(200, json.dumps(inventory.summary(self.cfg)),
                        "application/json")
+        elif self.path == "/update/check":
+            # On-demand (the page pings this once after a run). Never polled.
+            from . import update
+            status = update.check_model_update(self.cfg)
+            self._send(200, json.dumps(status.as_dict()), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
+        if self.path == "/update/apply":
+            self._stream_update()
+            return
         if self.path != "/run":
             self._send(404, "not found", "text/plain")
             return
@@ -197,8 +242,8 @@ class _Handler(BaseHTTPRequestHandler):
         want_web = payload.get("web", None)
         self._stream_run(prompt, want_web)
 
-    def _stream_run(self, prompt: str, want_web):
-        """Run the pipeline, streaming each stage event as one NDJSON line."""
+    def _ndjson_writer(self):
+        """Begin a streamed NDJSON response and return a write(event) callback."""
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -208,7 +253,31 @@ class _Handler(BaseHTTPRequestHandler):
         def write(ev: dict) -> None:
             self.wfile.write((json.dumps(ev) + "\n").encode("utf-8"))
             self.wfile.flush()
+        return write
 
+    def _stream_update(self):
+        """Pull/update the configured Ollama model, streaming progress (user-approved
+        via the page's yes/no click — this endpoint only runs on an explicit POST)."""
+        from . import update
+        write = self._ndjson_writer()
+        cfg = self.cfg
+        try:
+            write({"stage": "update", "level": "tool",
+                   "msg": f"updating {cfg.ollama_model}…", "data": {}})
+            ok, final = update.pull_model(cfg, emit=write)
+            write({"stage": "done", "level": "result" if ok else "error",
+                   "msg": final, "data": {"ok": ok, "final": final}})
+        except (BrokenPipeError, ConnectionError):
+            return
+        except Exception as e:
+            try:
+                write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
+            except Exception:
+                pass
+
+    def _stream_run(self, prompt: str, want_web):
+        """Run the pipeline, streaming each stage event as one NDJSON line."""
+        write = self._ndjson_writer()
         cfg = self.cfg
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
         broker = _build_broker(cfg) if web_eff else None

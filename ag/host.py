@@ -49,6 +49,27 @@ def _ram_gb() -> Optional[float]:
             return round(int(out.stdout.strip()) / 1e9, 1)
     except Exception:
         pass
+    if platform.system() == "Windows":  # GlobalMemoryStatusEx via stdlib ctypes
+        try:
+            import ctypes
+
+            class _MEMSTAT(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            stat = _MEMSTAT()
+            stat.dwLength = ctypes.sizeof(_MEMSTAT)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return round(stat.ullTotalPhys / 1e9, 1)
+        except Exception:
+            pass
     return None
 
 

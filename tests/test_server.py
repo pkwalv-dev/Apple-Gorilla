@@ -15,6 +15,12 @@ def test_page_has_realtime_log_and_scorecard_ui():
         assert hook in server.PAGE, f"GUI missing {hook!r}"
 
 
+def test_page_has_update_banner_and_check():
+    # The one-click yes/no model-update flow must be wired into the page.
+    for hook in ("id=\"update\"", "/update/check", "applyUpdate", "/update/apply"):
+        assert hook in server.PAGE, f"update UI missing {hook!r}"
+
+
 def test_build_broker_respects_allow_web():
     on = Config(); on.allow_web = True
     off = Config(); off.allow_web = False
