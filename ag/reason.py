@@ -1,0 +1,159 @@
+"""A bounded reasoning + tool-use loop (the 'reason and act' capability).
+
+Given a task, AG can think, call a tool, observe the result, and continue — up to
+`max_tool_steps` — before answering. This is what lets it *do* things (compute,
+read files, run code, use memory) instead of only rewriting text. It degrades
+gracefully: if the model calls no tool, the loop just returns its answer, so a weak
+local model is never worse off than the plain single-shot path.
+
+Protocol (kept simple and forgiving for small models): each turn the model returns
+EITHER a JSON action `{"tool": "<name>", "args": {...}}` OR a final answer. We parse
+the first JSON object that carries a "tool" key; anything else is treated as final.
+
+Every tool call goes through the PermissionBroker, so a tool the user hasn't granted
+simply isn't offered. Tools are described to the model based on what's actually
+available this run.
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional
+
+from .config import Config
+from .model import extract_json
+from .tools import local
+
+
+@dataclass
+class Tool:
+    name: str
+    arg: str                      # the single primary argument key
+    grant: Optional[str]          # broker capability required, or None
+    desc: str
+    run: Callable[..., str]
+
+
+def _registry() -> List[Tool]:
+    return [
+        Tool("calc", "expr", None,
+             'exact arithmetic, e.g. {"tool":"calc","args":{"expr":"(17*23)-4"}}',
+             lambda args, broker: local.calc(str(args.get("expr", "")))),
+        Tool("recall", "query", None,
+             'search AG memory, e.g. {"tool":"recall","args":{"query":"my timezone"}}',
+             lambda args, broker: local.memory_recall(str(args.get("query", "")))),
+        Tool("remember", "text", None,
+             'save a durable fact, e.g. {"tool":"remember","args":{"text":"User prefers metric units"}}',
+             lambda args, broker: local.memory_remember(str(args.get("text", "")))),
+        Tool("read_file", "path", "filesystem_read",
+             'read a local file, e.g. {"tool":"read_file","args":{"path":"./README.md"}}',
+             lambda args, broker: local.read_file(str(args.get("path", "")), broker=broker)),
+        Tool("list_dir", "path", "filesystem_read",
+             'list a directory, e.g. {"tool":"list_dir","args":{"path":"."}}',
+             lambda args, broker: local.list_dir(str(args.get("path", ".")), broker=broker)),
+        Tool("python_exec", "code", "code_exec",
+             'run a short Python snippet (print results), '
+             'e.g. {"tool":"python_exec","args":{"code":"print(sum(range(10)))"}}',
+             lambda args, broker: local.python_exec(str(args.get("code", "")), broker=broker)),
+    ]
+
+
+def available_tools(broker) -> List[Tool]:
+    """Only tools whose grant is held (or that need none) are offered this run."""
+    out = []
+    for t in _registry():
+        if t.grant is None or (broker is not None and broker.check(t.grant)):
+            out.append(t)
+    return out
+
+
+def _tools_system(base_system: str, tools: List[Tool]) -> str:
+    catalog = "\n".join(f"- {t.name}: {t.desc}" for t in tools)
+    return (
+        f"{base_system}\n\n"
+        "# Tools\n"
+        "You can use tools to compute or look things up before answering. To call a "
+        "tool, reply with ONLY a JSON object:\n"
+        '  {"tool": "<name>", "args": {...}}\n'
+        "You will then receive an OBSERVATION and may call another tool or answer. "
+        "When you have enough to respond, reply with your final answer as plain text "
+        "(no JSON). Prefer a tool over guessing at arithmetic or file contents.\n\n"
+        f"Available tools:\n{catalog}"
+    )
+
+
+def _parse_action(text: str, tools: List[Tool]) -> Optional[dict]:
+    """Return {'tool','args'} if the model emitted a valid tool call, else None."""
+    names = {t.name for t in tools}
+    # Scan every JSON-ish object; take the first that names a known tool.
+    for m in re.finditer(r"\{.*?\}", text, re.DOTALL):
+        try:
+            obj = json.loads(m.group(0))
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("tool") in names:
+            return {"tool": obj["tool"], "args": obj.get("args", {}) or {}}
+    # Fallback: a single fenced/bare object via extract_json.
+    obj = extract_json(text)
+    if isinstance(obj, dict) and obj.get("tool") in names:
+        return {"tool": obj["tool"], "args": obj.get("args", {}) or {}}
+    return None
+
+
+@dataclass
+class ReasonResult:
+    answer: str
+    steps: List[dict] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+def solve(client, cfg: Config, *, system: str, user: str, broker=None,
+          emit=None, max_steps: Optional[int] = None) -> ReasonResult:
+    """Run the reason→act→observe loop and return the final answer + trace."""
+    from .pipeline import _emit  # reuse the pipeline's safe emitter
+    tools = available_tools(broker)
+    if not tools:  # nothing to use — behave like a normal single call
+        res = client.complete(system=system, user=user, cfg=cfg)
+        return ReasonResult(res.text, [], res.input_tokens, res.output_tokens)
+
+    max_steps = cfg.max_tool_steps if max_steps is None else max_steps
+    by_name = {t.name: t for t in tools}
+    sys_p = _tools_system(system, tools)
+    transcript = f"# Task\n{user}\n"
+    steps: List[dict] = []
+    tin = tout = 0
+
+    for _ in range(max(1, max_steps)):
+        res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg)
+        tin += res.input_tokens
+        tout += res.output_tokens
+        action = _parse_action(res.text, tools)
+        if not action:
+            return ReasonResult(res.text.strip(), steps, tin, tout)  # final answer
+        tool = by_name[action["tool"]]
+        _emit(emit, "reason", f"tool: {tool.name}({_short(action['args'])})",
+              level="tool")
+        try:
+            observation = tool.run(action["args"], broker)
+        except Exception as e:  # a denied/failed tool must not kill the loop
+            observation = f"{tool.name} error: {e}"
+        _emit(emit, "reason", f"observation: {_short(observation)}", level="result")
+        steps.append({"tool": tool.name, "args": action["args"],
+                      "observation": observation[:500]})
+        transcript += (f"\nACTION: {json.dumps(action)}\nOBSERVATION: {observation}\n")
+
+    # Steps exhausted — force a final answer from what we've gathered.
+    res = client.complete(
+        system=system,
+        user=transcript + "\nUsing the observations above, give your final answer.",
+        cfg=cfg)
+    return ReasonResult(res.text.strip(), steps, tin + res.input_tokens,
+                        tout + res.output_tokens)
+
+
+def _short(x, n: int = 80) -> str:
+    s = x if isinstance(x, str) else json.dumps(x)
+    s = s.replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "…"
