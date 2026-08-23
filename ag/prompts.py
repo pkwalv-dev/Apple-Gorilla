@@ -42,9 +42,18 @@ original request and the intelligence principles provided. Judge four axes:
 
 Be a demanding but fair reviewer. Do not rewrite the answer yourself here.
 
+Score TWO axes independently on a 0-10 scale:
+- "accuracy": factual correctness and verifiability (axis 1 above). Penalise
+  unverifiable or fabricated claims hard.
+- "quality": fidelity to the request + judgment/usefulness + appropriate form
+  (axes 2-4 above), setting aside raw factual accuracy.
+(AG measures a third axis, speed, itself — do not attempt to judge it.)
+
 Return ONLY a JSON object:
 {
-  "score": <float 0-10>,
+  "accuracy": <float 0-10>,
+  "quality": <float 0-10>,
+  "score": <float 0-10, your overall impression>,
   "verdict": "pass" | "revise",
   "issues": ["specific problem", ...],
   "fixes": ["concrete, actionable instruction to improve", ...],
