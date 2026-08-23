@@ -30,8 +30,7 @@ class Config:
     critic_pass_threshold: float = 8.0        # 0..10; at/above this we stop iterating
     autonomy_level: str = "guarded"           # manual | guarded | never
     allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
-    allow_web: bool = True                     # AG's permanent, egress-only internet
-    egress_only: bool = True                   # AG opens no inbound listeners, ever
+    allow_web: bool = True                     # AG's standing internet access
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main

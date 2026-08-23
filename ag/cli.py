@@ -103,8 +103,8 @@ def cmd_doctor(args) -> int:
     oauth = has_oauth_profile()
     print(f"API credentials:  {'present' if has_key else 'missing'}")
     print(f"OAuth profile:    {'present (ant auth login)' if oauth else 'none'}")
-    print(f"internet (web):   {'ON (egress-only)' if cfg.allow_web else 'off'}"
-          f"  | inbound listeners: none")
+    print(f"internet (web):   {'ON' if cfg.allow_web else 'off'}"
+          f"  | web app: run `ag serve`")
     try:
         import anthropic  # noqa: F401
         print("anthropic SDK:    installed")
@@ -138,6 +138,12 @@ def cmd_profile(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    from . import server
+    server.serve(host=args.host, port=args.port, open_browser=args.open)
+    return 0
+
+
 def cmd_host(args) -> int:
     from . import host
     info = host.inspect()
@@ -148,9 +154,8 @@ def cmd_host(args) -> int:
     print(f"  gpu:        {info.gpu}")
     print(f"  disk free:  {info.disk_free_gb if info.disk_free_gb else '?'} GB")
     print(f"  internet:   {'reachable' if info.internet else 'not reachable'}")
-    print("network posture:")
-    print("  egress-only: AG makes outbound requests; opens NO inbound listeners")
-    print("  no telemetry: only traffic is AG's own model + web requests")
+    print("network: AG makes outbound requests; `ag serve` adds a local web UI.")
+    print("no telemetry: AG only makes requests you or the pipeline initiate.")
     return 0
 
 
@@ -235,6 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_profile)
     sub.add_parser("host", help="inspect host resources + network posture").set_defaults(
         func=cmd_host)
+
+    sv = sub.add_parser("serve", help="run the browser web app (any OS / phone)")
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="127.0.0.1 (local only) or 0.0.0.0 (reachable from phone/LAN)")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--open", action="store_true", help="open a browser on start")
+    sv.set_defaults(func=cmd_serve)
 
     so = sub.add_parser("setup-ollama",
                         help="switch config to the local Ollama backend")

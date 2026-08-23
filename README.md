@@ -29,6 +29,31 @@ AG does **not** imitate your writing. It reads `profile/principles.md` and
 converges on your bar through underlying principles and iteration — evolutionary, not
 imitative. **Fill in `profile/about_me.md`** to calibrate it to you.
 
+## Run it as an app (any OS, phone included)
+
+AG ships a built-in web UI — cross-platform by being a web page, no packaging.
+
+```bash
+python -m ag serve --open              # local web app in your browser
+python -m ag serve --host 0.0.0.0      # also reachable from your phone on the same wifi
+```
+
+One-command install + launch (clones, checks, points at Ollama, starts the app):
+
+```powershell
+# Windows
+iwr https://raw.githubusercontent.com/pkwalv-dev/Apple-Gorilla/main/scripts/install.ps1 | iex
+```
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/pkwalv-dev/Apple-Gorilla/main/scripts/install.sh | bash
+```
+
+A truly native installer for every desktop *and* mobile OS isn't one command (mobile
+can't run a Python CLI). The web app is the universal answer: run it on one machine,
+open it from any browser — laptop or phone. The pipeline, profile principles, and
+self-improvement are identical to the CLI.
+
 ## Quick start
 
 ```bash
