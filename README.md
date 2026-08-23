@@ -119,7 +119,7 @@ python -m ag --backend ollama run "your prompt"
 ```
 
 Ollama needs no account or key and runs fully offline. AG talks to it over
-`http://localhost:11434` (override with `ollama_host`); the whole optimize → critique →
+`http://127.0.0.1:11434` (override with `ollama_host`); the whole optimize → critique →
 iterate loop is identical — only the model changes. Local quality tracks the model you
 pull, and is a weight class below Claude.
 
