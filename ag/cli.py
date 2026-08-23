@@ -46,10 +46,12 @@ def cmd_run(args) -> int:
         print("=== ANSWER ===")
     print(rec.answer)
     if args.verbose:
-        last = rec.critiques[-1] if rec.critiques else {}
-        print(f"\n[meta] iterations={rec.iterations} "
-              f"score={last.get('score','?')} elapsed={rec.elapsed_s}s "
+        sc = rec.scorecard or {}
+        print(f"\n[meta] iterations={rec.iterations} elapsed={rec.elapsed_s}s "
               f"dry_run={rec.dry_run}", file=sys.stderr)
+        print(f"[score] overall={sc.get('overall','?')} "
+              f"accuracy={sc.get('accuracy','?')} quality={sc.get('quality','?')} "
+              f"speed={sc.get('speed','?')}", file=sys.stderr)
     return 0
 
 
@@ -312,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     so.add_argument("--model", default=None,
                     help="ollama model tag (e.g. qwen2.5:14b, llama3.1:8b)")
     so.add_argument("--host", default=None,
-                    help="ollama host URL (default http://localhost:11434)")
+                    help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
 
     up = sub.add_parser("update",
