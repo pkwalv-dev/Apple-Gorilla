@@ -83,6 +83,7 @@ python -m ag run "<prompt>" [--verbose] [--show-prompt] [--model claude-opus-5]
 python -m ag ingest <export>   # distill a claude.ai data export into your profile
 python -m ag evolve            # attempt a test-gated self-improvement
 python -m ag tools [-v|--json] # inventory tools/apps + integration & friction ratings
+python -m ag update [--apply]  # check/pull a newer Ollama model build (on demand)
 python -m ag versions          # list source snapshots
 python -m ag rollback <id>     # restore a snapshot instantly
 python -m ag profile           # show the loaded intelligence principles
@@ -121,6 +122,18 @@ Ollama needs no account or key and runs fully offline. AG talks to it over
 `http://localhost:11434` (override with `ollama_host`); the whole optimize → critique →
 iterate loop is identical — only the model changes. Local quality tracks the model you
 pull, and is a weight class below Claude.
+
+**Tuning for your GPU.** VRAM is the binding constraint — a model that fits entirely in the
+GPU runs at full speed. AG sends `ollama_keep_alive` (default `30m`, keeps the model
+resident across a run's 3–4 calls) and an `ollama_options` passthrough (`num_ctx`,
+`num_gpu`, …). See **[docs/OLLAMA.md](docs/OLLAMA.md)** for the efficient-build guide,
+including a per-VRAM sizing table and a recommended `config.json`.
+
+**Keeping the model current — on demand, one click.** Model tags get republished; AG checks
+whether a newer build exists by comparing manifest digests (no download) and *proposes* an
+update — it never polls in the background and never pulls without approval. The web app asks
+once after a run with a **Update now? Yes/No** button; the CLI equivalent is `ag update`
+(check) / `ag update --apply` (pull).
 
 ## Running on another machine (e.g. a desktop with a GPU)
 
