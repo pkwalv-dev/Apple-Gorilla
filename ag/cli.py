@@ -141,6 +141,35 @@ def cmd_profile(args) -> int:
     return 0
 
 
+def cmd_tools(args) -> int:
+    from . import inventory
+    cfg = Config.load()
+    data = inventory.summary(cfg)
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+        return 0
+    c = data["counts"]
+    print("AG tool & app inventory (integration = how wired-in; "
+          "friction = 10 is frictionless):\n")
+    print(f"  {'TOOL':<32} {'CATEGORY':<11} {'STATUS':<12} INTEG  FRICTION")
+    print(f"  {'-'*32} {'-'*11} {'-'*12} -----  --------")
+    for t in data["tools"]:
+        print(f"  {t['name']:<32} {t['category']:<11} {t['status']:<12} "
+              f"{t['integration']:>4}   {t['friction']:>6}")
+    print(f"\n  {c['available']} available · {c['degraded']} degraded · "
+          f"{c['unavailable']} unavailable  |  "
+          f"avg integration {data['avg_integration']}, "
+          f"avg friction {data['avg_friction']}")
+    if data["highest_friction_wired"]:
+        print(f"  highest-friction wired tool (best evolve target): "
+              f"{data['highest_friction_wired']}")
+    if args.verbose:
+        print("\nnotes:")
+        for t in data["tools"]:
+            print(f"  - {t['name']}: {t['notes']}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from . import server
     server.serve(host=args.host, port=args.port, open_browser=args.open)
@@ -241,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_doctor)
     sub.add_parser("profile", help="show loaded intelligence principles").set_defaults(
         func=cmd_profile)
+
+    tl = sub.add_parser("tools",
+                        help="inventory tools/apps AG can use + integration/friction")
+    tl.add_argument("--json", action="store_true", help="emit the raw inventory JSON")
+    tl.add_argument("--verbose", "-v", action="store_true", help="include notes")
+    tl.set_defaults(func=cmd_tools)
     sub.add_parser("host", help="inspect host resources + network posture").set_defaults(
         func=cmd_host)
 
