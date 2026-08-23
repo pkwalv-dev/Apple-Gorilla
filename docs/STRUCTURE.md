@@ -12,7 +12,9 @@ Apple-Gorilla/
 ├── conftest.py            makes `ag` importable in tests
 ├── docs/
 │   ├── STRUCTURE.md        this file
-│   └── MODALITY.md         web app vs. other modalities — analysis + recommendation
+│   ├── MODALITY.md         web app vs. other modalities — analysis + recommendation
+│   ├── MCP.md              what an MCP server is + how AG would use one
+│   └── OLLAMA.md           efficient Ollama build guide (VRAM sizing, keep-alive, ctx)
 ├── ag/                    the package
 │   ├── __main__.py / cli.py    entry point + commands
 │   ├── config.py               config + paths
@@ -20,6 +22,7 @@ Apple-Gorilla/
 │   ├── pipeline.py             optimize → execute → critique → iterate (+ live events)
 │   ├── scoring.py              accuracy/quality/speed scorecard (directs evolution)
 │   ├── inventory.py            tool/app inventory + integration & friction ratings
+│   ├── update.py               on-demand Ollama model update check + pull (no polling)
 │   ├── server.py               built-in web app: streaming realtime log + scorecard
 │   ├── prompts.py         [evolvable] the meta-prompts (AG's "brain")
 │   ├── profile.py              loads the user principles
@@ -50,7 +53,7 @@ Apple-Gorilla/
    These enforce the gate, the rollback, and egress-only. Load-bearing — keep them out.
 
 3. **Orchestration** — the wiring: `pipeline.py`, `cli.py`, `agents.py`, `server.py`,
-   `scoring.py`, `inventory.py`. Not evolvable (they run the loop and score it).
+   `scoring.py`, `inventory.py`, `update.py`. Not evolvable (they run the loop and score it).
 
 4. **Generated state** — everything AG produces at runtime: `state/`. Bounded and
    git-ignored; see below.
