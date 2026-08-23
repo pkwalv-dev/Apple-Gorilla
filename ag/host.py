@@ -5,9 +5,9 @@ size the local model to the GPU, confirm it has outbound connectivity. This is
 *use* of the host's own resources for AG's legitimate work — it does not touch other
 devices, network infrastructure, or anything AG doesn't own on this box.
 
-Network posture: AG is EGRESS-ONLY. It opens no listening sockets and runs no server,
-so nothing can connect *to* it. The connectivity check below is a single outbound
-probe AG makes about itself; it accepts no inbound traffic and emits no telemetry.
+Network: AG makes outbound requests for its work. `ag serve` optionally opens a local
+web UI (an inbound port) for your own use. AG emits no telemetry — it only makes the
+requests you or the pipeline initiate. The connectivity check below is one such probe.
 """
 from __future__ import annotations
 

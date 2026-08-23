@@ -11,7 +11,6 @@
   "autonomy_level": "guarded",
   "allow_external_tools": false,
   "allow_web": true,
-  "egress_only": true,
   "max_snapshots": 20,
   "max_runs": 100,
   "evolve_branch": "ag/evolve",

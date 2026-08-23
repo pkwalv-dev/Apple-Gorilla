@@ -38,7 +38,6 @@ def test_has_internet_false(monkeypatch):
     assert host.has_internet(timeout=0.1) is False
 
 
-def test_permanent_egress_only_defaults():
+def test_web_on_by_default():
     c = Config()
-    assert c.allow_web is True        # permanent internet for AG's own requests
-    assert c.egress_only is True      # no inbound listeners
+    assert c.allow_web is True        # standing internet access
