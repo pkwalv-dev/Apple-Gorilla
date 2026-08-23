@@ -28,6 +28,10 @@ class Config:
     meta_output_tokens: int = 16000           # optimizer / critic / evolve calls
     max_iterations: int = 2                   # critique->revise rounds
     critic_pass_threshold: float = 8.0        # 0..10; at/above this we stop iterating
+    speed_budget_s: float = 30.0              # target wall-clock for a full speed score
+    score_weights: dict = field(default_factory=lambda: {  # directed-evolution axes
+        "accuracy": 0.5, "quality": 0.3, "speed": 0.2,
+    })
     autonomy_level: str = "guarded"           # manual | guarded | never
     allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
     allow_web: bool = True                     # AG's standing internet access

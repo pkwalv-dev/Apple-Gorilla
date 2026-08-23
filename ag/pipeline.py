@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
 
-from . import prompts
+from . import prompts, scoring
 from .config import Config, RUNS_DIR, ensure_dirs
 from .model import ModelResult, extract_json
 from .profile import load_principles, load_user_context
@@ -24,6 +24,8 @@ class Critique:
     issues: List[str] = field(default_factory=list)
     fixes: List[str] = field(default_factory=list)
     notes: str = ""
+    accuracy: float = 0.0     # 0..10; falls back to `score` if critic omits it
+    quality: float = 0.0      # 0..10; falls back to `score` if critic omits it
 
 
 @dataclass
@@ -38,6 +40,7 @@ class RunRecord:
     input_tokens: int = 0
     output_tokens: int = 0
     run_id: str = ""
+    scorecard: dict = field(default_factory=dict)  # accuracy/quality/speed/overall
 
 
 def _split_engineered(text: str) -> tuple[str, str]:
@@ -85,13 +88,27 @@ def critique(client, cfg: Config, raw_prompt: str, answer: str) -> Critique:
     res = client.complete(system=prompts.CRITIC_SYSTEM, user=user, cfg=cfg,
                           max_tokens=cfg.meta_output_tokens)
     data = extract_json(res.text) or {}
+    score = _as_float(data.get("score", 0.0))
+    # Sub-scores are newer; older critics (and the dry-run stub) only emit `score`,
+    # so fall back to it to stay backward compatible.
+    accuracy = _as_float(data.get("accuracy", score))
+    quality = _as_float(data.get("quality", score))
     return Critique(
-        score=float(data.get("score", 0.0)),
+        score=score,
         verdict=str(data.get("verdict", "revise")),
         issues=list(data.get("issues", [])),
         fixes=list(data.get("fixes", [])),
         notes=str(data.get("notes", "")),
+        accuracy=accuracy,
+        quality=quality,
     )
+
+
+def _as_float(x, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
 
 
 def revise(client, cfg: Config, engineered_system: str, answer: str,
@@ -166,12 +183,22 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
 
     critiques: List[dict] = []
     iterations = 0
+    last_crit: Optional[Critique] = None
     for i in range(cfg.max_iterations):
         crit = critique(client, cfg, raw_prompt, answer)
         critiques.append(asdict(crit))
+        last_crit = crit
+        # Gate on the answer-quality blend (accuracy+quality), not speed — iterating
+        # for correctness should never be discouraged by the clock.
+        answer_q = scoring.build_scorecard(
+            accuracy=crit.accuracy, quality=crit.quality, elapsed_s=0.0,
+            output_tokens=0, budget_s=cfg.speed_budget_s,
+            weights=cfg.score_weights,
+        ).answer_score
         if verbose:
-            print(f"[critique {i+1}] score={crit.score} verdict={crit.verdict}")
-        if crit.verdict == "pass" or crit.score >= cfg.critic_pass_threshold:
+            print(f"[critique {i+1}] acc={crit.accuracy} qual={crit.quality} "
+                  f"answer={answer_q} verdict={crit.verdict}")
+        if crit.verdict == "pass" or answer_q >= cfg.critic_pass_threshold:
             break
         rev = revise(client, cfg, eng_sys, answer, crit)
         answer = rev.text
@@ -179,17 +206,29 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         total_out += rev.output_tokens
         iterations += 1
 
+    elapsed = round(time.time() - t0, 3)
+    # Final scorecard blends the judged axes with the *measured* speed axis.
+    if last_crit is not None:
+        card = scoring.build_scorecard(
+            accuracy=last_crit.accuracy, quality=last_crit.quality,
+            elapsed_s=elapsed, output_tokens=total_out,
+            budget_s=cfg.speed_budget_s, weights=cfg.score_weights,
+        )
+    else:
+        card = scoring.Scorecard(elapsed_s=elapsed, output_tokens=total_out)
+
     rec = RunRecord(
         raw_prompt=raw_prompt,
         engineered_prompt=f"SYSTEM:\n{eng_sys}\n\nUSER:\n{eng_user}",
         answer=answer,
         iterations=iterations,
         critiques=critiques,
-        elapsed_s=round(time.time() - t0, 3),
+        elapsed_s=elapsed,
         dry_run=getattr(exec_res, "dry_run", False),
         input_tokens=total_in,
         output_tokens=total_out,
         run_id=time.strftime("%Y%m%d-%H%M%S"),
+        scorecard=card.as_dict(),
     )
     _persist(rec)
     _prune_runs(cfg.max_runs)
