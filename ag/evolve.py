@@ -50,8 +50,33 @@ def _read_evolvable(cfg: Config) -> dict:
     return files
 
 
+GATE_MISSING_MSG = (
+    "pytest not installed — the self-improvement gate cannot verify changes. "
+    "Install it: pip install pytest  (or pip install -r requirements.txt)"
+)
+
+
+def gate_available() -> bool:
+    """True if the test gate can actually run.
+
+    The suite relies on pytest fixtures (`tmp_path`, `monkeypatch`) and
+    `pytest.raises`, so plain `unittest` cannot execute it — pytest is a hard
+    requirement of the gate, not an optional accelerator. We detect it up front
+    so the gate can fail CLOSED with an actionable message instead of silently
+    rolling every candidate back on a cryptic "No module named pytest".
+    """
+    import importlib.util
+    return importlib.util.find_spec("pytest") is not None
+
+
 def run_tests() -> tuple[bool, str]:
-    """Run the test suite in a subprocess. Passing tests gate adoption."""
+    """Run the test suite in a subprocess. Passing tests gate adoption.
+
+    Fails closed: if the gate can't run (pytest missing, no tests collected,
+    timeout, crash), it reports failure so AG never adopts unverified code.
+    """
+    if not gate_available():
+        return False, GATE_MISSING_MSG
     try:
         r = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--no-header"],
@@ -61,16 +86,6 @@ def run_tests() -> tuple[bool, str]:
         if r.returncode == 5:
             return False, "no tests collected — refusing to adopt unverified change"
         return r.returncode == 0, (r.stdout + r.stderr)[-4000:]
-    except FileNotFoundError:
-        # pytest not installed: fall back to import + unittest smoke.
-        try:
-            r = subprocess.run(
-                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"],
-                cwd=ROOT, capture_output=True, text=True, timeout=300,
-            )
-            return r.returncode == 0, (r.stdout + r.stderr)[-4000:]
-        except Exception as e:  # pragma: no cover
-            return False, f"test runner unavailable: {e}"
     except subprocess.TimeoutExpired:
         return False, "tests timed out"
 
@@ -94,6 +109,12 @@ def evolve(client, cfg: Config, *, apply: bool = False,
            dry_run: bool = False) -> EvolveResult:
     if cfg.autonomy_level == "never":
         return EvolveResult(False, False, False, reason="autonomy_level=never")
+
+    # No usable test gate means no safe way to verify a self-edit. Bail out BEFORE
+    # spending a (possibly billed) model call, snapshotting, or touching the tree.
+    if not gate_available():
+        return EvolveResult(False, False, False,
+                            reason="gate unavailable: " + GATE_MISSING_MSG)
 
     evolvable = _read_evolvable(cfg)
     telemetry = recent_runs(limit=5)

@@ -1,1 +1,5 @@
+# Only needed for the `anthropic` backend (Ollama/dry-run need neither).
 anthropic>=0.40
+# Required for the test-gated self-improvement loop (`ag evolve`). The gate runs
+# this suite to verify every self-edit; without pytest, evolution fails closed.
+pytest>=7.0

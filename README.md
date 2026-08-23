@@ -182,6 +182,11 @@ use of the host's *own* resources for AG's work only.
 5. **Test** in a subprocess (`pytest`).
 6. **Adopt** (+ optional git commit) if green; **restore the snapshot** if not.
 
+The gate runs the suite with **pytest** (the tests use its fixtures), so `evolve`
+requires it — it ships in `requirements.txt` and the installers add it. If pytest is
+absent the gate **fails closed**: `evolve` refuses to run (rather than adopting
+unverified code), and `ag doctor` reports `evolve gate: UNAVAILABLE`.
+
 Autonomy is a dial in `config.json`:
 
 - `never` — evolution off.

@@ -21,6 +21,18 @@ python -m ag --dry-run run "install check" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "AG failed to run - check Python 3.10+ is installed" }
 Write-Host "AG installed OK" -ForegroundColor Green
 
+# 2b. Enable the self-improvement test gate (best-effort; ag evolve needs pytest).
+python -c "import pytest" 2>$null
+if ($LASTEXITCODE -eq 0) {
+  Write-Host "evolve gate: pytest present" -ForegroundColor Green
+} else {
+  Write-Host "installing pytest (self-improvement test gate)..."
+  python -m pip install -q pytest
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "could not install pytest - 'ag evolve' stays disabled until you: pip install pytest" -ForegroundColor Yellow
+  }
+}
+
 # 3. Point at Ollama and report readiness (pull the model if Ollama is present).
 python -m ag setup-ollama --model qwen2.5:7b | Out-Null
 if (Get-Command ollama -ErrorAction SilentlyContinue) {
