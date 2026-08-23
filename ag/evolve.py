@@ -42,6 +42,30 @@ class EvolveResult:
     reason: str = ""
 
 
+def _direction(cfg: Config, telemetry: list) -> dict:
+    """Summarise WHERE evolution should aim: the weakest quality axis across recent
+    runs, and the highest-friction tool that is actually wired. This is what makes
+    the loop *directed* rather than a blind edit."""
+    from . import inventory, scoring
+    cards = [r.get("scorecard") for r in telemetry if r.get("scorecard")]
+    inv = inventory.summary(cfg)
+    axis = scoring.weakest_axis(cards) if cards else "accuracy"
+    avg = {}
+    if cards:
+        for a in ("accuracy", "quality", "speed"):
+            vals = [float(c.get(a, 0.0)) for c in cards]
+            avg[a] = round(sum(vals) / len(vals), 2)
+    return {
+        "weakest_score_axis": axis,
+        "recent_axis_averages": avg,
+        "highest_friction_wired_tool": inv["highest_friction_wired"],
+        "avg_tool_friction": inv["avg_friction"],
+        "hint": "Prefer prompt/principle/config edits that lift '" + axis
+                + "'. Speed gains come from tighter prompts or fewer iterations; "
+                "accuracy from sharper critic/executor guidance.",
+    }
+
+
 def _read_evolvable(cfg: Config) -> dict:
     files = {}
     for rel in cfg.evolvable_paths:
@@ -118,13 +142,17 @@ def evolve(client, cfg: Config, *, apply: bool = False,
 
     evolvable = _read_evolvable(cfg)
     telemetry = recent_runs(limit=5)
+    briefing = _direction(cfg, telemetry)
 
     user = (
-        "# Recent run telemetry\n"
+        "# Directed-evolution briefing (aim your change here)\n"
+        + json.dumps(briefing, indent=2)
+        + "\n\n# Recent run telemetry (incl. accuracy/quality/speed scorecards)\n"
         + json.dumps(telemetry, indent=2)[:8000]
         + "\n\n# Current evolvable files\n"
         + json.dumps(evolvable, indent=2)[:12000]
-        + "\n\nPropose small, safe improvements per your rules."
+        + "\n\nPropose the single small, safe change most likely to raise the "
+        "weakest axis or reduce the highest tool friction, per your rules."
     )
     res = client.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
                           max_tokens=cfg.meta_output_tokens)
