@@ -26,6 +26,21 @@ def _client(args, cfg):
                        dry_run=getattr(args, "dry_run", False))
 
 
+def _make_broker(cfg, *, web: bool, tools: bool):
+    """Build a permission broker granting exactly what this run is allowed to use."""
+    if not (web or tools):
+        return None
+    from .permissions import PermissionBroker
+    broker = PermissionBroker(allow_external_tools=True)
+    if web:
+        broker.grant("network")
+    if tools:
+        # calc/recall/remember need no grant; these enable file + code tools.
+        broker.grant("filesystem_read")
+        broker.grant("code_exec")
+    return broker
+
+
 def cmd_run(args) -> int:
     cfg = Config.load()
     if args.model:
@@ -33,23 +48,28 @@ def cmd_run(args) -> int:
     client = _client(args, cfg)
     # Permanent internet is on via cfg.allow_web; --web / --no-web override per run.
     web_effective = cfg.allow_web if args.web is None else args.web
-    broker = None
-    if web_effective:
-        from .permissions import PermissionBroker
-        broker = PermissionBroker(allow_external_tools=True)
-        broker.grant("network")
+    tools_effective = cfg.allow_local_tools or getattr(args, "tools", False)
+    cfg.allow_local_tools = tools_effective
+    broker = _make_broker(cfg, web=web_effective, tools=tools_effective)
+    trace = None
+    if args.verbose:
+        def trace(ev):  # surface tool/memory/web activity live on stderr
+            if ev.get("stage") in ("reason", "memory", "web") or ev.get("level") == "error":
+                print(f"[{ev['stage']}] {ev['msg']}", file=sys.stderr)
     rec = run_pipeline(client, cfg, args.prompt, verbose=args.verbose,
-                       web=web_effective, broker=broker)
+                       web=web_effective, broker=broker, emit=trace)
     if args.show_prompt:
         print("=== ENGINEERED PROMPT ===")
         print(rec.engineered_prompt)
         print("=== ANSWER ===")
     print(rec.answer)
     if args.verbose:
-        last = rec.critiques[-1] if rec.critiques else {}
-        print(f"\n[meta] iterations={rec.iterations} "
-              f"score={last.get('score','?')} elapsed={rec.elapsed_s}s "
+        sc = rec.scorecard or {}
+        print(f"\n[meta] iterations={rec.iterations} elapsed={rec.elapsed_s}s "
               f"dry_run={rec.dry_run}", file=sys.stderr)
+        print(f"[score] overall={sc.get('overall','?')} "
+              f"accuracy={sc.get('accuracy','?')} quality={sc.get('quality','?')} "
+              f"speed={sc.get('speed','?')}", file=sys.stderr)
     return 0
 
 
@@ -141,6 +161,35 @@ def cmd_profile(args) -> int:
     return 0
 
 
+def cmd_tools(args) -> int:
+    from . import inventory
+    cfg = Config.load()
+    data = inventory.summary(cfg)
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+        return 0
+    c = data["counts"]
+    print("AG tool & app inventory (integration = how wired-in; "
+          "friction = 10 is frictionless):\n")
+    print(f"  {'TOOL':<32} {'CATEGORY':<11} {'STATUS':<12} INTEG  FRICTION")
+    print(f"  {'-'*32} {'-'*11} {'-'*12} -----  --------")
+    for t in data["tools"]:
+        print(f"  {t['name']:<32} {t['category']:<11} {t['status']:<12} "
+              f"{t['integration']:>4}   {t['friction']:>6}")
+    print(f"\n  {c['available']} available · {c['degraded']} degraded · "
+          f"{c['unavailable']} unavailable  |  "
+          f"avg integration {data['avg_integration']}, "
+          f"avg friction {data['avg_friction']}")
+    if data["highest_friction_wired"]:
+        print(f"  highest-friction wired tool (best evolve target): "
+              f"{data['highest_friction_wired']}")
+    if args.verbose:
+        print("\nnotes:")
+        for t in data["tools"]:
+            print(f"  - {t['name']}: {t['notes']}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from . import server
     server.serve(host=args.host, port=args.port, open_browser=args.open)
@@ -177,6 +226,48 @@ def cmd_setup_ollama(args) -> int:
     print("  3) ollama serve         (Windows: the installer runs it for you)")
     print("  4) python -m ag doctor  (should show ollama: reachable)")
     print('  5) python -m ag run "your prompt"')
+    return 0
+
+
+def cmd_memory(args) -> int:
+    from . import memory
+    if args.action == "add":
+        m = memory.remember(args.text or "", max_memories=Config.load().max_memories)
+        print(f"remembered: {m.text}" if m else "nothing to remember")
+    elif args.action == "recall":
+        hits = memory.recall(args.text or "", k=args.k)
+        if not hits:
+            print("(no relevant memories)")
+        for m in hits:
+            print(f"- {m.text}")
+    elif args.action == "list":
+        mems = memory.all_memories()
+        print(f"{len(mems)} memory item(s):")
+        for m in mems:
+            print(f"  [{m.id}] {m.text}")
+    elif args.action == "clear":
+        print(f"cleared {memory.clear()} memory item(s)")
+    return 0
+
+
+def cmd_update(args) -> int:
+    from . import update
+    cfg = Config.load()
+    model = args.model or cfg.ollama_model
+    status = update.check_model_update(cfg, model)
+    print(f"model:  {model}")
+    print(f"status: {status.state} — {status.reason}")
+    if args.apply:
+        if status.state == "up-to-date":
+            print("already up to date; nothing to pull.")
+            return 0
+        print(f"pulling {model} ...")
+        ok, final = update.pull_model(cfg, model,
+                                      emit=lambda ev: print("  " + ev["msg"]))
+        print(("updated: " if ok else "failed: ") + final)
+        return 0 if ok else 1
+    if status.available:
+        print("a newer build is available — run `ag update --apply` to update now.")
     return 0
 
 
@@ -223,6 +314,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force internet access on for this run")
     r.add_argument("--no-web", dest="web", action="store_false",
                    help="force internet access off for this run")
+    r.add_argument("--tools", action="store_true",
+                   help="enable local tools (calc/file-read/python-exec/memory) + "
+                        "the reasoning loop for this run")
     r.set_defaults(func=cmd_run)
 
     e = sub.add_parser("evolve", help="attempt a test-gated self-improvement")
@@ -241,6 +335,12 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_doctor)
     sub.add_parser("profile", help="show loaded intelligence principles").set_defaults(
         func=cmd_profile)
+
+    tl = sub.add_parser("tools",
+                        help="inventory tools/apps AG can use + integration/friction")
+    tl.add_argument("--json", action="store_true", help="emit the raw inventory JSON")
+    tl.add_argument("--verbose", "-v", action="store_true", help="include notes")
+    tl.set_defaults(func=cmd_tools)
     sub.add_parser("host", help="inspect host resources + network posture").set_defaults(
         func=cmd_host)
 
@@ -256,8 +356,21 @@ def build_parser() -> argparse.ArgumentParser:
     so.add_argument("--model", default=None,
                     help="ollama model tag (e.g. qwen2.5:14b, llama3.1:8b)")
     so.add_argument("--host", default=None,
-                    help="ollama host URL (default http://localhost:11434)")
+                    help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
+
+    mem = sub.add_parser("memory", help="AG's persistent memory (add/recall/list/clear)")
+    mem.add_argument("action", choices=["add", "recall", "list", "clear"])
+    mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
+    mem.add_argument("-k", type=int, default=5, help="recall: max items")
+    mem.set_defaults(func=cmd_memory)
+
+    up = sub.add_parser("update",
+                        help="check/apply an Ollama model update (on demand, no polling)")
+    up.add_argument("--apply", action="store_true", help="pull the newer build now")
+    up.add_argument("--model", default=None,
+                    help="model tag to check (default: config ollama_model)")
+    up.set_defaults(func=cmd_update)
 
     ing = sub.add_parser("ingest",
                          help="distill a claude.ai data export into your profile")

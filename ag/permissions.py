@@ -19,11 +19,13 @@ class PermissionError_(RuntimeError):
 GATED = {
     "browser",        # Chrome / web automation
     "network",        # arbitrary outbound HTTP (the model API itself is exempt)
+    "filesystem_read",   # reading local files/dirs via the tool layer
     "filesystem_write_outside_repo",
     "delete",         # any destructive deletion
     "send_message",   # email / chat / any outbound comms
     "spawn_agent",    # creating sub-agents
     "shell",          # running arbitrary shell commands
+    "code_exec",      # executing code (python_exec) in a subprocess
 }
 
 

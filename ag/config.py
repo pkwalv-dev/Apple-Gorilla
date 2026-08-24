@@ -22,21 +22,35 @@ class Config:
     backend: str = "auto"                     # auto | anthropic | ollama | dry
     model: str = "claude-opus-5"
     ollama_model: str = "llama3.1"            # used when backend == ollama
-    ollama_host: str = "http://localhost:11434"
+    # 127.0.0.1, NOT localhost: on many systems 'localhost' resolves to IPv6 ::1
+    # first, but Ollama binds IPv4 only — so 'localhost' wastes ~2s per call failing
+    # over ::1 before retrying 127.0.0.1. This hits every model call; keep it numeric.
+    ollama_host: str = "http://127.0.0.1:11434"
+    ollama_keep_alive: str = "30m"            # keep the model resident between calls
+    ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     effort: str = "high"                      # low | medium | high | xhigh | max
     max_output_tokens: int = 32000            # main answer generation
     meta_output_tokens: int = 16000           # optimizer / critic / evolve calls
     max_iterations: int = 2                   # critique->revise rounds
     critic_pass_threshold: float = 8.0        # 0..10; at/above this we stop iterating
+    speed_budget_s: float = 30.0              # target wall-clock for a full speed score
+    score_weights: dict = field(default_factory=lambda: {  # directed-evolution axes
+        "accuracy": 0.5, "quality": 0.3, "speed": 0.2,
+    })
     autonomy_level: str = "guarded"           # manual | guarded | never
     allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
     allow_web: bool = True                     # AG's standing internet access
+    allow_local_tools: bool = False           # calc/file-read/python-exec/memory tools
+    max_tool_steps: int = 4                    # reason->act->observe loop bound
+    use_memory: bool = True                    # recall durable memory into context
+    max_memories: int = 200                    # cap on retained memories
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main
     evolvable_paths: List[str] = field(default_factory=lambda: [
         "ag/prompts.py",
         "ag/tools/web.py",       # internet code self-improves (highest-churn area)
+        "ag/theme.py",           # the web app's look — AG may iterate its own design
         "profile/principles.md",
         "config.json",
     ])
