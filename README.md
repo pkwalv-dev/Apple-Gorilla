@@ -38,6 +38,12 @@ python -m ag serve --open              # local web app in your browser
 python -m ag serve --host 0.0.0.0      # also reachable from your phone on the same wifi
 ```
 
+The web app streams a **realtime log** of AG's run as it happens — the optimize →
+execute → critique → score stages, every web search/fetch, revisions, and errors —
+plus live **accuracy / quality / speed** scorecard bars and a **Tools & friction**
+inventory panel. See [docs/MODALITY.md](docs/MODALITY.md) for why AG stays a web app
+and what modality comes next (MCP).
+
 One-command install + launch (clones, checks, points at Ollama, starts the app):
 
 ```powershell
@@ -73,14 +79,49 @@ python -m ag run "draft a launch email for our beta" --verbose
 ## Commands
 
 ```bash
-python -m ag run "<prompt>" [--verbose] [--show-prompt] [--model claude-opus-5]
+python -m ag run "<prompt>" [--verbose] [--show-prompt] [--tools] [--model ...]
+python -m ag memory add "<fact>" | recall "<query>" | list | clear   # persistent memory
 python -m ag ingest <export>   # distill a claude.ai data export into your profile
 python -m ag evolve            # attempt a test-gated self-improvement
+python -m ag tools [-v|--json] # inventory tools/apps + integration & friction ratings
+python -m ag update [--apply]  # check/pull a newer Ollama model build (on demand)
 python -m ag versions          # list source snapshots
 python -m ag rollback <id>     # restore a snapshot instantly
 python -m ag profile           # show the loaded intelligence principles
 python -m ag doctor            # environment / readiness check
 ```
+
+## Beyond search — memory, tools, and a reasoning loop
+
+Plain `run` optimizes → executes → critiques → iterates a *text* answer. Two switches
+let AG actually **compute and act**, so it is useful even with the internet off:
+
+- **Persistent memory** (`use_memory`, on by default). AG recalls durable facts into
+  context each run, so sessions aren't cold-started. Manage it with `ag memory add/recall/
+  list/clear`; the reasoning loop can also `remember`/`recall` mid-task. Stored under
+  `state/memory/` (git-ignored, capped at `max_memories`).
+- **Local tools + reasoning loop** (`--tools`, or `allow_local_tools`). AG runs a bounded
+  reason → act → observe loop (`max_tool_steps`) and can call: `calc` (exact arithmetic,
+  fixing the small-model math weakness), `read_file`/`list_dir` (gated `filesystem_read`),
+  `python_exec` (gated `code_exec`, sandboxed subprocess with a timeout), and memory. It
+  degrades to a single answer if the model calls nothing.
+
+```bash
+python -m ag run "Compute 3847 * 2913 exactly." --tools --no-web -v
+#   [reason] tool: calc({"expr": "3847*2913"})  ->  observation: 11206311
+```
+
+> **Safety:** file access and `python_exec` are powerful and **off by default** — they
+> require `--tools`/`allow_local_tools` (which grants `filesystem_read` + `code_exec`
+> through the default-deny broker) and `allow_external_tools`. `python_exec` runs real
+> Python on this machine; only enable tools for prompts you trust.
+
+**What the `evolve` loop can and can't do (honest scope).** `evolve` only rewrites files
+in `evolvable_paths` (prompts, the web tool, the GUI theme, principles, config) and only
+adopts changes that pass the test suite. It is a bounded prompt/parameter/design *tuner*,
+not a system that can architect new subsystems like memory or tool execution — those are
+built as real, tested code, and only their tunable surfaces are exposed to `evolve` (e.g.
+the GUI look via `ag/theme.py`).
 
 ## Backends — run with or without an API key
 
@@ -111,9 +152,21 @@ python -m ag --backend ollama run "your prompt"
 ```
 
 Ollama needs no account or key and runs fully offline. AG talks to it over
-`http://localhost:11434` (override with `ollama_host`); the whole optimize → critique →
+`http://127.0.0.1:11434` (override with `ollama_host`); the whole optimize → critique →
 iterate loop is identical — only the model changes. Local quality tracks the model you
 pull, and is a weight class below Claude.
+
+**Tuning for your GPU.** VRAM is the binding constraint — a model that fits entirely in the
+GPU runs at full speed. AG sends `ollama_keep_alive` (default `30m`, keeps the model
+resident across a run's 3–4 calls) and an `ollama_options` passthrough (`num_ctx`,
+`num_gpu`, …). See **[docs/OLLAMA.md](docs/OLLAMA.md)** for the efficient-build guide,
+including a per-VRAM sizing table and a recommended `config.json`.
+
+**Keeping the model current — on demand, one click.** Model tags get republished; AG checks
+whether a newer build exists by comparing manifest digests (no download) and *proposes* an
+update — it never polls in the background and never pulls without approval. The web app asks
+once after a run with a **Update now? Yes/No** button; the CLI equivalent is `ag update`
+(check) / `ag update --apply` (pull).
 
 ## Running on another machine (e.g. a desktop with a GPU)
 
@@ -186,6 +239,20 @@ The gate runs the suite with **pytest** (the tests use its fixtures), so `evolve
 requires it — it ships in `requirements.txt` and the installers add it. If pytest is
 absent the gate **fails closed**: `evolve` refuses to run (rather than adopting
 unverified code), and `ag doctor` reports `evolve gate: UNAVAILABLE`.
+
+### Directed evolution — scoring + tool inventory steer the loop
+
+Every run is scored on three axes (0–10): **accuracy** and **quality** are judged by
+the critic; **speed** is *measured* by AG from wall-clock and token cost against
+`speed_budget_s` (a model can't judge its own latency). The blend is stored per run
+(`config.json → score_weights`). Separately, `ag tools` inventories every backend,
+retrieval/agent/host tool, and scaffolded capability, rating each on **integration**
+(how wired-in) and **friction** (10 = frictionless).
+
+`evolve` feeds both into the evolver as a *directed-evolution briefing*: it identifies
+the weakest score axis across recent runs and the highest-friction wired tool, and asks
+for the single smallest change that lifts one of them. Self-improvement aims at the real
+bottleneck instead of editing blindly.
 
 Autonomy is a dial in `config.json`:
 

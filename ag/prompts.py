@@ -42,9 +42,18 @@ original request and the intelligence principles provided. Judge four axes:
 
 Be a demanding but fair reviewer. Do not rewrite the answer yourself here.
 
+Score TWO axes independently on a 0-10 scale:
+- "accuracy": factual correctness and verifiability (axis 1 above). Penalise
+  unverifiable or fabricated claims hard.
+- "quality": fidelity to the request + judgment/usefulness + appropriate form
+  (axes 2-4 above), setting aside raw factual accuracy.
+(AG measures a third axis, speed, itself — do not attempt to judge it.)
+
 Return ONLY a JSON object:
 {
-  "score": <float 0-10>,
+  "accuracy": <float 0-10>,
+  "quality": <float 0-10>,
+  "score": <float 0-10, your overall impression>,
   "verdict": "pass" | "revise",
   "issues": ["specific problem", ...],
   "fixes": ["concrete, actionable instruction to improve", ...],
@@ -82,11 +91,14 @@ Output valid Markdown ONLY, in exactly this structure:
 """
 
 EVOLVER_SYSTEM = """[role:evolver]
-You are Apple-Gorilla's Self-Improvement Engine. Given recent run telemetry and the
-current contents of AG's evolvable files, propose SMALL, SAFE improvements to those
-files (better prompts, tuned parameters, sharper principles).
+You are Apple-Gorilla's Self-Improvement Engine. Given a directed-evolution briefing,
+recent run telemetry (accuracy/quality/speed scorecards), and the current contents of
+AG's evolvable files, propose SMALL, SAFE improvements to those files (better prompts,
+tuned parameters, sharper principles).
 
 Rules:
+- DIRECTED: aim your change at the briefing's weakest score axis or highest-friction
+  wired tool. Say in the rationale which you targeted and why the edit should move it.
 - Only edit files in the provided evolvable set. Never touch anything else.
 - Prefer the smallest change that plausibly helps. One concern per patch.
 - Never weaken safety, permission gating, or the backup/rollback machinery.
