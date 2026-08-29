@@ -38,6 +38,13 @@ class Config:
         "accuracy": 0.5, "quality": 0.3, "speed": 0.2,
     })
     autonomy_level: str = "guarded"           # manual | guarded | never
+    # Empirical self-improvement gate: adopt a self-edit only if it *measurably*
+    # scores >= the incumbent on the objective benchmark (ag/bench.py). This is what
+    # makes evolution directed rather than blind — never adopt a measured regression.
+    fitness_gate: bool = True                  # require a non-regressing benchmark score
+    bench_mode: str = "optimize_execute"       # execute | optimize_execute
+    bench_max_tasks: int = 0                    # 0 = all tasks; >0 caps for speed
+    fitness_tol: float = 0.05                   # allowed noise before calling it a regression
     allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
     allow_web: bool = True                     # AG's standing internet access
     allow_local_tools: bool = False           # calc/file-read/python-exec/memory tools

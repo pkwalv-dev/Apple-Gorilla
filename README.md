@@ -7,10 +7,16 @@ its own tunable source over time.
 
 > **Design stance.** The brief asked AG to "rewrite its source code after every
 > output." Unbounded, unsupervised self-modification is how a system bricks itself,
-> so AG implements the *disciplined* version of that intent: every self-edit is
-> **snapshotted, then validated against AG's own test suite, and adopted only if the
-> tests pass — otherwise it is rolled back in milliseconds.** AG never runs on
-> unverified code. That guarantee is the whole point; don't remove it.
+> so AG implements the *disciplined* version of that intent. Every self-edit clears
+> **two automatic gates or is rolled back in milliseconds**: a **safety gate** (AG's
+> own test suite must stay green) and a **fitness gate** (the edit must *measurably
+> not regress* AG's objective benchmark — `ag/bench.py`). AG never runs on unverified
+> code, and never keeps a change that made it worse. That "keep-if-better" selection
+> is the shared core of the strongest published self-improving systems — STOP
+> ([arXiv:2310.02304](https://arxiv.org/abs/2310.02304)), the Darwin Gödel Machine
+> ([arXiv:2505.22954](https://arxiv.org/abs/2505.22954)), and AlphaEvolve
+> ([arXiv:2506.13131](https://arxiv.org/abs/2506.13131)) — and it is the whole point;
+> don't remove it.
 
 ## What it does
 
@@ -20,7 +26,8 @@ its own tunable source over time.
 | **Execute** | `ag/model.py` | Calls Claude (adaptive thinking + effort) or an offline stub. |
 | **Critique** | `pipeline.py` → `critique` | Scores the answer on correctness, fidelity, "vibe", and formatting, judged against *your* principles. |
 | **Iterate** | `pipeline.py` → `revise` | Applies the reviewer's fixes and re-checks, up to `max_iterations`. |
-| **Evolve** | `ag/evolve.py` | Proposes small patches to AG's evolvable files, snapshots, **tests**, adopts-or-rolls-back. |
+| **Benchmark** | `ag/bench.py` | Scores AG on a held-out suite of objectively-checkable tasks — its **fitness function**. No model grades itself; every check is programmatic. |
+| **Evolve** | `ag/evolve.py` | Proposes small patches to AG's evolvable files, snapshots, **tests + re-benchmarks**, and adopts a change *only if it doesn't regress fitness* — else rolls back. Records the measured delta to an evolution archive. |
 
 ## "You as a standard for intelligence" — principles, not mimicry
 
@@ -82,7 +89,9 @@ python -m ag run "draft a launch email for our beta" --verbose
 python -m ag run "<prompt>" [--verbose] [--show-prompt] [--tools] [--model ...]
 python -m ag memory add "<fact>" | recall "<query>" | list | clear   # persistent memory
 python -m ag ingest <export>   # distill a claude.ai data export into your profile
-python -m ag evolve            # attempt a test-gated self-improvement
+python -m ag bench [-v] [--json]  # score AG on its objective fitness benchmark
+python -m ag evolve            # attempt a test- + fitness-gated self-improvement
+python -m ag evolve --history  # the measured fitness lineage of past self-edits
 python -m ag tools [-v|--json] # inventory tools/apps + integration & friction ratings
 python -m ag update [--apply]  # check/pull a newer Ollama model build (on demand)
 python -m ag versions          # list source snapshots
@@ -117,11 +126,18 @@ python -m ag run "Compute 3847 * 2913 exactly." --tools --no-web -v
 > Python on this machine; only enable tools for prompts you trust.
 
 **What the `evolve` loop can and can't do (honest scope).** `evolve` only rewrites files
-in `evolvable_paths` (prompts, the web tool, the GUI theme, principles, config) and only
-adopts changes that pass the test suite. It is a bounded prompt/parameter/design *tuner*,
-not a system that can architect new subsystems like memory or tool execution — those are
-built as real, tested code, and only their tunable surfaces are exposed to `evolve` (e.g.
-the GUI look via `ag/theme.py`).
+in `evolvable_paths` (prompts, the web tool, the GUI theme, principles, config), and now
+adopts a change only if it passes the test suite **and does not regress AG's benchmark
+fitness**. That upgrade is the substantive one: evolution is no longer *blind* (adopt
+anything that compiles and keeps tests green) — it is **empirically selected** against an
+objective score, the same keep-if-better principle behind STOP, the Darwin Gödel Machine,
+and AlphaEvolve. It remains a bounded prompt/parameter/design *optimiser*: it does not yet
+rewrite core subsystems like the pipeline or the permission broker — those are built as
+real, tested code, and only their tunable surfaces are exposed to `evolve`. The ceiling it
+*can* climb is set by the benchmark: **as the task suite grows, so does the range of
+capability AG can measurably improve** — which is why the suite is data you can extend
+(`state/bench/tasks.jsonl`), and why AG is instructed never to edit the benchmark to cheat
+its own score.
 
 ## Backends — run with or without an API key
 
@@ -228,17 +244,48 @@ use of the host's *own* resources for AG's work only.
 
 ## The self-improvement loop (`evolve`)
 
-1. **Snapshot** every evolvable file into `state/versions/<timestamp>/` (fast, local).
-2. **Propose** small patches, given recent run telemetry (`state/runs/`).
-3. **Validate** statically (Python compiles, JSON parses) — reject early.
-4. **Apply** to the working tree.
-5. **Test** in a subprocess (`pytest`).
-6. **Adopt** (+ optional git commit) if green; **restore the snapshot** if not.
+1. **Measure** the incumbent's fitness on the benchmark (cached by a content-hash of
+   the evolvable files, so an unchanged incumbent is scored at most once).
+2. **Snapshot** every evolvable file into `state/versions/<timestamp>/` (fast, local).
+3. **Propose** small patches, given recent telemetry *and which benchmark tasks
+   currently fail* — evolution aims at a concrete, verifiable gap.
+4. **Validate** statically (Python compiles, JSON parses) — reject early.
+5. **Apply** to the working tree.
+6. **Gate 1 — safety:** run the suite in a subprocess (`pytest`). Fail → rollback.
+7. **Gate 2 — fitness:** re-benchmark the candidate. A measured **regression** →
+   rollback. AG never keeps a change that made it worse.
+8. **Adopt** (+ optional git commit to `ag/evolve`, never `main`) and **record the
+   fitness delta** to the evolution archive (`state/archive/`, inspect with
+   `ag evolve --history`).
 
 The gate runs the suite with **pytest** (the tests use its fixtures), so `evolve`
 requires it — it ships in `requirements.txt` and the installers add it. If pytest is
 absent the gate **fails closed**: `evolve` refuses to run (rather than adopting
 unverified code), and `ag doctor` reports `evolve gate: UNAVAILABLE`.
+
+### The fitness function (`ag/bench.py`) — why this raises the ceiling
+
+Self-improvement is only real if "better" is *measured*, not hoped. `ag/bench.py` is a
+held-out suite of tasks with a single, **programmatically checkable** answer (arithmetic,
+logic, factual recall, format compliance, instruction-following). Fitness is the weighted
+pass rate on a 0–10 scale. Two properties make the signal trustworthy:
+
+- **No model grades itself.** Every verifier is code (exact match / numeric / regex /
+  JSON) — so evolution can't reward-hack by learning to flatter a critic.
+- **It's the utility function `evolve` optimises.** A self-edit is kept only if this
+  number holds or rises. That is the entire mechanism behind measured self-improvement.
+
+```bash
+python -m ag bench -v            # score AG now; -v shows every task's pass/fail
+python -m ag evolve              # try one improvement, gated on this score
+python -m ag evolve --history    # the measured fitness trajectory over time
+```
+
+**Grow the benchmark → grow what AG can improve.** The suite is data: drop a
+`state/bench/tasks.jsonl` (one task per line: `{"id","prompt","check","expect"}`) to add
+capabilities you want AG to get measurably better at. This is also how AG **compares
+itself to other AI**: `ag bench` is a common yardstick — run it here, run it against any
+other model you point a backend at, and the fitness scores are directly comparable.
 
 ### Directed evolution — scoring + tool inventory steer the loop
 
@@ -249,10 +296,12 @@ the critic; **speed** is *measured* by AG from wall-clock and token cost against
 retrieval/agent/host tool, and scaffolded capability, rating each on **integration**
 (how wired-in) and **friction** (10 = frictionless).
 
-`evolve` feeds both into the evolver as a *directed-evolution briefing*: it identifies
-the weakest score axis across recent runs and the highest-friction wired tool, and asks
-for the single smallest change that lifts one of them. Self-improvement aims at the real
-bottleneck instead of editing blindly.
+`evolve` feeds both into the evolver as a *directed-evolution briefing* — the weakest
+score axis, the highest-friction wired tool, and **the specific benchmark tasks that
+currently fail** (the sharpest target of all: a concrete capability gap with a verifiable
+pass/fail). It asks for the single smallest change that closes one, then *measures whether
+it did*. Self-improvement aims at the real bottleneck and is kept only if the number moves
+the right way.
 
 Autonomy is a dial in `config.json`:
 
@@ -286,7 +335,9 @@ ag/
   profile.py       loads your principles
   pipeline.py      optimize -> execute -> critique -> iterate
   critic/reviser   (in pipeline.py)
-  evolve.py        snapshot -> patch -> test -> adopt/rollback
+  bench.py         objective benchmark = AG's fitness function [evolvable tasks]
+  archive.py       evolution lineage + measured fitness deltas + fitness cache
+  evolve.py        measure -> patch -> test-gate -> fitness-gate -> adopt/rollback
   backup.py        snapshot / restore / git record
   permissions.py   default-deny capability broker
   agents.py        bounded, gated sub-agents
@@ -299,8 +350,10 @@ tests/             the gate that every self-edit must pass
 ## What is real vs. aspirational
 
 - **Real & tested:** the full pipeline (dry-run + live), prompt optimization, the
-  critique/iterate loop, snapshot/rollback, the test-gated evolve loop, the permission
-  broker, the CLI. `pytest` is green and rollback-on-failure is proven.
+  critique/iterate loop, snapshot/rollback, the **objective benchmark / fitness function**,
+  the **test- *and* fitness-gated evolve loop** with keep-if-better selection and its
+  measured-delta archive, the permission broker, the CLI. `pytest` is green (115 tests);
+  rollback-on-failure *and* rollback-on-regression are both proven.
 - **Scaffolded (needs your authorization to wire up):** live Chrome/browser control,
   arbitrary network/shell tools. The gates exist; the drivers are deliberately absent.
 - **Deliberately not built:** literal unbounded self-rewriting with no test gate. It
