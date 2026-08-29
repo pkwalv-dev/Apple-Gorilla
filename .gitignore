@@ -11,3 +11,6 @@ state/bench/
 !state/versions/.gitkeep
 !state/runs/.gitkeep
 .DS_Store
+
+# Per-machine launcher state (remembered AG folder path)
+AG_path.txt
