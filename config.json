@@ -20,6 +20,13 @@
     "speed": 0.2
   },
   "autonomy_level": "guarded",
+  "evolver_backend": "",
+  "fitness_gate": true,
+  "bench_mode": "optimize_execute",
+  "bench_max_tasks": 0,
+  "fitness_tol": 0.05,
+  "bench_samples": 3,
+  "fitness_k": 1.0,
   "allow_external_tools": false,
   "allow_web": true,
   "allow_local_tools": false,

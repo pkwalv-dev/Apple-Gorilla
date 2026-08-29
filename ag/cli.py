@@ -75,11 +75,36 @@ def cmd_run(args) -> int:
 
 def cmd_evolve(args) -> int:
     cfg = Config.load()
+    if getattr(args, "history", False):
+        return _print_evolve_history()
     client = _client(args, cfg)
-    result = evolve_mod.evolve(client, cfg, apply=args.apply, dry_run=args.dry_run)
+    # Split-backend evolution: a stronger model proposes the edit, the deploy backend
+    # (client) still measures fitness — so an adopted change is verified on the model
+    # you actually run. --evolver-backend overrides config.evolver_backend.
+    evolver_client = None
+    evolver_backend = getattr(args, "evolver_backend", None) or cfg.evolver_backend
+    deploy_backend = getattr(args, "backend", None) or cfg.backend
+    if evolver_backend and not args.dry_run and evolver_backend != deploy_backend:
+        try:
+            evolver_client = make_client(cfg, backend=evolver_backend)
+            print(f"proposer: {evolver_backend}  |  fitness measured on: "
+                  f"{deploy_backend} (the model you run)")
+        except Exception as e:
+            print(f"warning: evolver backend '{evolver_backend}' unavailable ({e}) — "
+                  f"proposing with the deploy backend instead")
+    result = evolve_mod.evolve(client, cfg, apply=args.apply, dry_run=args.dry_run,
+                               evolver_client=evolver_client)
     print(f"attempted={result.attempted} adopted={result.adopted} "
           f"rolled_back={result.rolled_back}")
     print(f"reason: {result.reason}")
+    if result.incumbent_fitness is not None:
+        cand = result.candidate_fitness
+        line = f"fitness: incumbent={result.incumbent_fitness}/10"
+        if cand is not None:
+            spread = f"±{result.candidate_stdev}" if result.candidate_stdev else ""
+            line += (f" -> candidate={cand}{spread}/10  (Δ{result.fitness_delta:+}, "
+                     f"{result.verdict}, margin={result.margin}, n={result.samples})")
+        print(line)
     if result.rationale:
         print(f"rationale: {result.rationale}")
     if result.changed:
@@ -89,6 +114,65 @@ def cmd_evolve(args) -> int:
               f"{result.snapshot_id})")
     if result.commit:
         print(f"commit: {result.commit}")
+    return 0
+
+
+def _print_evolve_history() -> int:
+    from . import archive
+    rows = archive.history(limit=20)
+    if not rows:
+        print("(no evolution history yet — run `ag evolve`)")
+        return 0
+    print("evolution lineage (newest first):")
+    for r in rows:
+        mark = "✓ adopted" if r.get("adopted") else "· " + (r.get("verdict") or "n/a")
+        inc, cand = r.get("incumbent_fitness"), r.get("candidate_fitness")
+        fit = ""
+        if inc is not None and cand is not None:
+            fit = f"  {inc}->{cand}/10 (Δ{r.get('delta'):+})"
+        elif inc is not None:
+            fit = f"  incumbent={inc}/10"
+        print(f"  {r.get('ts', '?')}  {mark}{fit}")
+        if r.get("rationale"):
+            print(f"      {r['rationale'][:100]}")
+    return 0
+
+
+def cmd_bench(args) -> int:
+    from . import bench
+    cfg = Config.load()
+    client = _client(args, cfg)
+    mode = getattr(args, "mode", None) or cfg.bench_mode
+    n = max(1, getattr(args, "samples", 1) or 1)
+    # Multiple samples surface the nondeterminism the evolve gate reasons about:
+    # report the mean fitness and its standard error, not a single noisy draw.
+    if n > 1:
+        runs = [bench.run_benchmark(client, cfg, mode=mode) for _ in range(n)]
+        stat = bench.summarize([r.fitness for r in runs])
+        res = runs[-1]
+        if getattr(args, "json", False):
+            print(json.dumps({**res.as_dict(), "stat": stat.as_dict()}))
+            return 0
+        print(f"fitness: {stat.mean}±{stat.sem}/10  (mean of n={stat.n}, "
+              f"stdev={stat.stdev})   mode={mode}")
+        print("  per-run: " + ", ".join(str(r.fitness) for r in runs))
+        return 0
+    res = bench.run_benchmark(client, cfg, mode=mode)
+    # --json emits ONLY the JSON, so machine callers (the evolve fitness gate shells
+    # out to this) can parse stdout cleanly.
+    if getattr(args, "json", False):
+        print(json.dumps(res.as_dict()))
+        return 0
+    print(f"fitness: {res.fitness}/10   ({res.passed}/{res.n} passed, "
+          f"pass_rate={res.pass_rate})   mode={res.mode}   {res.elapsed_s}s")
+    if getattr(args, "verbose", False):
+        for t in res.per_task:
+            flag = "PASS" if t["passed"] else "FAIL"
+            print(f"  [{flag}] {t['id']:22} ({t['category']})  -> {t['answer'][:60]}")
+    else:
+        failed = res.failed_ids
+        if failed:
+            print("  failing: " + ", ".join(failed))
     return 0
 
 
@@ -119,10 +203,16 @@ def cmd_doctor(args) -> int:
     print(f"model:            {cfg.model} (anthropic) / {cfg.ollama_model} (ollama)")
     print(f"autonomy_level:   {cfg.autonomy_level}")
     print(f"external tools:   {'allowed' if cfg.allow_external_tools else 'DENIED (default)'}")
-    from .model import has_oauth_profile
+    from .model import has_oauth_profile, oauth_token_status
     oauth = has_oauth_profile()
     print(f"API credentials:  {'present' if has_key else 'missing'}")
-    print(f"OAuth profile:    {'present (ant auth login)' if oauth else 'none'}")
+    if oauth and not has_key:
+        tok = oauth_token_status()
+        hint = {"expired": " — RE-LOGIN NEEDED (ant auth login / sign in via Claude Code)",
+                "valid": " — token valid", "unknown": "", "none": ""}.get(tok, "")
+        print(f"OAuth profile:    present, token {tok}{hint}")
+    else:
+        print(f"OAuth profile:    {'present' if oauth else 'none'}")
     print(f"internet (web):   {'ON' if cfg.allow_web else 'off'}"
           f"  | web app: run `ag serve`")
     try:
@@ -146,6 +236,18 @@ def cmd_doctor(args) -> int:
     from .evolve import gate_available
     gate = "ready" if gate_available() else "UNAVAILABLE (pip install pytest)"
     print(f"evolve gate:      {gate}")
+    from . import bench, archive
+    n_tasks = len(bench.load_tasks())
+    fgate = "ON (keep-if-better)" if cfg.fitness_gate else "off"
+    print(f"fitness gate:     {fgate} — {n_tasks} benchmark tasks ({cfg.bench_mode})")
+    if cfg.evolver_backend:
+        print(f"evolver backend:  {cfg.evolver_backend} proposes; "
+              f"fitness measured on deploy backend")
+    adopted = archive.adopted_history(limit=1000)
+    if adopted:
+        last = adopted[0]
+        print(f"last improvement: {last.get('ts')} "
+              f"Δ{last.get('delta')} -> {last.get('candidate_fitness')}/10")
 
     # Effective backend for a plain `run`.
     if cfg.backend == "auto":
@@ -319,10 +421,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "the reasoning loop for this run")
     r.set_defaults(func=cmd_run)
 
-    e = sub.add_parser("evolve", help="attempt a test-gated self-improvement")
+    e = sub.add_parser("evolve",
+                       help="attempt a test- + fitness-gated self-improvement")
     e.add_argument("--apply", action="store_true",
                    help="in manual mode, commit a passing candidate")
+    e.add_argument("--history", action="store_true",
+                   help="show the measured fitness lineage instead of evolving")
+    e.add_argument("--evolver-backend", dest="evolver_backend",
+                   choices=["auto", "anthropic", "ollama", "dry"], default=None,
+                   help="model that PROPOSES edits (e.g. anthropic); fitness is still "
+                        "measured on the deploy backend. Default: config.evolver_backend")
     e.set_defaults(func=cmd_evolve)
+
+    bn = sub.add_parser("bench",
+                        help="score AG on its objective benchmark (its fitness fn)")
+    bn.add_argument("--mode", choices=["execute", "optimize_execute"], default=None,
+                    help="execute = base model only; optimize_execute = full prompt path")
+    bn.add_argument("--samples", "-n", type=int, default=1,
+                    help="repeat N times and report mean fitness ± standard error")
+    bn.add_argument("--verbose", "-v", action="store_true",
+                    help="show every task's pass/fail and answer")
+    bn.add_argument("--json", action="store_true", help="emit the raw result JSON")
+    bn.set_defaults(func=cmd_bench)
 
     sub.add_parser("versions", help="list source snapshots").set_defaults(
         func=cmd_versions)

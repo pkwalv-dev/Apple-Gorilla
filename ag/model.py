@@ -73,23 +73,26 @@ class ApiClient:
     def __init__(self) -> None:
         import anthropic  # imported lazily so dry-run needs no dependency
         self._anthropic = anthropic
-        # When authenticating via an `ant auth login` OAuth profile (no API key),
-        # /v1/messages requires the OAuth beta header — the SDK does not add it
-        # for a user_oauth profile, so a bare client hangs/rejects. Add it only in
-        # that case; with an API key it's unnecessary and could confuse routing.
         # Work around a decompression bug in some anthropic-SDK/httpx2 + zstandard
         # combos ("Decompressor.decompress() got an unexpected keyword argument
         # 'output_buffer_limit'"): ask the server not to compress, so the broken
         # decoder never runs. Responses here are small, so identity is fine.
         headers = {"Accept-Encoding": "identity"}
+        kwargs = {"default_headers": headers, "timeout": 60.0, "max_retries": 1}
         if not _has_anthropic_creds():
-            # OAuth-profile auth (no API key): /v1/messages needs the OAuth beta header.
+            # No API key: authenticate with the `ant auth login` OAuth profile. The
+            # SDK does NOT auto-read that credentials file, so we load the bearer
+            # token and pass it explicitly, plus the OAuth beta header /v1/messages
+            # requires. (A bare client would have no auth at all and fail obscurely.)
+            token = _load_oauth_token()
+            if token is None:
+                raise RuntimeError(
+                    "No ANTHROPIC_API_KEY and no readable OAuth profile. Set a key, "
+                    "or run `ant auth login` (or sign in via Claude Code)."
+                )
             headers["anthropic-beta"] = "oauth-2025-04-20"
-        self._client = anthropic.Anthropic(
-            default_headers=headers,
-            timeout=60.0,        # surface failures fast instead of a 10-min hang
-            max_retries=1,
-        )
+            kwargs["auth_token"] = token
+        self._client = anthropic.Anthropic(**kwargs)
 
     def complete(self, *, system: str, user: str, cfg: Config,
                  max_tokens: Optional[int] = None) -> ModelResult:
@@ -182,9 +185,10 @@ def _oauth_profile_dir() -> Path:
 def has_oauth_profile() -> bool:
     """True if an `ant auth login` OAuth profile appears to exist on disk.
 
-    This is the sanctioned, key-free auth path: a bare anthropic.Anthropic()
-    reads this profile automatically. Whether a given account/plan authorizes
-    Messages API calls through it is up to Anthropic — this only detects it.
+    This is the sanctioned, key-free auth path. The SDK does NOT read this file
+    itself, so ApiClient loads the token from it (see `_load_oauth_token`). Whether
+    a given account/plan authorizes Messages API calls, and whether the token is
+    still valid, is up to Anthropic — this only detects that a login happened.
     """
     creds = _oauth_profile_dir() / "credentials"
     try:
@@ -193,6 +197,40 @@ def has_oauth_profile() -> bool:
         return creds.is_dir() and any(creds.glob("*.json"))
     except OSError:
         return False
+
+
+def _read_oauth_cred() -> Optional[dict]:
+    """Parse the first OAuth credentials JSON on disk (or None)."""
+    creds = _oauth_profile_dir() / "credentials"
+    try:
+        for f in sorted(creds.glob("*.json")):
+            try:
+                return json.loads(f.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+    except OSError:
+        pass
+    return None
+
+
+def _load_oauth_token() -> Optional[str]:
+    """The OAuth access token to send as a bearer credential (or None)."""
+    d = _read_oauth_cred() or {}
+    tok = d.get("access_token")
+    return tok if isinstance(tok, str) and tok else None
+
+
+def oauth_token_status() -> str:
+    """'none' | 'valid' | 'expired' | 'unknown' — for `ag doctor` to guide re-login."""
+    d = _read_oauth_cred()
+    if not d or not d.get("access_token"):
+        return "none"
+    exp = d.get("expires_at")
+    if not exp:
+        return "unknown"
+    import time as _time
+    exp_s = exp / 1000 if exp > 1e12 else exp  # tolerate ms or s epochs
+    return "valid" if exp_s > _time.time() else "expired"
 
 
 def make_client(cfg: Optional[Config] = None, *, backend: Optional[str] = None,

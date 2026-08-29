@@ -6,6 +6,8 @@ venv/
 state/runs/*.json
 state/versions/*/
 state/memory/
+state/archive/
+state/bench/
 !state/versions/.gitkeep
 !state/runs/.gitkeep
 .DS_Store
