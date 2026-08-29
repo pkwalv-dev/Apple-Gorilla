@@ -2,7 +2,8 @@
 import json
 
 from ag import bench
-from ag.bench import Task, score_answer, run_benchmark, load_tasks, tasks_hash
+from ag.bench import (Task, score_answer, run_benchmark, load_tasks, tasks_hash,
+                     summarize)
 from ag.config import Config
 from ag.model import ModelResult
 
@@ -108,6 +109,23 @@ def test_run_benchmark_partial_and_weighted():
     # 3 of 4 weight passed -> 7.5/10.
     assert res.fitness == 7.5
     assert res.passed == 1
+
+
+def test_summarize_single_sample_has_no_variance():
+    s = summarize([7.0])
+    assert s.mean == 7.0 and s.n == 1 and s.stdev == 0.0 and s.sem == 0.0
+
+
+def test_summarize_multi_sample_mean_and_standard_error():
+    s = summarize([6.0, 8.0])           # mean 7, stdev sqrt(2)~1.414, sem = stdev/sqrt(2)
+    assert s.mean == 7.0 and s.n == 2
+    assert abs(s.stdev - 1.414) < 0.01
+    assert abs(s.sem - 1.0) < 0.01      # 1.414 / sqrt(2) == 1.0
+
+
+def test_summarize_empty_is_safe():
+    s = summarize([])
+    assert s.n == 0 and s.mean == 0.0 and s.sem == 0.0
 
 
 def test_backend_error_fails_task_not_run():

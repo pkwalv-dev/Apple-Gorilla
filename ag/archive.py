@@ -45,6 +45,9 @@ class Entry:
     rationale: str = ""
     changed: List[str] = field(default_factory=list)
     snapshot_id: str = ""
+    candidate_stdev: Optional[float] = None   # benchmark spread (nondeterminism)
+    samples: int = 0                          # fitness measurements taken
+    margin: Optional[float] = None            # significance threshold used
 
     def as_dict(self) -> dict:
         return asdict(self)

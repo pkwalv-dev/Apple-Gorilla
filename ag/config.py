@@ -44,7 +44,14 @@ class Config:
     fitness_gate: bool = True                  # require a non-regressing benchmark score
     bench_mode: str = "optimize_execute"       # execute | optimize_execute
     bench_max_tasks: int = 0                    # 0 = all tasks; >0 caps for speed
-    fitness_tol: float = 0.05                   # allowed noise before calling it a regression
+    fitness_tol: float = 0.05                   # absolute noise floor (0..10 scale)
+    # A model at temperature > 0 makes fitness a *random variable*, so a single run
+    # is a noisy estimate. AG samples the benchmark `bench_samples` times and adopts a
+    # change only if its mean beats the incumbent by more than `fitness_k` standard
+    # errors of the estimate — statistical significance, not a lucky draw. Set
+    # bench_samples=1 to fall back to the cheap single-shot (tolerance-only) gate.
+    bench_samples: int = 3                      # benchmark repeats per fitness estimate
+    fitness_k: float = 1.0                      # required margin in standard errors
     allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
     allow_web: bool = True                     # AG's standing internet access
     allow_local_tools: bool = False           # calc/file-read/python-exec/memory tools
