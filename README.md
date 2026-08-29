@@ -45,6 +45,16 @@ python -m ag serve --open              # local web app in your browser
 python -m ag serve --host 0.0.0.0      # also reachable from your phone on the same wifi
 ```
 
+The web app now includes a **Self-improvement panel** — Benchmark, Evolve, History,
+and Status buttons (plus a proposer selector for split-backend evolution) — so AG's
+core self-improvement runs from the GUI, not just the CLI.
+
+**One-click launch (no terminal).** Double-click **`AG.bat`** (Windows) or
+**`AG.command`** (macOS) in the repo to start the web app and open your browser. You
+can copy that launcher to your Desktop — on first run it asks once where the AG folder
+is (or drag the folder onto the window) and remembers it, picks the right Python, and
+installs dependencies. Right-click → *Send to → Desktop (create shortcut)* for an icon.
+
 The web app streams a **realtime log** of AG's run as it happens — the optimize →
 execute → critique → score stages, every web search/fetch, revisions, and errors —
 plus live **accuracy / quality / speed** scorecard bars and a **Tools & friction**

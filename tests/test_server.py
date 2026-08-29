@@ -31,6 +31,22 @@ def test_page_has_update_banner_and_check():
         assert hook in server.PAGE, f"update UI missing {hook!r}"
 
 
+def test_page_has_self_improvement_ui():
+    # The self-improvement commands (bench/evolve/history/status) must be in the GUI.
+    for hook in ("/bench", "/evolve", "doEvolve()", "doBench()", "loadHistory()",
+                 "loadDoctor()", "Benchmark", "Evolve", "proposer"):
+        assert hook in server.PAGE, f"self-improvement UI missing {hook!r}"
+
+
+def test_doctor_data_shape():
+    d = server._doctor_data(Config())
+    for key in ("backend", "effective_backend", "fitness_gate", "bench_tasks",
+                "bench_samples", "evolve_gate", "snapshots", "ollama_reachable"):
+        assert key in d, f"doctor data missing {key!r}"
+    assert d["bench_tasks"] >= 10
+    assert isinstance(d["ollama_reachable"], bool)
+
+
 def test_build_broker_respects_allow_web():
     on = Config(); on.allow_web = True
     off = Config(); off.allow_web = False
