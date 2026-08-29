@@ -78,7 +78,22 @@ def cmd_evolve(args) -> int:
     if getattr(args, "history", False):
         return _print_evolve_history()
     client = _client(args, cfg)
-    result = evolve_mod.evolve(client, cfg, apply=args.apply, dry_run=args.dry_run)
+    # Split-backend evolution: a stronger model proposes the edit, the deploy backend
+    # (client) still measures fitness — so an adopted change is verified on the model
+    # you actually run. --evolver-backend overrides config.evolver_backend.
+    evolver_client = None
+    evolver_backend = getattr(args, "evolver_backend", None) or cfg.evolver_backend
+    deploy_backend = getattr(args, "backend", None) or cfg.backend
+    if evolver_backend and not args.dry_run and evolver_backend != deploy_backend:
+        try:
+            evolver_client = make_client(cfg, backend=evolver_backend)
+            print(f"proposer: {evolver_backend}  |  fitness measured on: "
+                  f"{deploy_backend} (the model you run)")
+        except Exception as e:
+            print(f"warning: evolver backend '{evolver_backend}' unavailable ({e}) — "
+                  f"proposing with the deploy backend instead")
+    result = evolve_mod.evolve(client, cfg, apply=args.apply, dry_run=args.dry_run,
+                               evolver_client=evolver_client)
     print(f"attempted={result.attempted} adopted={result.adopted} "
           f"rolled_back={result.rolled_back}")
     print(f"reason: {result.reason}")
@@ -225,6 +240,9 @@ def cmd_doctor(args) -> int:
     n_tasks = len(bench.load_tasks())
     fgate = "ON (keep-if-better)" if cfg.fitness_gate else "off"
     print(f"fitness gate:     {fgate} — {n_tasks} benchmark tasks ({cfg.bench_mode})")
+    if cfg.evolver_backend:
+        print(f"evolver backend:  {cfg.evolver_backend} proposes; "
+              f"fitness measured on deploy backend")
     adopted = archive.adopted_history(limit=1000)
     if adopted:
         last = adopted[0]
@@ -409,6 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="in manual mode, commit a passing candidate")
     e.add_argument("--history", action="store_true",
                    help="show the measured fitness lineage instead of evolving")
+    e.add_argument("--evolver-backend", dest="evolver_backend",
+                   choices=["auto", "anthropic", "ollama", "dry"], default=None,
+                   help="model that PROPOSES edits (e.g. anthropic); fitness is still "
+                        "measured on the deploy backend. Default: config.evolver_backend")
     e.set_defaults(func=cmd_evolve)
 
     bn = sub.add_parser("bench",

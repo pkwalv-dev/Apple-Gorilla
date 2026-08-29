@@ -38,6 +38,12 @@ class Config:
         "accuracy": 0.5, "quality": 0.3, "speed": 0.2,
     })
     autonomy_level: str = "guarded"           # manual | guarded | never
+    # Split-backend evolution: use a stronger model ONLY to propose self-edits, while
+    # the fitness benchmark still runs on the deploy backend — so an adopted change is
+    # guaranteed to help the model you actually run offline. Empty = same as `backend`.
+    # e.g. backend="ollama", evolver_backend="anthropic": Claude proposes (1 call),
+    # Ollama measures (~170 free calls), the gate keeps only what helps Ollama.
+    evolver_backend: str = ""                  # "" | anthropic | ollama | dry
     # Empirical self-improvement gate: adopt a self-edit only if it *measurably*
     # scores >= the incumbent on the objective benchmark (ag/bench.py). This is what
     # makes evolution directed rather than blind — never adopt a measured regression.

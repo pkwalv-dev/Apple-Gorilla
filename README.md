@@ -316,6 +316,34 @@ pass/fail). It asks for the single smallest change that closes one, then *measur
 it did*. Self-improvement aims at the real bottleneck and is kept only if the number moves
 the right way.
 
+### Split-backend evolution — a strong proposer, a local measurer
+
+Proposing a good self-edit takes real reasoning; *measuring* whether it helped is
+~170 cheap benchmark calls. Those costs are asymmetric, so AG lets you split them:
+
+```bash
+# on the GPU desktop: Claude proposes the edit, Ollama measures + runs it
+python -m ag evolve --evolver-backend anthropic     # deploy backend stays ollama
+# or make it permanent:  config.json -> "evolver_backend": "anthropic"
+```
+
+The **proposer** (`evolver_backend`) writes the patch; the **deploy backend**
+(`backend`) always runs the fitness benchmark. That ordering is the whole point of
+the design: **an adopted change is kept only if it measurably helps the model you
+actually run.** A Claude-proposed prompt tweak that helps Claude but not your local
+7B model is *rejected*, because the gate scores it on Ollama. This is also the answer
+to "do Claude's improvements persist offline?" — the evolved files are plain text
+committed to `ag/evolve`, and because they were *selected against the offline model*,
+they keep helping it with no network and no Claude present. One Claude call per
+improvement; the ~170 measurement calls are free and local.
+
+> **What "self-improvement" means here (honest framing).** Evolve tunes AG's
+> *scaffolding* — prompts, principles, config, tool code — not the model's weights.
+> It makes AG measurably better at *using* a fixed model (better prompting extracts
+> real latent capability), verified and compounding, but asymptotic toward that
+> model's ceiling. It is not making the underlying brain smarter; it is making AG a
+> better operator of it.
+
 Autonomy is a dial in `config.json`:
 
 - `never` — evolution off.

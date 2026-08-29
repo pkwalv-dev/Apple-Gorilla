@@ -126,6 +126,57 @@ def test_neutral_change_is_adopted(monkeypatch, tmp_path):
         target.write_text(original)
 
 
+class _RecordingClient:
+    """Proposes a valid patch and records that it was the one asked to propose."""
+
+    def __init__(self, path, content, tag):
+        self._path, self._content, self.tag = path, content, tag
+        self.calls = 0
+
+    def complete(self, *, system, user, cfg, max_tokens=None):
+        self.calls += 1
+        return ModelResult(text=json.dumps(
+            {"rationale": f"from {self.tag}", "patches":
+                [{"path": self._path, "new_content": self._content}]}))
+
+
+def test_split_backend_proposer_is_separate_from_measurer(monkeypatch, tmp_path):
+    # The evolver_client PROPOSES; the deploy client MEASURES. Verify the proposal
+    # call goes to the evolver, and fitness is measured via _measure_fitness(client),
+    # never the evolver — so an adopted edit is verified on the deploy model.
+    target = ev.ROOT / "profile/principles.md"
+    original = target.read_text()
+    _harness(monkeypatch, tmp_path, fitnesses=[4.0, 6.0])  # improvement -> adopt
+    measured_with = []
+    real_measure = ev._measure_fitness
+    seq = iter([4.0, 6.0])
+
+    def spy_measure(client, cfg, *, emit=None):
+        measured_with.append(client)
+        import types as _t
+        return _t.SimpleNamespace(fitness=next(seq), stdev=0.0, sem=0.0, n=3,
+                                  samples=[], pass_rate=0.5, per_task=[])
+    monkeypatch.setattr(ev, "_measure_fitness", spy_measure)
+
+    deploy = _RecordingClient("profile/principles.md", original + "\n<!-- x -->\n",
+                              tag="OLLAMA")
+    proposer = _RecordingClient("profile/principles.md", original + "\n<!-- x -->\n",
+                                tag="CLAUDE")
+    cfg = Config()
+    cfg.autonomy_level = "guarded"
+    cfg.fitness_gate = True
+    try:
+        res = ev.evolve(deploy, cfg, dry_run=False, evolver_client=proposer)
+        assert res.adopted is True
+        assert proposer.calls == 1          # the proposer wrote the patch
+        assert deploy.calls == 0            # deploy was NOT asked to propose
+        # fitness was measured with the DEPLOY client, never the proposer
+        assert all(c is deploy for c in measured_with)
+        assert proposer not in measured_with
+    finally:
+        target.write_text(original)
+
+
 def test_measure_fitness_subprocess_roundtrip():
     # The REAL _measure_fitness shells out to `python -m ag bench --json` so it scores
     # freshly-written source, not stale in-memory modules. Guards the JSON contract:
