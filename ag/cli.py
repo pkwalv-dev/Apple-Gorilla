@@ -188,10 +188,16 @@ def cmd_doctor(args) -> int:
     print(f"model:            {cfg.model} (anthropic) / {cfg.ollama_model} (ollama)")
     print(f"autonomy_level:   {cfg.autonomy_level}")
     print(f"external tools:   {'allowed' if cfg.allow_external_tools else 'DENIED (default)'}")
-    from .model import has_oauth_profile
+    from .model import has_oauth_profile, oauth_token_status
     oauth = has_oauth_profile()
     print(f"API credentials:  {'present' if has_key else 'missing'}")
-    print(f"OAuth profile:    {'present (ant auth login)' if oauth else 'none'}")
+    if oauth and not has_key:
+        tok = oauth_token_status()
+        hint = {"expired": " — RE-LOGIN NEEDED (ant auth login / sign in via Claude Code)",
+                "valid": " — token valid", "unknown": "", "none": ""}.get(tok, "")
+        print(f"OAuth profile:    present, token {tok}{hint}")
+    else:
+        print(f"OAuth profile:    {'present' if oauth else 'none'}")
     print(f"internet (web):   {'ON' if cfg.allow_web else 'off'}"
           f"  | web app: run `ag serve`")
     try:
