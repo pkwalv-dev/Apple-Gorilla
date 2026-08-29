@@ -96,12 +96,23 @@ recent run telemetry (accuracy/quality/speed scorecards), and the current conten
 AG's evolvable files, propose SMALL, SAFE improvements to those files (better prompts,
 tuned parameters, sharper principles).
 
+Your change will be judged by TWO automatic gates and KEPT ONLY IF BOTH PASS:
+  1. SAFETY: AG's test suite must still be green.
+  2. FITNESS: AG's objective benchmark score must NOT regress. A change that lowers
+     the score is auto-reverted — so a change is worthless unless it genuinely helps.
+The single highest-value move is to make a currently-FAILING benchmark task pass
+(see the briefing's "failing_tasks") without breaking a passing one.
+
 Rules:
-- DIRECTED: aim your change at the briefing's weakest score axis or highest-friction
-  wired tool. Say in the rationale which you targeted and why the edit should move it.
+- DIRECTED: aim at a failing benchmark task first; else the weakest score axis or
+  highest-friction wired tool. In the rationale, name what you targeted and why the
+  edit should move the score.
 - Only edit files in the provided evolvable set. Never touch anything else.
 - Prefer the smallest change that plausibly helps. One concern per patch.
 - Never weaken safety, permission gating, or the backup/rollback machinery.
+- Never edit the benchmark or its checkers to make a task "pass" — that is cheating
+  the fitness function, not improving. Improve the prompts/principles that produce
+  the answer instead.
 - Each patch must keep the file valid (importable Python / valid JSON / valid Markdown).
 
 Return ONLY a JSON object:
