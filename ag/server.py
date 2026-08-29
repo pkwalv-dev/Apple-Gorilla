@@ -26,7 +26,21 @@ _PAGE_TEMPLATE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Apple-Gorilla</title>
 __FONTS__
-<style>__THEME__</style></head><body>
+<style>__THEME__</style>
+<style>
+#improve .controls{flex-wrap:wrap;gap:8px;align-items:center}
+#improveout{margin-top:10px}
+.result{padding:12px;border-radius:8px;background:rgba(127,127,127,.08);
+  line-height:1.55;font-size:14px}
+.result.ok{border-left:3px solid #3fb950}
+.result.bad{border-left:3px solid #f85149}
+table.hist{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}
+table.hist td{padding:3px 6px;border-bottom:1px solid rgba(127,127,127,.15);
+  vertical-align:top}
+table.hist td.rat{color:#8b949e;font-style:italic}
+#improve label.toggle{font-size:13px;opacity:.85}
+#improve select{margin-left:6px}
+</style></head><body>
 <div class="wrap">
 <header>
   <div class="logo">🦍</div>
@@ -51,6 +65,23 @@ __FONTS__
 </div>
 
 <table id="tools" class="panel"></table>
+
+<div class="panel" id="improve">
+  <div class="controls">
+    <button onclick="doBench()">📊 Benchmark</button>
+    <button class="primary" onclick="doEvolve()">🧬 Evolve</button>
+    <button onclick="loadHistory()">📜 History</button>
+    <button onclick="loadDoctor()">🩺 Status</button>
+    <label class="toggle">proposer
+      <select id="proposer">
+        <option value="">deploy backend</option>
+        <option value="anthropic">Claude (anthropic)</option>
+        <option value="ollama">Ollama (local)</option>
+      </select>
+    </label>
+  </div>
+  <div id="improveout"></div>
+</div>
 
 <div id="cards">
   <div class="card"><div class="n" id="acc">–</div><div class="l">accuracy</div>
@@ -141,6 +172,76 @@ async function applyUpdate(){
     }
   }catch(e){ addEv({stage:'error',level:'error',msg:'update failed: '+e}); }
 }
+async function streamPost(url, body, onEvent){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body||{})});
+  const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
+  while(true){ const {value,done}=await reader.read(); if(done)break;
+    buf+=dec.decode(value,{stream:true}); let nl;
+    while((nl=buf.indexOf('\\n'))>=0){ const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+      if(line) onEvent(JSON.parse(line)); } }
+}
+async function doBench(){
+  $('log').innerHTML=''; $('improveout').innerHTML=''; $('status').textContent='benchmarking…';
+  try{ await streamPost('/bench',{}, ev=>{
+    if(ev.stage==='done'){ const d=ev.data||{};
+      $('improveout').innerHTML='<div class="result"><b>Fitness '+d.fitness+'/10</b> · '
+        +d.passed+'/'+d.n+' passed'
+        +(d.failing&&d.failing.length?'<br>failing: '+escapeHtml(d.failing.join(', ')):'')+'</div>';
+      $('status').textContent='bench: '+d.fitness+'/10'; return; }
+    addEv(ev);
+  }); }catch(e){ addEv({stage:'error',level:'error',msg:'bench failed: '+e});
+    $('status').textContent='error'; }
+}
+async function doEvolve(){
+  $('log').innerHTML=''; $('improveout').innerHTML=''; $('status').textContent='evolving…';
+  try{ await streamPost('/evolve',{proposer:$('proposer').value}, ev=>{
+    if(ev.stage==='done'){ const d=ev.data||{};
+      const cls=d.adopted?'ok':(d.rolled_back?'bad':'');
+      let h='<div class="result '+cls+'"><b>'
+        +(d.adopted?'✓ Adopted':(d.rolled_back?'↩ Rolled back':'No change'))
+        +'</b><br>'+escapeHtml(d.reason||'')+'<br>';
+      if(d.incumbent!=null) h+='fitness '+d.incumbent+'→'+(d.candidate!=null?d.candidate:'?')
+        +'/10'+(d.delta!=null?' (Δ'+d.delta+')':'')+'<br>';
+      if(d.changed&&d.changed.length) h+='files: '+escapeHtml(d.changed.join(', '))+'<br>';
+      if(d.rationale) h+='<i>'+escapeHtml(d.rationale)+'</i>';
+      h+='</div>'; $('improveout').innerHTML=h;
+      $('status').textContent='evolve: '+(d.adopted?'adopted':(d.rolled_back?'rolled back':'no change'));
+      return; }
+    addEv(ev);
+  }); }catch(e){ addEv({stage:'error',level:'error',msg:'evolve failed: '+e});
+    $('status').textContent='error'; }
+}
+async function loadHistory(){
+  const d=await (await fetch('/evolve/history')).json();
+  if(!d.history||!d.history.length){
+    $('improveout').innerHTML='<div class="result">No evolution history yet — click Evolve.</div>';
+    return; }
+  let h='<div class="result"><b>Fitness lineage</b> (newest first)<table class="hist">';
+  for(const r of d.history){
+    const mark=r.adopted?'✓ adopted':'· '+(r.verdict||'n/a');
+    let fit='';
+    if(r.incumbent_fitness!=null&&r.candidate_fitness!=null)
+      fit=r.incumbent_fitness+'→'+r.candidate_fitness+'/10 (Δ'+r.delta+')';
+    h+='<tr><td>'+escapeHtml(r.ts||'')+'</td><td>'+mark+'</td><td>'+fit+'</td></tr>';
+    if(r.rationale) h+='<tr><td colspan="3" class="rat">'+escapeHtml(r.rationale.slice(0,140))+'</td></tr>';
+  }
+  h+='</table></div>'; $('improveout').innerHTML=h;
+}
+async function loadDoctor(){
+  const d=await (await fetch('/doctor')).json();
+  let h='<div class="result"><b>Status</b><br>';
+  h+='backend: '+d.backend+' → '+d.effective_backend+'<br>';
+  h+='ollama: '+(d.ollama_reachable?('reachable — '+(d.ollama_models.join(', ')||'no models pulled'))
+    :'not reachable')+'<br>';
+  h+='fitness gate: '+(d.fitness_gate?'ON':'off')+' — '+d.bench_tasks+' tasks, '
+    +d.bench_samples+' samples ('+d.bench_mode+')<br>';
+  h+='evolve gate: '+d.evolve_gate+' · snapshots: '+d.snapshots+'<br>';
+  if(d.evolver_backend) h+='proposer backend: '+d.evolver_backend+'<br>';
+  if(d.last_improvement){ const l=d.last_improvement;
+    h+='last improvement: Δ'+l.delta+' → '+l.candidate_fitness+'/10<br>'; }
+  h+='</div>'; $('improveout').innerHTML=h;
+}
 async function loadTools(){
   const t=$('tools');
   if(t.style.display==='table'){ t.style.display='none'; return; }
@@ -206,12 +307,41 @@ class _Handler(BaseHTTPRequestHandler):
             from . import update
             status = update.check_model_update(self.cfg)
             self._send(200, json.dumps(status.as_dict()), "application/json")
+        elif self.path == "/doctor":
+            self._send(200, json.dumps(_doctor_data(self.cfg)), "application/json")
+        elif self.path == "/evolve/history":
+            from . import archive
+            self._send(200, json.dumps({"history": archive.history(limit=20)}),
+                       "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
         if self.path == "/update/apply":
             self._stream_update()
+            return
+        if self.path == "/bench":
+            # Drain the request body first: closing the socket with an unread body
+            # makes the client see a TCP reset instead of the streamed response.
+            try:
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            except Exception:
+                pass
+            self._stream_bench()
+            return
+        if self.path == "/evolve":
+            # Evolve self-modifies source + commits, so gate it to the local machine
+            # even when the app is bound to 0.0.0.0 for phone/LAN *viewing*.
+            if self.client_address and self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._send(403, json.dumps({"error": "evolve is local-only"}),
+                           "application/json")
+                return
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                payload = {}
+            self._stream_evolve(payload)
             return
         if self.path != "/run":
             self._send(404, "not found", "text/plain")
@@ -261,6 +391,63 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _stream_bench(self):
+        """Score AG on its objective benchmark, streaming per-task progress."""
+        from . import bench
+        write = self._ndjson_writer()
+        cfg = self.cfg
+        try:
+            client = make_client(cfg)
+            res = bench.run_benchmark(client, cfg, emit=write)
+            write({"stage": "done", "level": "result", "msg": "benchmark complete",
+                   "data": {"fitness": res.fitness, "pass_rate": res.pass_rate,
+                            "passed": res.passed, "n": res.n, "mode": res.mode,
+                            "failing": res.failed_ids}})
+        except (BrokenPipeError, ConnectionError):
+            return
+        except Exception as e:
+            try:
+                write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
+            except Exception:
+                pass
+
+    def _stream_evolve(self, payload):
+        """Run one gated self-improvement cycle, streaming its progress + verdict."""
+        from . import evolve as evolve_mod
+        write = self._ndjson_writer()
+        cfg = self.cfg
+        try:
+            client = make_client(cfg)
+            # Optional split backend: a stronger model proposes; deploy backend measures.
+            evolver_client = None
+            prop = str((payload or {}).get("proposer", "")).strip()
+            if prop and prop != cfg.backend:
+                try:
+                    evolver_client = make_client(cfg, backend=prop)
+                    write({"stage": "evolve", "level": "tool", "data": {},
+                           "msg": f"proposer: {prop}  |  fitness measured on: {cfg.backend}"})
+                except Exception as e:
+                    write({"stage": "evolve", "level": "error", "data": {},
+                           "msg": f"proposer '{prop}' unavailable ({e}); using deploy backend"})
+            write({"stage": "evolve", "level": "tool",
+                   "msg": "starting self-improvement cycle…", "data": {}})
+            res = evolve_mod.evolve(client, cfg, emit=write, evolver_client=evolver_client)
+            write({"stage": "done",
+                   "level": "result" if res.adopted else "info",
+                   "msg": res.reason, "data": {
+                       "adopted": res.adopted, "rolled_back": res.rolled_back,
+                       "verdict": res.verdict, "incumbent": res.incumbent_fitness,
+                       "candidate": res.candidate_fitness, "delta": res.fitness_delta,
+                       "changed": res.changed, "rationale": res.rationale,
+                       "reason": res.reason, "snapshot_id": res.snapshot_id}})
+        except (BrokenPipeError, ConnectionError):
+            return
+        except Exception as e:
+            try:
+                write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
+            except Exception:
+                pass
+
     def _stream_run(self, prompt: str, want_web):
         """Run the pipeline, streaming each stage event as one NDJSON line."""
         write = self._ndjson_writer()
@@ -285,6 +472,46 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):  # quiet
         pass
+
+
+def _doctor_data(cfg: Config) -> dict:
+    """Environment / readiness snapshot for the GUI Status button (same facts as the
+    `ag doctor` CLI). Read-only; probes Ollama without hard-failing."""
+    import os
+    import urllib.request
+    from . import archive, backup, bench
+    from .evolve import gate_available
+    from .model import has_oauth_profile, oauth_token_status
+
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY")
+                   or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    oauth = has_oauth_profile()
+    reachable, models = False, []
+    try:
+        with urllib.request.urlopen(cfg.ollama_host.rstrip("/") + "/api/tags",
+                                    timeout=1.5) as r:
+            reachable = True
+            models = [m.get("name", "?")
+                      for m in json.loads(r.read().decode("utf-8")).get("models", [])]
+    except Exception:
+        pass
+    if cfg.backend == "auto":
+        eff = "anthropic" if (has_key or oauth) else "dry-run (stub)"
+    else:
+        eff = cfg.backend
+    last = archive.adopted_history(limit=1)
+    return {
+        "backend": cfg.backend, "effective_backend": eff, "model": cfg.model,
+        "ollama_model": cfg.ollama_model, "ollama_reachable": reachable,
+        "ollama_models": models, "api_key": has_key, "oauth": oauth,
+        "oauth_token": oauth_token_status() if oauth else "none",
+        "autonomy": cfg.autonomy_level, "evolver_backend": cfg.evolver_backend,
+        "fitness_gate": cfg.fitness_gate, "bench_tasks": len(bench.load_tasks()),
+        "bench_mode": cfg.bench_mode, "bench_samples": cfg.bench_samples,
+        "evolve_gate": "ready" if gate_available() else "unavailable (pip install pytest)",
+        "snapshots": len(backup.list_snapshots()),
+        "last_improvement": last[0] if last else None, "allow_web": cfg.allow_web,
+    }
 
 
 def run_prompt(cfg: Config, prompt: str) -> tuple[str, str]:
