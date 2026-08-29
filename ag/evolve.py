@@ -31,6 +31,7 @@ Autonomy levels (config.autonomy_level):
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -58,55 +59,87 @@ class EvolveResult:
     candidate_fitness: Optional[float] = None
     fitness_delta: Optional[float] = None
     verdict: str = ""                 # improved | neutral | regressed | unknown
+    candidate_stdev: Optional[float] = None   # spread across benchmark samples
+    samples: int = 0                          # how many times fitness was measured
+    margin: Optional[float] = None            # significance threshold actually used
 
 
 def _fitness_verdict(incumbent: Optional[float], candidate: Optional[float], *,
-                     tol: float) -> str:
+                     tol: float, sem: float = 0.0, k: float = 1.0) -> str:
     """Classify a candidate's measured fitness against the incumbent's.
 
-    Pure and side-effect free so the adoption rule can be unit-tested directly. A
-    change within `tol` of the incumbent is "neutral" (a safe lateral move — often a
-    prompt clarification that helps real quality without moving a small benchmark);
-    below it is a "regressed" change we must reject.
+    Fitness is a *noisy* estimate (a stochastic model), so the decision margin is the
+    LARGER of an absolute floor `tol` and `k` standard errors of the estimate — we
+    only call a change real if it exceeds the noise. `sem` is the combined standard
+    error of the incumbent/candidate means; with sem=0 this reduces exactly to the
+    deterministic tolerance rule. Pure and side-effect free so it is unit-testable.
+
+    A change within the margin is "neutral" (a safe lateral move — often a prompt
+    clarification that helps real quality without shifting a small benchmark); a
+    statistically-confident drop is "regressed" and must be rejected.
     """
     if incumbent is None or candidate is None:
         return "unknown"
-    if candidate > incumbent + tol:
+    margin = max(float(tol), float(k) * float(sem))
+    if candidate > incumbent + margin:
         return "improved"
-    if candidate < incumbent - tol:
+    if candidate < incumbent - margin:
         return "regressed"
     return "neutral"
 
 
-def _measure_fitness(client, cfg: Config, *, emit=None):
-    """Benchmark the CURRENT on-disk source in a SUBPROCESS, returning its fitness.
+def _bench_once(client, cfg: Config) -> dict:
+    """One benchmark run of the CURRENT on-disk source, in a SUBPROCESS.
 
     The subprocess is essential, not incidental: `evolve` patches files like
     `ag/prompts.py`, but this process already imported those modules, so an in-process
     benchmark would score the *old* prompts still held in memory. Shelling out to a
-    fresh `python -m ag bench` guarantees the freshly-written candidate is what gets
-    measured — the same reason the test gate runs in a subprocess.
-
-    Isolated behind one function so tests can stub it with deterministic fitnesses.
-    Returns a lightweight object exposing `.fitness`, `.pass_rate`, `.per_task`.
+    fresh `python -m ag bench` guarantees the freshly-written candidate is measured —
+    the same reason the test gate runs in a subprocess.
     """
-    from types import SimpleNamespace
     backend = {"ApiClient": "anthropic", "OllamaClient": "ollama",
                "DryRunClient": "dry"}.get(type(client).__name__)
     cmd = [sys.executable, "-m", "ag"]
     if backend:
         cmd += ["--backend", backend]
     cmd += ["bench", "--json", "--mode", getattr(cfg, "bench_mode", "optimize_execute")]
-    data = {}
     try:
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
-        data = extract_json(r.stdout) or {}
+        return extract_json(r.stdout) or {}
     except (subprocess.TimeoutExpired, OSError):
-        data = {}
+        return {}
+
+
+def _measure_fitness(client, cfg: Config, *, samples: Optional[int] = None, emit=None):
+    """Estimate fitness by repeating the benchmark, since one run is a noisy draw.
+
+    Runs the benchmark `samples` (default `cfg.bench_samples`) times and reduces the
+    results to a mean and its standard error, so the evolve gate can decide on
+    *statistical significance* rather than a single lucky/unlucky measurement. Each
+    sample is an independent fresh process, so the model's nondeterminism is sampled,
+    not frozen. Isolated behind one function so tests can stub it deterministically.
+
+    Returns a lightweight object exposing `.fitness` (mean), `.stdev`, `.sem`, `.n`,
+    `.samples`, and `.per_task` (from the last run, for the failing-task briefing).
+    """
+    from types import SimpleNamespace
+    from . import bench
+    from .pipeline import _emit
+    n = samples if samples is not None else max(1, int(getattr(cfg, "bench_samples", 3)))
+    fits: List[float] = []
+    last: dict = {}
+    for i in range(n):
+        data = _bench_once(client, cfg)
+        fits.append(float(data.get("fitness", 0.0) or 0.0))
+        last = data or last
+        if n > 1:
+            _emit(emit, "bench", f"fitness sample {i + 1}/{n}: {fits[-1]}/10",
+                  level="result")
+    stat = bench.summarize(fits)
     return SimpleNamespace(
-        fitness=float(data.get("fitness", 0.0) or 0.0),
-        pass_rate=float(data.get("pass_rate", 0.0) or 0.0),
-        per_task=list(data.get("per_task", []) or []),
+        fitness=stat.mean, stdev=stat.stdev, sem=stat.sem, n=stat.n, samples=fits,
+        pass_rate=float(last.get("pass_rate", 0.0) or 0.0),
+        per_task=list(last.get("per_task", []) or []),
     )
 
 
@@ -234,12 +267,14 @@ def evolve(client, cfg: Config, *, apply: bool = False,
     # an uninformative constant) and when the gate is disabled.
     do_fitness = bool(getattr(cfg, "fitness_gate", True)) and not dry_run
     incumbent = None
+    incumbent_sem = None      # known only when we measure the incumbent fresh
     bench_res = None
     if do_fitness:
         incumbent = archive.get_cached_fitness(parent_hash)
         if incumbent is None:
             bench_res = _measure_fitness(client, cfg, emit=emit)
             incumbent = bench_res.fitness
+            incumbent_sem = bench_res.sem
             archive.set_cached_fitness(parent_hash, incumbent)
 
     briefing = _direction(cfg, telemetry, bench_res=bench_res)
@@ -308,32 +343,49 @@ def evolve(client, cfg: Config, *, apply: bool = False,
                             reason="tests failed -> rolled back",
                             incumbent_fitness=incumbent)
 
-    # 4) Gate 2 (FITNESS): the change must not measurably regress the benchmark.
+    # 4) Gate 2 (FITNESS): the change must not *significantly* regress the benchmark.
+    # Fitness is a noisy estimate, so the decision uses the combined standard error of
+    # the incumbent and candidate means — reacting only to differences beyond the
+    # noise. combined_sem = sqrt(sem_inc^2 + sem_cand^2); if the incumbent came from
+    # cache (no variance on hand), we assume its noise matches the candidate's.
     candidate = None
     verdict = "unknown"
     delta = None
+    cand_stdev = None
+    cand_n = 0
+    margin = None
     candidate_hash = archive.evolvable_hash(_read_evolvable(cfg))
     if do_fitness:
         cand_res = _measure_fitness(client, cfg, emit=emit)
         candidate = cand_res.fitness
+        cand_stdev = cand_res.stdev
+        cand_n = cand_res.n
         archive.set_cached_fitness(candidate_hash, candidate)
         delta = round(candidate - incumbent, 3) if incumbent is not None else None
+        inc_sem = incumbent_sem if incumbent_sem is not None else cand_res.sem
+        combined_sem = math.hypot(inc_sem or 0.0, cand_res.sem or 0.0)
+        k = float(getattr(cfg, "fitness_k", 1.0))
+        margin = round(max(float(getattr(cfg, "fitness_tol", 0.05)), k * combined_sem), 3)
         verdict = _fitness_verdict(incumbent, candidate,
-                                   tol=float(getattr(cfg, "fitness_tol", 0.05)))
+                                   tol=float(getattr(cfg, "fitness_tol", 0.05)),
+                                   sem=combined_sem, k=k)
         if verdict == "regressed":
-            backup.restore(snap)  # instant rollback — never adopt a regression
+            backup.restore(snap)  # instant rollback — never adopt a real regression
             archive.record(archive.Entry(
                 ts=archive.now_ts(), parent_hash=parent_hash,
                 candidate_hash=candidate_hash, incumbent_fitness=incumbent,
                 candidate_fitness=candidate, delta=delta, tests_passed=True,
                 adopted=False, verdict=verdict, rationale=rationale, changed=changed,
-                snapshot_id=snap.id))
+                snapshot_id=snap.id, candidate_stdev=cand_stdev, samples=cand_n,
+                margin=margin))
             return EvolveResult(
                 True, False, True, rationale=rationale, changed=changed,
                 test_output=output, snapshot_id=snap.id,
-                reason=f"fitness regressed ({incumbent}->{candidate}) -> rolled back",
+                reason=f"fitness regressed ({incumbent}->{candidate}, "
+                       f"margin {margin}) -> rolled back",
                 incumbent_fitness=incumbent, candidate_fitness=candidate,
-                fitness_delta=delta, verdict=verdict)
+                fitness_delta=delta, verdict=verdict, candidate_stdev=cand_stdev,
+                samples=cand_n, margin=margin)
 
     # Passing candidate (both gates cleared).
     if cfg.autonomy_level == "manual" and not apply:
@@ -344,7 +396,8 @@ def evolve(client, cfg: Config, *, apply: bool = False,
             reason="manual mode: passing candidate left for review "
                    "(use rollback to discard)",
             incumbent_fitness=incumbent, candidate_fitness=candidate,
-            fitness_delta=delta, verdict=verdict)
+            fitness_delta=delta, verdict=verdict, candidate_stdev=cand_stdev,
+            samples=cand_n, margin=margin)
 
     # AG commits to its own branch, never main — advancing main stays a human action.
     commit = None if dry_run else backup.git_commit_evolve(
@@ -356,12 +409,14 @@ def evolve(client, cfg: Config, *, apply: bool = False,
         ts=archive.now_ts(), parent_hash=parent_hash, candidate_hash=candidate_hash,
         incumbent_fitness=incumbent, candidate_fitness=candidate, delta=delta,
         tests_passed=True, adopted=True, verdict=verdict, rationale=rationale,
-        changed=changed, snapshot_id=snap.id))
+        changed=changed, snapshot_id=snap.id, candidate_stdev=cand_stdev,
+        samples=cand_n, margin=margin))
     reason = "both gates passed -> adopted"
     if verdict == "improved":
-        reason = f"fitness improved ({incumbent}->{candidate}) -> adopted"
+        reason = f"fitness improved ({incumbent}->{candidate}, >{margin}) -> adopted"
     return EvolveResult(True, True, False, rationale=rationale, changed=changed,
                         test_output=output, snapshot_id=snap.id, commit=commit,
                         reason=reason, incumbent_fitness=incumbent,
                         candidate_fitness=candidate, fitness_delta=delta,
-                        verdict=verdict)
+                        verdict=verdict, candidate_stdev=cand_stdev, samples=cand_n,
+                        margin=margin)

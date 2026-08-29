@@ -86,8 +86,9 @@ def cmd_evolve(args) -> int:
         cand = result.candidate_fitness
         line = f"fitness: incumbent={result.incumbent_fitness}/10"
         if cand is not None:
-            line += (f" -> candidate={cand}/10  (Δ{result.fitness_delta:+}"
-                     f", {result.verdict})")
+            spread = f"±{result.candidate_stdev}" if result.candidate_stdev else ""
+            line += (f" -> candidate={cand}{spread}/10  (Δ{result.fitness_delta:+}, "
+                     f"{result.verdict}, margin={result.margin}, n={result.samples})")
         print(line)
     if result.rationale:
         print(f"rationale: {result.rationale}")
@@ -126,8 +127,22 @@ def cmd_bench(args) -> int:
     from . import bench
     cfg = Config.load()
     client = _client(args, cfg)
-    res = bench.run_benchmark(client, cfg,
-                              mode=getattr(args, "mode", None) or cfg.bench_mode)
+    mode = getattr(args, "mode", None) or cfg.bench_mode
+    n = max(1, getattr(args, "samples", 1) or 1)
+    # Multiple samples surface the nondeterminism the evolve gate reasons about:
+    # report the mean fitness and its standard error, not a single noisy draw.
+    if n > 1:
+        runs = [bench.run_benchmark(client, cfg, mode=mode) for _ in range(n)]
+        stat = bench.summarize([r.fitness for r in runs])
+        res = runs[-1]
+        if getattr(args, "json", False):
+            print(json.dumps({**res.as_dict(), "stat": stat.as_dict()}))
+            return 0
+        print(f"fitness: {stat.mean}±{stat.sem}/10  (mean of n={stat.n}, "
+              f"stdev={stat.stdev})   mode={mode}")
+        print("  per-run: " + ", ".join(str(r.fitness) for r in runs))
+        return 0
+    res = bench.run_benchmark(client, cfg, mode=mode)
     # --json emits ONLY the JSON, so machine callers (the evolve fitness gate shells
     # out to this) can parse stdout cleanly.
     if getattr(args, "json", False):
@@ -394,6 +409,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="score AG on its objective benchmark (its fitness fn)")
     bn.add_argument("--mode", choices=["execute", "optimize_execute"], default=None,
                     help="execute = base model only; optimize_execute = full prompt path")
+    bn.add_argument("--samples", "-n", type=int, default=1,
+                    help="repeat N times and report mean fitness ± standard error")
     bn.add_argument("--verbose", "-v", action="store_true",
                     help="show every task's pass/fail and answer")
     bn.add_argument("--json", action="store_true", help="emit the raw result JSON")

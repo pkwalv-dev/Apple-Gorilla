@@ -31,6 +31,18 @@ def test_verdict_unknown_when_unmeasured():
     assert _fitness_verdict(6.0, None, tol=0.05) == "unknown"
 
 
+def test_verdict_uses_standard_error_margin():
+    # Nondeterministic mathematics: a +1.0 gain is NOT significant when the estimate
+    # is noisy (large standard error), but IS when the noise is small.
+    assert _fitness_verdict(5.0, 6.0, tol=0.05, sem=2.0, k=1.0) == "neutral"
+    assert _fitness_verdict(5.0, 6.0, tol=0.05, sem=0.1, k=1.0) == "improved"
+    # A drop that sits inside the noise band is not called a regression.
+    assert _fitness_verdict(6.0, 5.0, tol=0.05, sem=2.0, k=1.0) == "neutral"
+    # k scales strictness: same gain and noise, stricter k -> not significant.
+    assert _fitness_verdict(5.0, 6.0, tol=0.05, sem=0.5, k=1.0) == "improved"
+    assert _fitness_verdict(5.0, 6.0, tol=0.05, sem=0.5, k=3.0) == "neutral"
+
+
 # --- end-to-end: a regression is rolled back, an improvement is adopted -----
 
 class _PatchClient:
@@ -54,7 +66,8 @@ def _harness(monkeypatch, tmp_path, fitnesses):
     monkeypatch.setattr(backup, "git_commit_evolve", lambda *a, **k: None)
     seq = iter(fitnesses)
     monkeypatch.setattr(ev, "_measure_fitness", lambda *a, **k: types.SimpleNamespace(
-        fitness=next(seq), pass_rate=0.5, per_task=[]))
+        fitness=next(seq), stdev=0.0, sem=0.0, n=3, samples=[], pass_rate=0.5,
+        per_task=[]))
 
 
 def test_regression_is_rolled_back(monkeypatch, tmp_path):
@@ -118,8 +131,9 @@ def test_measure_fitness_subprocess_roundtrip():
     # freshly-written source, not stale in-memory modules. Guards the JSON contract:
     # if `--json` ever stops emitting clean JSON, this breaks. Dry backend -> no network.
     from ag.model import DryRunClient
-    r = ev._measure_fitness(DryRunClient(), Config())
+    r = ev._measure_fitness(DryRunClient(), Config(), samples=1)
     assert hasattr(r, "fitness") and isinstance(r.fitness, float)
+    assert hasattr(r, "sem") and hasattr(r, "stdev") and r.n == 1
     assert len(r.per_task) >= 10  # the seed suite ran in the subprocess
 
 

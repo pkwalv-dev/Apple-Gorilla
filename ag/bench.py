@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import time
 from dataclasses import dataclass, field, asdict
 from hashlib import sha256
@@ -293,3 +294,37 @@ def run_benchmark(client, cfg: Config, *, tasks: Optional[List[Task]] = None,
           f"fitness={fitness}/10  ({passed}/{n} passed) in {result.elapsed_s}s",
           level="result", scorecard={"fitness": fitness, "pass_rate": pass_rate})
     return result
+
+
+# --- statistics of a nondeterministic fitness estimate ---------------------
+
+@dataclass
+class FitnessStat:
+    """A fitness *estimate* with its uncertainty.
+
+    Because the model is stochastic, one benchmark run is a single draw from a
+    distribution. Repeating the run gives a sample mean whose uncertainty is the
+    standard error (sem = stdev / sqrt(n)). The evolve gate compares means in units
+    of sem, so it only reacts to differences that are unlikely to be noise.
+    """
+
+    mean: float = 0.0
+    stdev: float = 0.0
+    n: int = 0
+    sem: float = 0.0
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def summarize(samples: List[float]) -> FitnessStat:
+    """Reduce repeated fitness measurements to (mean, stdev, n, standard error)."""
+    vals = [float(s) for s in samples]
+    n = len(vals)
+    if n == 0:
+        return FitnessStat()
+    mean = sum(vals) / n
+    stdev = statistics.stdev(vals) if n >= 2 else 0.0
+    sem = stdev / (n ** 0.5) if n >= 2 else 0.0
+    return FitnessStat(mean=round(mean, 3), stdev=round(stdev, 3), n=n,
+                       sem=round(sem, 3))

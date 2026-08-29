@@ -252,8 +252,10 @@ use of the host's *own* resources for AG's work only.
 4. **Validate** statically (Python compiles, JSON parses) — reject early.
 5. **Apply** to the working tree.
 6. **Gate 1 — safety:** run the suite in a subprocess (`pytest`). Fail → rollback.
-7. **Gate 2 — fitness:** re-benchmark the candidate. A measured **regression** →
-   rollback. AG never keeps a change that made it worse.
+7. **Gate 2 — fitness:** re-benchmark the candidate `bench_samples` times and compare
+   means by **standard error**. A *statistically significant* **regression** → rollback;
+   noise-level differences are treated as neutral. AG never keeps a change that made it
+   measurably worse.
 8. **Adopt** (+ optional git commit to `ag/evolve`, never `main`) and **record the
    fitness delta** to the evolution archive (`state/archive/`, inspect with
    `ag evolve --history`).
@@ -275,9 +277,20 @@ pass rate on a 0–10 scale. Two properties make the signal trustworthy:
 - **It's the utility function `evolve` optimises.** A self-edit is kept only if this
   number holds or rises. That is the entire mechanism behind measured self-improvement.
 
+**Fitness is a random variable, so the gate is statistical.** A model at temperature
+> 0 makes each benchmark run a *noisy draw*, not a fixed number — so comparing two
+single runs would adopt changes that only *look* better by luck. AG instead samples the
+benchmark `bench_samples` times (default 3), takes the mean, and estimates its **standard
+error** (`sem = stdev / √n`). A change is called *improved* or *regressed* only if the
+means differ by more than `fitness_k` combined standard errors (the decision margin is
+`max(fitness_tol, fitness_k · √(sem_incumbent² + sem_candidate²))`) — otherwise it is a
+*neutral* lateral move. AG reacts to signal, not noise. Set `bench_samples: 1` to fall
+back to the cheap single-shot gate.
+
 ```bash
 python -m ag bench -v            # score AG now; -v shows every task's pass/fail
-python -m ag evolve              # try one improvement, gated on this score
+python -m ag bench -n 5          # mean fitness ± standard error over 5 runs
+python -m ag evolve              # try one improvement, gated on statistical significance
 python -m ag evolve --history    # the measured fitness trajectory over time
 ```
 
