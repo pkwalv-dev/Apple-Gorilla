@@ -20,6 +20,7 @@
     "speed": 0.2
   },
   "autonomy_level": "guarded",
+  "evolver_backend": "",
   "fitness_gate": true,
   "bench_mode": "optimize_execute",
   "bench_max_tasks": 0,

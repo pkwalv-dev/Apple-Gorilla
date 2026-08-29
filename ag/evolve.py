@@ -247,9 +247,20 @@ def _validate_patch(rel: str, content: str) -> Optional[str]:
 
 
 def evolve(client, cfg: Config, *, apply: bool = False,
-           dry_run: bool = False, emit=None) -> EvolveResult:
+           dry_run: bool = False, emit=None, evolver_client=None) -> EvolveResult:
+    """Attempt one gated self-improvement.
+
+    `client` is the DEPLOY backend: it answers the benchmark, so fitness is always
+    measured on the model you actually run. `evolver_client` (optional) is the model
+    that PROPOSES the edit — pass a stronger one (e.g. Claude) to get smart mutations
+    while the deploy model does the free, honest measuring. Defaults to `client`.
+    """
     if cfg.autonomy_level == "never":
         return EvolveResult(False, False, False, reason="autonomy_level=never")
+
+    # The proposer may differ from the deploy/measuring model; the benchmark never
+    # runs on the proposer, so an adopted change is verified against `client`.
+    proposer = evolver_client or client
 
     # No usable test gate means no safe way to verify a self-edit. Bail out BEFORE
     # spending a (possibly billed) model call, snapshotting, or touching the tree.
@@ -290,8 +301,8 @@ def evolve(client, cfg: Config, *, apply: bool = False,
         "benchmark task pass (or lift the weakest axis) without breaking anything, "
         "per your rules."
     )
-    res = client.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
-                          max_tokens=cfg.meta_output_tokens)
+    res = proposer.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
+                            max_tokens=cfg.meta_output_tokens)
     data = extract_json(res.text) or {}
     patches = data.get("patches", []) or []
     rationale = str(data.get("rationale", ""))
