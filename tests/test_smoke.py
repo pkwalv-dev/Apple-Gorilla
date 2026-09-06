@@ -41,6 +41,28 @@ def test_pipeline_dry_run_produces_answer():
     assert rec.critiques and rec.critiques[0]["verdict"] == "pass"
 
 
+def test_ollama_empty_answer_salvaged(monkeypatch):
+    # If suppression/stripping leaves nothing but the model DID emit content
+    # (e.g. a truncated <think> with no answer after), don't return a blank answer.
+    import json as _json
+    from ag import model
+    from ag.config import Config as _Cfg
+
+    class _Resp:
+        def __init__(self, payload): self._p = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return _json.dumps(self._p).encode("utf-8")
+
+    payload = {"message": {"content": "<think>partial reasoning, truncated"}}
+    # complete() does `import urllib.request` internally, so patch the stdlib module.
+    import urllib.request as _u
+    monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp(payload))
+    res = model.OllamaClient(_Cfg()).complete(system="s", user="u", cfg=_Cfg())
+    assert res.text.strip() != ""            # not blank
+    assert "<think>" not in res.text          # tags removed
+
+
 def test_user_context_empty_for_template(tmp_path, monkeypatch):
     # An UNFILLED template (headings + empty bullet fields) -> no context injected.
     from ag import profile
@@ -92,6 +114,7 @@ def test_thinking_toggle_maps_per_backend():
     on = Config(); on.think = "on"
     auto = Config(); auto.think = "auto"
     # Ollama: only "on" forces the think flag; "off" uses a /no_think prompt suffix.
+    # "auto" leaves the model to its own default (we never silently override it).
     assert model._ollama_think(on) is True
     assert model._ollama_think(off) is None and model._no_think(off) is True
     assert model._ollama_think(auto) is None and model._no_think(auto) is False

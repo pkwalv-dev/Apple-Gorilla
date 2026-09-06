@@ -189,7 +189,13 @@ class OllamaClient:
                 f"Cannot reach Ollama at {self._host} ({e}). "
                 f"Is `ollama serve` running and `{self._model}` pulled?"
             ) from e
-        text = _strip_thinking((data.get("message") or {}).get("content", ""))
+        content = (data.get("message") or {}).get("content", "")
+        text = _strip_thinking(content)
+        # Defense in depth: if suppression/stripping left nothing but the model did
+        # emit content (e.g. a truncated <think> with no answer after it), salvage the
+        # de-tagged content rather than returning a blank answer to the pipeline.
+        if not text and content.strip():
+            text = re.sub(r"</?think>", "", content).strip()
         return ModelResult(
             text=text,
             input_tokens=data.get("prompt_eval_count", 0) or 0,
@@ -308,7 +314,13 @@ def _ollama_think(cfg: Config):
 
 
 def _no_think(cfg: Config) -> bool:
-    """True when the user asked to turn extended thinking OFF."""
+    """True when the user asked to turn extended thinking OFF.
+
+    Only an explicit "off" suppresses thinking. "auto" means exactly what the UI
+    says — leave the model to its own default (thinking-capable local models like
+    Qwen3 will think). We never silently override the user's selection here; if a
+    local thinking model is slow, that is surfaced in the UI's activity indicator and
+    the user can pick a faster model or turn thinking off themselves."""
     return getattr(cfg, "think", "auto") == "off"
 
 
@@ -328,6 +340,12 @@ def _strip_thinking(text: str) -> str:
     low = t.lower()
     if "</think>" in low and "<think>" not in low:
         t = t[low.rfind("</think>") + len("</think>"):]
+    # Dangling opener with no closer: the reasoning was cut off (e.g. the token
+    # budget ran out mid-think). Drop from the opener to the end — keeping any real
+    # text that preceded it — so a truncated think block never leaks as the answer.
+    low = t.lower()
+    if "<think>" in low and "</think>" not in low:
+        t = t[:low.find("<think>")]
     return t.strip()
 
 
