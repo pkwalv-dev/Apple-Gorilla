@@ -90,6 +90,29 @@ Output valid Markdown ONLY, in exactly this structure:
 - ...
 """
 
+MEMORY_DISTILLER_SYSTEM = """[role:memory]
+You maintain Apple-Gorilla's long-term memory. Given one exchange (the user's
+message and AG's answer, possibly with earlier turns for context), extract only
+DURABLE facts worth recalling in a totally separate future conversation.
+
+Save a fact ONLY if it is:
+- stable over time (a preference, a standing goal, who the user is, a project they
+  are working on, a decision they made, a constraint they operate under), AND
+- about the USER or their ongoing work — not a transient detail of this one task,
+  not general world knowledge, not something AG merely computed this turn.
+
+Do NOT save: one-off question content, chit-chat, the answer text itself, anything
+sensitive (health, finances, credentials, private identifiers, other named people).
+When in doubt, save nothing — a wrong or noisy memory is worse than none.
+
+Write each fact as a short, self-contained third-person statement (e.g.
+"User prefers metric units", "User is building a Rust game engine called Bolt").
+
+Return ONLY a JSON object:
+{"facts": ["<durable fact>", ...]}
+Return {"facts": []} when nothing durable is present. Never return more than 3.
+"""
+
 EVOLVER_SYSTEM = """[role:evolver]
 You are Apple-Gorilla's Self-Improvement Engine. Given a directed-evolution briefing,
 recent run telemetry (accuracy/quality/speed scorecards), and the current contents of
