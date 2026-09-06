@@ -40,6 +40,9 @@ table.hist td{padding:3px 6px;border-bottom:1px solid rgba(127,127,127,.15);
 table.hist td.rat{color:#8b949e;font-style:italic}
 #improve label.toggle{font-size:13px;opacity:.85;margin-left:auto}
 #improve select{margin-left:6px}
+/* live activity indicator on the pending reply bubble */
+.body.pending{opacity:.85;font-style:italic}
+.act-timer{opacity:.6;font-variant-numeric:tabular-nums;font-style:normal}
 </style></head><body>
 <div class="wrap">
 <header>
@@ -69,6 +72,11 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     <button class="cmd primary" id="runbtn" onclick="go()">▶ Run</button>
     <span class="cmd-note">executes a request</span>
     <span class="ctl-right">
+      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">🤖 model
+        <select id="model" class="ctl-select" onchange="saveModel()">
+          <option value="">loading…</option>
+        </select>
+      </label>
       <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off · fast' also skips AG's self-revision pass for a quicker reply; 'on' makes the model reason step-by-step.">🧠 thinking
         <select id="think" class="ctl-select" onchange="saveThink()">
           <option value="auto">auto</option>
@@ -207,10 +215,34 @@ function nowStr(){ const d=new Date();
 function appendAssistant(){
   const el=document.createElement('div'); el.className='msg ai processing';
   el.innerHTML='<div class="who">apple-gorilla<span class="ts">'+nowStr()+'</span></div>'
-    +'<div class="body pending">…thinking</div><div class="live-ctx"></div>';
+    +'<div class="body pending"><span class="act-stage">…starting</span>'
+    +'<span class="act-timer"></span></div><div class="live-ctx"></div>';
   $('chat').appendChild(el); $('chat').scrollTop=$('chat').scrollHeight;
   return el;
 }
+
+/* ---- live activity indicator: what the model is doing + how long ------- */
+/* Makes a snag visible: the stage label shows the current step and the timer
+   keeps ticking, so a stall (timer climbing, stage unchanged) is obvious. */
+const STAGE_LABELS={conversation:'💬 reading the conversation',
+  web:'🌐 searching the web',optimize:'⚙️ engineering the prompt',
+  memory:'🧠 recalling memory',execute:'✍️ generating the answer',
+  critique:'🔍 reviewing the answer',revise:'✏️ revising the answer',
+  score:'📊 scoring the answer'};
+function fmtDur(ms){const s=Math.floor(ms/1000);
+  return s>=60?(Math.floor(s/60)+':'+String(s%60).padStart(2,'0')):(s+'s');}
+function startActivity(ai){
+  ai._t0=Date.now();
+  const tick=()=>{const el=ai.querySelector('.act-timer');
+    if(el) el.textContent=' · '+fmtDur(Date.now()-ai._t0);};
+  ai._timer=setInterval(tick,1000); tick();
+}
+function setStage(ai,ev){
+  const lbl=STAGE_LABELS[ev.stage]; if(!lbl) return;
+  const el=ai&&ai.querySelector('.act-stage');
+  if(el){ el.textContent=lbl; ai._lastStage=Date.now(); }
+}
+function stopActivity(ai){ if(ai&&ai._timer){clearInterval(ai._timer); ai._timer=null;} }
 
 /* ---- context-in-use indicator ---------------------------------------- */
 let curCtx={history:0,profile:false,memory:[],saved:[],web:0};
@@ -260,10 +292,11 @@ async function go(){
   ['acc','qual','spd','ovr'].forEach(x=>setCard(x,null));
   // prior turns become AG's working memory (the current prompt is sent separately)
   const hist=CHAT.slice(-20).map(m=>({role:m.role,text:m.text}));
-  resetContext(); appendUser(p); const ai=appendAssistant(); $('p').value='';
+  resetContext(); appendUser(p); const ai=appendAssistant(); startActivity(ai); $('p').value='';
   try{
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value})});
+      body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
+        model:($('model')?$('model').value:'')})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
@@ -273,14 +306,28 @@ async function go(){
         if(!line)continue; handle(JSON.parse(line),ai);
       }
     }
-  }catch(e){ addEv({stage:'error',level:'error',msg:'request failed: '+e});
+    // Stream ended without a final answer (e.g. dropped connection): say so plainly
+    // rather than leaving the bubble stuck on the activity indicator forever.
+    if(!ai._committed){ stopActivity(ai);
+      const b=ai.querySelector('.body');
+      if(b&&b.classList.contains('pending')){ b.className='body';
+        b.textContent='(the run ended without an answer — see the trace above)';
+        ai.classList.remove('processing'); $('status').textContent='ended'; } }
+  }catch(e){ stopActivity(ai); addEv({stage:'error',level:'error',msg:'request failed: '+e});
     $('status').textContent='error';
-    const b=ai.querySelector('.body'); b.className='body'; b.textContent='(request failed)';
+    const b=ai.querySelector('.body'); b.className='body'; b.textContent='(request failed: '+escapeHtml(''+e)+')';
     ai.classList.remove('processing'); }
   $('runbtn').disabled=false;
 }
 function handle(ev,ai){
+  if(ev.stage==='error'){   // terminal pipeline error — make it visible, don't hang
+    stopActivity(ai);
+    const b=ai.querySelector('.body'); b.className='body';
+    b.textContent='⚠ '+(ev.msg||'the run failed'); ai.classList.remove('processing');
+    addEv(ev); $('status').textContent='error'; return;
+  }
   if(ev.stage==='done'){
+    stopActivity(ai);
     const d=ev.data||{};
     const b=ai.querySelector('.body'); b.className='body'; b.textContent=d.answer||'(no answer)';
     ai.classList.remove('processing');
@@ -298,6 +345,7 @@ function handle(ev,ai){
     checkUpdate();   // one on-demand check AFTER the run — never a background poll
     return;
   }
+  setStage(ai,ev);
   applyContext(ev,ai);
   addEv(ev);
   const sc=(ev.data&&ev.data.scorecard);
@@ -517,8 +565,24 @@ async function loadTools(){
 function saveThink(){ try{ localStorage.setItem('ag_think',$('think').value); }catch(e){} }
 function restoreThink(){ try{ const v=localStorage.getItem('ag_think');
   if(v&&$('think')) $('think').value=v; }catch(e){} }
+function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
+async function loadModels(){
+  const sel=$('model'); if(!sel) return;
+  try{
+    const d=await fetch('/models').then(r=>r.json());
+    sel.innerHTML='';
+    if(!d.options||!d.options.length){
+      sel.innerHTML='<option value="">'+(d.ollama_reachable===false
+        ?'(Ollama not reachable)':'(no models found)')+'</option>'; return; }
+    for(const o of d.options){ const opt=document.createElement('option');
+      opt.value=o.value; opt.textContent=o.label; sel.appendChild(opt); }
+    let saved=null; try{ saved=localStorage.getItem('ag_model'); }catch(e){}
+    const vals=d.options.map(o=>o.value);
+    sel.value=(saved&&vals.includes(saved))?saved:(d.current||d.options[0].value);
+  }catch(e){ sel.innerHTML='<option value="">(could not load models)</option>'; }
+}
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
-restoreThink(); loadChat(); renderWhere(); renderEvoStatus();
+restoreThink(); loadModels(); loadChat(); renderWhere(); renderEvoStatus();
 </script></body></html>"""
 
 
@@ -613,6 +677,8 @@ class _Handler(BaseHTTPRequestHandler):
                        "application/json")
         elif self.path == "/whereami":
             self._send(200, json.dumps(self._whereami()), "application/json")
+        elif self.path == "/models":
+            self._send(200, json.dumps(_models_data(self.cfg)), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -697,7 +763,8 @@ class _Handler(BaseHTTPRequestHandler):
         think = str(payload.get("think", "auto")).lower()
         if think not in ("off", "auto", "on"):
             think = "auto"
-        self._stream_run(prompt, want_web, history, think)
+        model = str(payload.get("model", "")).strip()[:100]
+        self._stream_run(prompt, want_web, history, think, model)
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -911,7 +978,26 @@ class _Handler(BaseHTTPRequestHandler):
             self._evolving.clear()
             self._evolve_lock.release()
 
-    def _stream_run(self, prompt: str, want_web, history=None, think="auto"):
+    def _parse_model_choice(self, choice: str):
+        """Validate a "<backend>:<model>" selector value into per-run overrides.
+
+        Returns a dict of Config overrides, or {} to use the configured default. We
+        only honour a backend we actually support and, for the cloud option, only the
+        configured Claude model — never an arbitrary string from the request. An
+        Ollama model name is accepted as-is (the user may have just pulled it); if it
+        isn't really available the run surfaces a clear error rather than pretending.
+        """
+        if not choice or ":" not in choice:
+            return {}
+        backend, _, model = choice.partition(":")
+        backend, model = backend.lower().strip(), model.strip()
+        if backend == "anthropic":
+            return {"backend": "anthropic", "model": self.cfg.model}
+        if backend == "ollama" and model:
+            return {"backend": "ollama", "ollama_model": model}
+        return {}
+
+    def _stream_run(self, prompt: str, want_web, history=None, think="auto", model=""):
         """Run the pipeline, streaming each stage event as one NDJSON line."""
         import dataclasses
         from .pipeline import capture_memory
@@ -922,6 +1008,7 @@ class _Handler(BaseHTTPRequestHandler):
         overrides = {"think": think}
         if think == "off":
             overrides["max_iterations"] = min(1, self.cfg.max_iterations)
+        overrides.update(self._parse_model_choice(model))
         cfg = dataclasses.replace(self.cfg, **overrides)
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
         broker = _build_broker(cfg, web=web_eff)
@@ -998,6 +1085,46 @@ def _doctor_data(cfg: Config) -> dict:
         "snapshots": len(backup.list_snapshots()),
         "last_improvement": last[0] if last else None, "allow_web": cfg.allow_web,
     }
+
+
+def _list_ollama_models(cfg: Config) -> list:
+    """Names of models currently pulled in the local Ollama (empty if unreachable)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(cfg.ollama_host.rstrip("/") + "/api/tags",
+                                    timeout=1.5) as r:
+            return [m.get("name") for m
+                    in json.loads(r.read().decode("utf-8")).get("models", [])
+                    if m.get("name")]
+    except Exception:
+        return []
+
+
+def _models_data(cfg: Config) -> dict:
+    """Models the GUI selector can offer, and the current effective choice.
+
+    Each option's value is "<backend>:<model>" so the /run handler knows both which
+    backend to use and which model. Local (Ollama) models are always listed if the
+    server is reachable; the cloud Claude model is offered only when creds/OAuth are
+    present. `current` reflects what a run would use right now with no override."""
+    from .model import _has_anthropic_creds, has_oauth_profile
+    models = _list_ollama_models(cfg)
+    cloud = bool(_has_anthropic_creds() or has_oauth_profile())
+    options = []
+    if cloud:
+        options.append({"value": f"anthropic:{cfg.model}",
+                        "label": f"{cfg.model} · Claude cloud"})
+    options += [{"value": f"ollama:{m}", "label": f"{m} · local"} for m in models]
+
+    if cfg.backend == "anthropic" or (cfg.backend == "auto" and cloud):
+        current = f"anthropic:{cfg.model}"
+    elif cfg.backend == "ollama" or (
+            cfg.backend == "auto" and getattr(cfg, "offline_backend", "") == "ollama"):
+        current = f"ollama:{cfg.ollama_model}"
+    else:
+        current = f"ollama:{cfg.ollama_model}"
+    return {"options": options, "current": current, "cloud": cloud,
+            "ollama_reachable": bool(models)}
 
 
 def run_prompt(cfg: Config, prompt: str) -> tuple[str, str]:
