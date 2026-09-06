@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Config
@@ -28,8 +29,7 @@ _PAGE_TEMPLATE = """<!doctype html>
 __FONTS__
 <style>__THEME__</style>
 <style>
-#improve .controls{flex-wrap:wrap;gap:8px;align-items:center}
-#improveout{margin-top:10px}
+#improveout{margin-top:12px}
 .result{padding:12px;border-radius:8px;background:rgba(127,127,127,.08);
   line-height:1.55;font-size:14px}
 .result.ok{border-left:3px solid #3fb950}
@@ -38,13 +38,13 @@ table.hist{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}
 table.hist td{padding:3px 6px;border-bottom:1px solid rgba(127,127,127,.15);
   vertical-align:top}
 table.hist td.rat{color:#8b949e;font-style:italic}
-#improve label.toggle{font-size:13px;opacity:.85}
+#improve label.toggle{font-size:13px;opacity:.85;margin-left:auto}
 #improve select{margin-left:6px}
 </style></head><body>
 <div class="wrap">
 <header>
   <div class="logo">🦍</div>
-  <div class="brand"><h1>Apple-Gorilla</h1>
+  <div class="brand"><h1>Apple-Gorilla<span class="ver" title="app version">v__VERSION__</span></h1>
     <div class="sub">self-improving prompt executor</div></div>
   <div id="status">ready</div>
 </header>
@@ -55,30 +55,58 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <button onclick="document.getElementById('update').style.display='none'">Dismiss</button>
 </div>
 
+<!-- where & how AG is running right now (populated from /whereami) -->
+<div id="whereami" class="whereami" title="Where and how AG is running right now"></div>
+
+<!-- when & how self-evolution is happening (populated from /doctor + /evolve/history) -->
+<div id="evostatus" class="evostatus" title="When and how AG evolves itself">
+  <span class="dot"></span><b>🧬 Evolve</b> loading status…
+</div>
+
 <div class="panel">
   <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
   <div class="controls">
-    <button class="primary" id="runbtn" onclick="go()">Run</button>
-    <button onclick="loadTools()">Tools &amp; friction</button>
-    <label class="toggle"><input type="checkbox" id="web" checked> use internet</label>
+    <button class="cmd primary" id="runbtn" onclick="go()">▶ Run</button>
+    <span class="cmd-note">executes a request</span>
+    <span class="ctl-right">
+      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off · fast' also skips AG's self-revision pass for a quicker reply; 'on' makes the model reason step-by-step.">🧠 thinking
+        <select id="think" class="ctl-select" onchange="saveThink()">
+          <option value="auto">auto</option>
+          <option value="off">off · fast</option>
+          <option value="on">on</option>
+        </select>
+      </label>
+      <label class="ctl"><input type="checkbox" id="web" checked> use internet</label>
+    </span>
   </div>
 </div>
 
 <table id="tools" class="panel"></table>
 
 <div class="panel" id="improve">
-  <div class="controls">
-    <button onclick="doBench()">📊 Benchmark</button>
-    <button class="primary" onclick="doEvolve()">🧬 Evolve</button>
-    <button onclick="loadHistory()">📜 History</button>
-    <button onclick="loadDoctor()">🩺 Status</button>
-    <label class="toggle">proposer
-      <select id="proposer">
-        <option value="">deploy backend</option>
-        <option value="anthropic">Claude (anthropic)</option>
-        <option value="ollama">Ollama (local)</option>
-      </select>
-    </label>
+  <div class="btngroup cmd-group">
+    <span class="grouplabel">⚙ Commands — run &amp; modify AG</span>
+    <textarea id="directive" class="directive" rows="2"
+      placeholder="Optional — tell Evolve what to improve in plain text (e.g. “make answers more concise”, “sharpen the web-search prompt”). This steers the next Evolve; safety &amp; fitness gates still apply."></textarea>
+    <div class="controls">
+      <button class="cmd" onclick="doBench()">📊 Benchmark</button>
+      <button class="cmd evolve" onclick="doEvolve()">🧬 Evolve</button>
+      <label class="toggle">proposer
+        <select id="proposer">
+          <option value="">deploy backend</option>
+          <option value="anthropic">Claude (anthropic)</option>
+          <option value="ollama">Ollama (local)</option>
+        </select>
+      </label>
+    </div>
+  </div>
+  <div class="btngroup view-group">
+    <span class="grouplabel">👁 Views — read-only, change nothing</span>
+    <div class="controls">
+      <button class="view" onclick="loadTools()">🧰 Tools &amp; friction</button>
+      <button class="view" onclick="loadHistory()">📜 History</button>
+      <button class="view" onclick="loadDoctor()">🩺 Status</button>
+    </div>
   </div>
   <div id="improveout"></div>
 </div>
@@ -97,54 +125,227 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
 <div class="panel" style="padding:8px"><div id="log"></div></div>
 
-<h2>Answer</h2>
-<div class="panel" id="answer"></div>
+<h2>Conversation</h2>
+<!-- context bar: lights up to show which sources feed the CURRENT answer -->
+<div id="ctxbar" title="What AG is drawing on for the current answer — each lights up as it is used">
+  <span class="ctxlbl">context in use:</span>
+  <span class="chip" id="chip-history">💬 Conversation <b class="cc" id="cc-history"></b></span>
+  <span class="chip" id="chip-profile">👤 Profile</span>
+  <span class="chip" id="chip-memory">🧠 Memory <b class="cc" id="cc-memory"></b></span>
+  <span class="chip" id="chip-web">🌐 Web <b class="cc" id="cc-web"></b></span>
+</div>
+<div class="panel chatwrap">
+  <div class="chat-toolbar">
+    <span class="ct-hint">earlier exchanges are kept here — scroll to revisit</span>
+    <button class="linkbtn spacer" onclick="clearChat()">Clear conversation</button>
+  </div>
+  <div id="chat"></div>
+</div>
 </div>
 
 <script>
 const $=id=>document.getElementById(id);
+function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function addEv(ev){
   const d=document.createElement('div');
   d.className='ev '+(ev.level||'info');
   d.innerHTML='<span class="tag">'+ev.stage+'</span>'+escapeHtml(ev.msg);
   $('log').appendChild(d); $('log').scrollTop=$('log').scrollHeight;
 }
-function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function setCard(id,v){ $(id).textContent=(v==null?'–':v);
   $(id+'b').style.width=((Number(v)||0)*10)+'%'; }
+
+/* ---- conversation transcript (persisted locally) ---------------------- */
+let CHAT=[];
+function loadChat(){
+  try{ CHAT=JSON.parse(localStorage.getItem('ag_chat')||'[]'); }catch(e){ CHAT=[]; }
+  renderChat();
+}
+function saveChat(){
+  try{ localStorage.setItem('ag_chat',JSON.stringify(CHAT.slice(-100))); }catch(e){}
+}
+function clearChat(){
+  if(!CHAT.length||confirm('Clear the whole conversation?')){ CHAT=[]; saveChat(); renderChat(); }
+}
+function ctxFooter(c){
+  if(!c) return '';
+  const bits=[];
+  if(c.history) bits.push('💬 '+c.history+' prior turn'+(c.history>1?'s':''));
+  if(c.profile) bits.push('👤 profile');
+  if(c.memory&&c.memory.length) bits.push('🧠 '+c.memory.length+' memory fact'+(c.memory.length>1?'s':''));
+  if(c.web) bits.push('🌐 '+c.web+' web source'+(c.web>1?'s':''));
+  if(c.saved&&c.saved.length) bits.push('💾 remembered '+c.saved.length+' new fact'+(c.saved.length>1?'s':''));
+  if(c.overall!=null) bits.push('⭐ '+c.overall+' overall');
+  let h=bits.length? '<div class="ctx">'+bits.map(b=>'<span>'+escapeHtml(b)+'</span>').join('')+'</div>':'';
+  if(c.memory&&c.memory.length){
+    h+='<details class="memfacts"><summary>memory facts used</summary><ul>'
+      +c.memory.map(f=>'<li>'+escapeHtml(f)+'</li>').join('')+'</ul></details>';
+  }
+  if(c.saved&&c.saved.length){
+    h+='<details class="memfacts"><summary>saved to long-term memory</summary><ul>'
+      +c.saved.map(f=>'<li>'+escapeHtml(f)+'</li>').join('')+'</ul></details>';
+  }
+  return h;
+}
+function bubble(m){
+  const who=m.role==='user'?'you':'apple-gorilla';
+  const t=m.ts?'<span class="ts">'+escapeHtml(m.ts)+'</span>':'';
+  return '<div class="msg '+m.role+'"><div class="who">'+who+t+'</div>'
+    +'<div class="body">'+escapeHtml(m.text)+'</div>'
+    +(m.role==='ai'?ctxFooter(m.ctx):'')+'</div>';
+}
+function renderChat(){
+  $('chat').innerHTML=CHAT.map(bubble).join('');
+  $('chat').scrollTop=$('chat').scrollHeight;
+}
+function appendUser(text){
+  CHAT.push({role:'user',text:text,ts:nowStr()}); renderChat(); saveChat();
+}
+function nowStr(){ const d=new Date();
+  return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); }
+// live pending assistant bubble; returns the DOM node so we can fill it as we stream
+function appendAssistant(){
+  const el=document.createElement('div'); el.className='msg ai processing';
+  el.innerHTML='<div class="who">apple-gorilla<span class="ts">'+nowStr()+'</span></div>'
+    +'<div class="body pending">…thinking</div><div class="live-ctx"></div>';
+  $('chat').appendChild(el); $('chat').scrollTop=$('chat').scrollHeight;
+  return el;
+}
+
+/* ---- context-in-use indicator ---------------------------------------- */
+let curCtx={history:0,profile:false,memory:[],saved:[],web:0};
+function resetContext(){
+  curCtx={history:0,profile:false,memory:[],saved:[],web:0};
+  ['history','profile','memory','web'].forEach(n=>$('chip-'+n).classList.remove('active'));
+  $('cc-history').textContent=''; $('cc-memory').textContent=''; $('cc-web').textContent='';
+}
+function applyContext(ev,ai){
+  if(ev.stage==='conversation'){
+    const m=/(\\d+)\\s+earlier/.exec(ev.msg||''); const n=m?+m[1]:0;
+    curCtx.history=n; $('chip-history').classList.add('active');
+    $('cc-history').textContent=n||'';
+  }
+  if(ev.stage==='optimize' && (/(profile)/i.test(ev.msg||'') || (ev.data&&ev.data.uses_profile))){
+    curCtx.profile=true; $('chip-profile').classList.add('active');
+  }
+  if(ev.stage==='memory'){
+    const f=(ev.data&&ev.data.facts)||[];
+    const saved=(ev.data&&ev.data.saved)||[];
+    $('chip-memory').classList.add('active');
+    if(f.length){ curCtx.memory=f; $('cc-memory').textContent=f.length;
+      if(ai){ const lc=ai.querySelector('.live-ctx');
+        if(lc) lc.innerHTML='<div class="using">🧠 drawing on '+f.length
+          +' remembered fact(s):</div><ul>'+f.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+'</ul>'; } }
+    if(saved.length){ curCtx.saved=saved;
+      // the save arrives AFTER the answer is committed — patch the finished bubble
+      if(ai&&ai._committed&&ai._entry){
+        ai._entry.ctx=ai._entry.ctx||{}; ai._entry.ctx.saved=saved; saveChat();
+        ai.insertAdjacentHTML('beforeend',
+          '<details class="memfacts" open><summary>💾 saved '+saved.length
+          +' fact(s) to long-term memory</summary><ul>'
+          +saved.map(f=>'<li>'+escapeHtml(f)+'</li>').join('')+'</ul></details>');
+      }
+    }
+  }
+  if(ev.stage==='web'){
+    let n=(ev.data&&ev.data.count); if(n==null){ const m=/(\\d+)\\s+result/.exec(ev.msg||''); n=m?+m[1]:null; }
+    if(n!=null){ curCtx.web=n; $('chip-web').classList.add('active'); $('cc-web').textContent=n||''; }
+  }
+}
+
 async function go(){
   const p=$('p').value.trim(); if(!p)return;
   $('runbtn').disabled=true; $('status').textContent='running…';
-  $('log').innerHTML=''; $('answer').textContent=''; $('cards').style.display='none';
+  $('log').innerHTML=''; $('cards').style.display='none';
   ['acc','qual','spd','ovr'].forEach(x=>setCard(x,null));
+  // prior turns become AG's working memory (the current prompt is sent separately)
+  const hist=CHAT.slice(-20).map(m=>({role:m.role,text:m.text}));
+  resetContext(); appendUser(p); const ai=appendAssistant(); $('p').value='';
   try{
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt:p,web:$('web').checked})});
+      body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
       buf+=dec.decode(value,{stream:true}); let nl;
       while((nl=buf.indexOf('\\n'))>=0){
         const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
-        if(!line)continue; handle(JSON.parse(line));
+        if(!line)continue; handle(JSON.parse(line),ai);
       }
     }
-  }catch(e){ addEv({stage:'error',level:'error',msg:'request failed: '+e}); $('status').textContent='error'; }
+  }catch(e){ addEv({stage:'error',level:'error',msg:'request failed: '+e});
+    $('status').textContent='error';
+    const b=ai.querySelector('.body'); b.className='body'; b.textContent='(request failed)';
+    ai.classList.remove('processing'); }
   $('runbtn').disabled=false;
 }
-function handle(ev){
+function handle(ev,ai){
   if(ev.stage==='done'){
-    const d=ev.data||{}; $('answer').textContent=d.answer||'(no answer)';
+    const d=ev.data||{};
+    const b=ai.querySelector('.body'); b.className='body'; b.textContent=d.answer||'(no answer)';
+    ai.classList.remove('processing');
+    const lc=ai.querySelector('.live-ctx'); if(lc) lc.remove();
+    const sc=d.scorecard||{};
+    const ctx={history:curCtx.history,profile:curCtx.profile,memory:curCtx.memory,
+               web:curCtx.web,saved:curCtx.saved,
+               overall:(sc.overall!=null?sc.overall:null)};
+    ai.insertAdjacentHTML('beforeend',ctxFooter(ctx));
+    const entry={role:'ai',text:d.answer||'(no answer)',ctx:ctx,ts:nowStr()};
+    CHAT.push(entry); ai._entry=entry; ai._committed=true; saveChat();
+    $('chat').scrollTop=$('chat').scrollHeight;
     $('status').textContent='done · '+(d.iterations||0)+' iter · '+(d.elapsed_s||0)+'s'
       +(d.dry_run?' · dry-run':'');
     checkUpdate();   // one on-demand check AFTER the run — never a background poll
     return;
   }
+  applyContext(ev,ai);
   addEv(ev);
   const sc=(ev.data&&ev.data.scorecard);
   if(sc){ $('cards').style.display='flex';
     setCard('acc',sc.accuracy); setCard('qual',sc.quality);
     setCard('spd',sc.speed); setCard('ovr',sc.overall); }
+}
+
+/* ---- where & how AG is running right now ------------------------------ */
+async function renderWhere(){
+  try{
+    const w=await fetch('/whereami').then(r=>r.json());
+    let h='<span class="dot ok"></span>📍 running at <b>'+escapeHtml(w.url)+'</b>';
+    h+=w.local_only?' <span class="tagpill local">local-only</span>'
+      :' <span class="tagpill lan">also on LAN: '+escapeHtml(w.lan_url||'')+'</span>';
+    h+=' · 🧠 brain <b>'+escapeHtml(w.brain)+'</b>';
+    h+=w.evolving?' · <span class="tagpill evolving">🧬 evolving now — runs still work</span>'
+      :' · <span class="tagpill idle">can evolve while running</span>';
+    $('whereami').innerHTML=h;
+    const eb=document.querySelector('button.cmd.evolve');
+    if(eb) eb.disabled=!!w.evolving;
+    return w;
+  }catch(e){ $('whereami').innerHTML=''; return null; }
+}
+
+/* ---- evolve status: when & how self-improvement runs ------------------ */
+async function renderEvoStatus(){
+  const es=$('evostatus');
+  try{
+    const [doc,hist]=await Promise.all([
+      fetch('/doctor').then(r=>r.json()),
+      fetch('/evolve/history').then(r=>r.json())
+    ]);
+    const last=(hist.history||[])[0];
+    const ready=(doc.evolve_gate||'').indexOf('ready')===0;
+    let h='<span class="dot '+(ready?'ok':'off')+'"></span><b>🧬 Evolve</b> ';
+    h+='gate '+(ready?'<span class="g-ok">ready</span>':'<span class="g-off">'+escapeHtml(doc.evolve_gate||'?')+'</span>');
+    h+=' · proposer <b>'+escapeHtml(doc.evolver_backend||doc.effective_backend||doc.backend||'?')+'</b>';
+    h+=' · verified by <b>'+(doc.fitness_gate?'benchmark + tests':'tests')+'</b>';
+    h+=' · '+doc.snapshots+' snapshot(s)';
+    if(last){
+      const v=last.adopted?'✓ adopted':escapeHtml(last.verdict||'no change');
+      const dl=(last.delta!=null?' Δ'+last.delta:'');
+      h+=' — last run <b>'+escapeHtml(last.ts||'')+'</b>: '+v+dl;
+    }else{ h+=' — <i>no evolve runs yet</i>'; }
+    es.classList.remove('busy'); es.innerHTML=h;
+  }catch(e){ es.classList.remove('busy');
+    es.innerHTML='<span class="dot off"></span><b>🧬 Evolve</b> status unavailable'; }
 }
 async function checkUpdate(){
   try{
@@ -193,24 +394,81 @@ async function doBench(){
   }); }catch(e){ addEv({stage:'error',level:'error',msg:'bench failed: '+e});
     $('status').textContent='error'; }
 }
+// Step 1: ask AG to PROPOSE changes — nothing is applied. You then pick which to keep.
 async function doEvolve(){
-  $('log').innerHTML=''; $('improveout').innerHTML=''; $('status').textContent='evolving…';
-  try{ await streamPost('/evolve',{proposer:$('proposer').value}, ev=>{
+  $('log').innerHTML=''; $('improveout').innerHTML=''; $('status').textContent='proposing…';
+  const directive=$('directive').value.trim();
+  const es=$('evostatus'); es.classList.add('busy');
+  es.innerHTML='<span class="dot spin"></span><b>🧬 Proposing changes…</b> '
+    +(directive?'toward your request':'analysing AG');
+  renderWhere();
+  try{ await streamPost('/evolve/propose',{proposer:$('proposer').value,directive:directive}, ev=>{
+    if(ev.stage==='done'){ renderProposal(ev.data||{});
+      $('status').textContent='proposed'; renderEvoStatus(); renderWhere(); return; }
+    if(ev.stage==='evolve'||ev.stage==='bench'){
+      es.innerHTML='<span class="dot spin"></span><b>🧬 Proposing changes…</b> '+escapeHtml(ev.msg||''); }
+    addEv(ev);
+  }); }catch(e){ addEv({stage:'error',level:'error',msg:'propose failed: '+e});
+    $('status').textContent='error'; renderEvoStatus(); renderWhere(); }
+}
+// Render the proposed changes as a checklist — YOU decide which to apply.
+function renderProposal(d){
+  const pts=d.patches||[];
+  if(d.busy){ $('improveout').innerHTML='<div class="result">⏳ '+escapeHtml(d.reason||'evolve already running')+'</div>'; return; }
+  if(!pts.length){ $('improveout').innerHTML='<div class="result">'+escapeHtml(d.reason||'no changes proposed')+'</div>'; return; }
+  let h='<div class="proposal"><div class="phead"><b>🧬 Proposed changes — select the ones you want</b>'
+    +'<span class="pnote">nothing is applied until you click Apply selected</span></div>';
+  if(d.rationale) h+='<div class="prationale"><b>AG\\'s rationale:</b> '+escapeHtml(d.rationale)+'</div>';
+  for(const p of pts){
+    const dis=p.valid?'':'disabled';
+    h+='<label class="pitem'+(p.valid?'':' invalid')+'">'
+      +'<input type="checkbox" class="psel" value="'+escapeHtml(p.id)+'" '+(p.valid?'checked':'disabled')+'>'
+      +'<span class="pmeta"><code>'+escapeHtml(p.path)+'</code> '
+      +'<span class="pbytes">'+(p.bytes||0)+' B</span>'
+      +(p.valid?'':'<span class="pbad">'+escapeHtml(p.error||'invalid')+'</span>')+'</span>';
+    if(p.diff) h+='<details class="pdiff"><summary>view diff</summary><pre>'+escapeHtml(p.diff)+'</pre></details>';
+    h+='</label>';
+  }
+  const anyValid=pts.some(p=>p.valid);
+  h+='<div class="pactions">'
+    +'<label class="toggle"><input type="checkbox" id="measurefit"> measure fitness impact (slow)</label>'
+    +'<button class="cmd" onclick="applySelected()" '+(anyValid?'':'disabled')+'>✓ Apply selected</button>'
+    +'<button class="view" onclick="discardProposal()">Discard proposal</button>'
+    +'<span class="pnote">safety tests still run on whatever you apply</span></div></div>';
+  $('improveout').innerHTML=h;
+}
+function discardProposal(){ $('improveout').innerHTML=''; $('status').textContent='ready'; }
+// Step 2: apply ONLY the changes you checked (safety tests still gate them).
+async function applySelected(){
+  const ids=[...document.querySelectorAll('.psel:checked')].map(c=>c.value);
+  if(!ids.length){ $('status').textContent='select at least one change'; return; }
+  const measure=!!($('measurefit')&&$('measurefit').checked);
+  $('log').innerHTML=''; $('status').textContent='applying…';
+  const es=$('evostatus'); es.classList.add('busy');
+  es.innerHTML='<span class="dot spin"></span><b>🧬 Applying your selection…</b>';
+  renderWhere();
+  try{ await streamPost('/evolve/apply',{ids:ids,measure:measure}, ev=>{
     if(ev.stage==='done'){ const d=ev.data||{};
+      if(d.busy){ $('improveout').innerHTML='<div class="result">⏳ '+escapeHtml(d.reason||'evolve already running')+'</div>';
+        renderEvoStatus(); renderWhere(); return; }
       const cls=d.adopted?'ok':(d.rolled_back?'bad':'');
       let h='<div class="result '+cls+'"><b>'
-        +(d.adopted?'✓ Adopted':(d.rolled_back?'↩ Rolled back':'No change'))
+        +(d.adopted?'✓ Applied & kept':(d.rolled_back?'↩ Reverted (safety)':'Not applied'))
         +'</b><br>'+escapeHtml(d.reason||'')+'<br>';
-      if(d.incumbent!=null) h+='fitness '+d.incumbent+'→'+(d.candidate!=null?d.candidate:'?')
-        +'/10'+(d.delta!=null?' (Δ'+d.delta+')':'')+'<br>';
+      if(d.delta!=null) h+='fitness '+d.incumbent+'→'+(d.candidate!=null?d.candidate:'?')
+        +'/10 (Δ'+d.delta+', informational)<br>';
       if(d.changed&&d.changed.length) h+='files: '+escapeHtml(d.changed.join(', '))+'<br>';
-      if(d.rationale) h+='<i>'+escapeHtml(d.rationale)+'</i>';
+      if(d.snapshot_id) h+='<span class="pnote">snapshot '+escapeHtml(d.snapshot_id)+' — revert with: ag rollback '+escapeHtml(d.snapshot_id)+'</span>';
       h+='</div>'; $('improveout').innerHTML=h;
-      $('status').textContent='evolve: '+(d.adopted?'adopted':(d.rolled_back?'rolled back':'no change'));
+      $('status').textContent='evolve: '+(d.adopted?'applied':(d.rolled_back?'reverted':'no change'));
+      if(d.adopted) $('directive').value='';
+      renderEvoStatus(); renderWhere();
       return; }
+    if(ev.stage==='evolve'||ev.stage==='bench'){
+      es.innerHTML='<span class="dot spin"></span><b>🧬 Applying your selection…</b> '+escapeHtml(ev.msg||''); }
     addEv(ev);
-  }); }catch(e){ addEv({stage:'error',level:'error',msg:'evolve failed: '+e});
-    $('status').textContent='error'; }
+  }); }catch(e){ addEv({stage:'error',level:'error',msg:'apply failed: '+e});
+    $('status').textContent='error'; renderEvoStatus(); renderWhere(); }
 }
 async function loadHistory(){
   const d=await (await fetch('/evolve/history')).json();
@@ -256,18 +514,45 @@ async function loadTools(){
     +escapeHtml(d.highest_friction_wired||'–')+'</td></tr>';
   t.innerHTML=h; t.style.display='table';
 }
+function saveThink(){ try{ localStorage.setItem('ag_think',$('think').value); }catch(e){} }
+function restoreThink(){ try{ const v=localStorage.getItem('ag_think');
+  if(v&&$('think')) $('think').value=v; }catch(e){} }
+// restore the transcript and status (where it runs + evolve) as soon as the page loads
+restoreThink(); loadChat(); renderWhere(); renderEvoStatus();
 </script></body></html>"""
 
 
 def _render_page() -> str:
     """Assemble the page from the evolvable theme (fonts + CSS) and the template."""
+    from . import __version__
     from . import theme
     return (_PAGE_TEMPLATE
             .replace("__FONTS__", theme.FONT_LINK)
-            .replace("__THEME__", theme.THEME_CSS))
+            .replace("__THEME__", theme.THEME_CSS)
+            .replace("__VERSION__", __version__))
 
 
 PAGE = _render_page()
+
+
+def _clean_history(raw, *, max_turns: int = 40, max_len: int = 4000) -> list:
+    """Sanitise conversation history from the client into [{role, text}] pairs.
+
+    Untrusted input: coerce types, keep only known roles, bound count and size so a
+    malformed or oversized payload can't wedge the pipeline. Content is treated as
+    conversation data, never as instructions, by the prompt framing downstream.
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw[-max_turns:]:
+        if not isinstance(item, dict):
+            continue
+        role = "user" if str(item.get("role")) == "user" else "ai"
+        text = str(item.get("text", "")).strip()
+        if text:
+            out.append({"role": role, "text": text[:max_len]})
+    return out
 
 
 def _build_broker(cfg: Config, *, web=None):
@@ -286,6 +571,19 @@ def _build_broker(cfg: Config, *, web=None):
 
 class _Handler(BaseHTTPRequestHandler):
     cfg: Config = Config()
+    # Where the server is bound (filled in by serve()), for the GUI "where am I
+    # running" indicator.
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 8765
+    # Evolve self-modifies source, so only one may run at a time. The server keeps
+    # serving during an evolve (ThreadingHTTPServer), so this flag lets the GUI show
+    # that a cycle is in progress and lets us reject overlapping evolves.
+    _evolve_lock = threading.Lock()
+    _evolving = threading.Event()
+    # Last set of proposed self-edits, cached so the GUI can apply a chosen subset by
+    # id (the browser never sends code back — AG applies exactly what it proposed).
+    _proposal: dict = {}
+    _proposal_directive: str = ""
 
     def _send(self, code, body, ctype="text/html; charset=utf-8"):
         data = body.encode("utf-8")
@@ -313,8 +611,42 @@ class _Handler(BaseHTTPRequestHandler):
             from . import archive
             self._send(200, json.dumps({"history": archive.history(limit=20)}),
                        "application/json")
+        elif self.path == "/whereami":
+            self._send(200, json.dumps(self._whereami()), "application/json")
         else:
             self._send(404, "not found", "text/plain")
+
+    def _whereami(self) -> dict:
+        """Where and how AG is running right now — for the GUI location indicator."""
+        from .model import _has_anthropic_creds, has_oauth_profile
+        cfg = self.cfg
+        host, port = self.bind_host, self.bind_port
+        local_only = host not in ("0.0.0.0", "::")
+        if cfg.backend == "auto":
+            if _has_anthropic_creds() or has_oauth_profile():
+                brain = "Claude (" + cfg.model + ")"
+            else:
+                brain = ("Ollama (" + cfg.ollama_model + ")"
+                         if getattr(cfg, "offline_backend", "") == "ollama"
+                         else "dry-run (stub)")
+        elif cfg.backend == "ollama":
+            brain = "Ollama (" + cfg.ollama_model + ")"
+        elif cfg.backend == "anthropic":
+            brain = "Claude (" + cfg.model + ")"
+        else:
+            brain = "dry-run (stub)"
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = "?"
+        return {
+            "host": host, "port": port, "local_only": local_only,
+            "hostname": hostname, "url": f"http://127.0.0.1:{port}",
+            "lan_url": (f"http://{_lan_ip()}:{port}" if not local_only else None),
+            "backend": cfg.backend, "brain": brain,
+            "evolving": self._evolving.is_set(),
+            "can_evolve_while_running": True,
+        }
 
     def do_POST(self):
         if self.path == "/update/apply":
@@ -329,7 +661,7 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
             self._stream_bench()
             return
-        if self.path == "/evolve":
+        if self.path in ("/evolve", "/evolve/propose", "/evolve/apply"):
             # Evolve self-modifies source + commits, so gate it to the local machine
             # even when the app is bound to 0.0.0.0 for phone/LAN *viewing*.
             if self.client_address and self.client_address[0] not in ("127.0.0.1", "::1"):
@@ -341,7 +673,12 @@ class _Handler(BaseHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(n) or b"{}")
             except Exception:
                 payload = {}
-            self._stream_evolve(payload)
+            if self.path == "/evolve/apply":
+                self._stream_apply(payload)
+            elif self.path == "/evolve":
+                self._stream_evolve(payload)   # legacy automatic path (not used by GUI)
+            else:
+                self._stream_propose(payload)
             return
         if self.path != "/run":
             self._send(404, "not found", "text/plain")
@@ -356,7 +693,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"error": str(e)}), "application/json")
             return
         want_web = payload.get("web", None)
-        self._stream_run(prompt, want_web)
+        history = _clean_history(payload.get("history"))
+        think = str(payload.get("think", "auto")).lower()
+        if think not in ("off", "auto", "on"):
+            think = "auto"
+        self._stream_run(prompt, want_web, history, think)
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -412,15 +753,28 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
 
     def _stream_evolve(self, payload):
-        """Run one gated self-improvement cycle, streaming its progress + verdict."""
+        """Run one gated self-improvement cycle, streaming its progress + verdict.
+
+        Only one evolve runs at a time; the server keeps answering /run requests
+        meanwhile (AG CAN evolve while running). Overlapping evolves are rejected.
+        """
         from . import evolve as evolve_mod
         write = self._ndjson_writer()
         cfg = self.cfg
+        # Reject a second concurrent evolve rather than corrupting a half-applied edit.
+        if not self._evolve_lock.acquire(blocking=False):
+            write({"stage": "done", "level": "info",
+                   "msg": "an evolve cycle is already running — try again when it finishes",
+                   "data": {"busy": True, "adopted": False, "rolled_back": False,
+                            "reason": "evolve already in progress"}})
+            return
+        self._evolving.set()
         try:
             client = make_client(cfg)
             # Optional split backend: a stronger model proposes; deploy backend measures.
             evolver_client = None
             prop = str((payload or {}).get("proposer", "")).strip()
+            directive = str((payload or {}).get("directive", "")).strip()
             if prop and prop != cfg.backend:
                 try:
                     evolver_client = make_client(cfg, backend=prop)
@@ -430,8 +784,11 @@ class _Handler(BaseHTTPRequestHandler):
                     write({"stage": "evolve", "level": "error", "data": {},
                            "msg": f"proposer '{prop}' unavailable ({e}); using deploy backend"})
             write({"stage": "evolve", "level": "tool",
-                   "msg": "starting self-improvement cycle…", "data": {}})
-            res = evolve_mod.evolve(client, cfg, emit=write, evolver_client=evolver_client)
+                   "msg": ("starting self-improvement cycle"
+                           + (" toward your request…" if directive else "…")),
+                   "data": {}})
+            res = evolve_mod.evolve(client, cfg, emit=write,
+                                    evolver_client=evolver_client, directive=directive)
             write({"stage": "done",
                    "level": "result" if res.adopted else "info",
                    "msg": res.reason, "data": {
@@ -447,21 +804,145 @@ class _Handler(BaseHTTPRequestHandler):
                 write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
             except Exception:
                 pass
+        finally:
+            self._evolving.clear()
+            self._evolve_lock.release()
 
-    def _stream_run(self, prompt: str, want_web):
-        """Run the pipeline, streaming each stage event as one NDJSON line."""
+    def _stream_propose(self, payload):
+        """Generate candidate self-edits and stream them for the user to choose from.
+
+        Nothing is applied here — the automatic adopt/reject decision is replaced by
+        this propose→select→apply flow. The full patches are cached server-side so the
+        browser only sends back the ids it selected.
+        """
+        from . import evolve as evolve_mod
         write = self._ndjson_writer()
         cfg = self.cfg
+        if not self._evolve_lock.acquire(blocking=False):
+            write({"stage": "done", "level": "info",
+                   "msg": "an evolve cycle is already running — try again shortly",
+                   "data": {"busy": True, "patches": []}})
+            return
+        try:
+            client = make_client(cfg)
+            evolver_client = None
+            prop = str((payload or {}).get("proposer", "")).strip()
+            directive = str((payload or {}).get("directive", "")).strip()
+            if prop and prop != cfg.backend:
+                try:
+                    evolver_client = make_client(cfg, backend=prop)
+                    write({"stage": "evolve", "level": "tool", "data": {},
+                           "msg": f"proposer: {prop}"})
+                except Exception as e:
+                    write({"stage": "evolve", "level": "error", "data": {},
+                           "msg": f"proposer '{prop}' unavailable ({e}); using deploy backend"})
+            res = evolve_mod.propose(client, cfg, emit=write,
+                                     evolver_client=evolver_client, directive=directive)
+            _Handler._proposal = {p.id: p for p in res.patches}
+            _Handler._proposal_directive = res.directive
+            write({"stage": "done",
+                   "level": "result" if res.attempted else "info",
+                   "msg": res.reason, "data": res.as_dict()})
+        except (BrokenPipeError, ConnectionError):
+            return
+        except Exception as e:
+            try:
+                write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
+            except Exception:
+                pass
+        finally:
+            self._evolve_lock.release()
+
+    def _stream_apply(self, payload):
+        """Apply the user-selected subset of the last proposal (by id), streaming it.
+
+        The human's selection IS the decision; only the safety test gate still applies.
+        """
+        from . import evolve as evolve_mod
+        write = self._ndjson_writer()
+        cfg = self.cfg
+        ids = (payload or {}).get("ids") or []
+        measure = bool((payload or {}).get("measure", False))
+        cache = getattr(_Handler, "_proposal", {}) or {}
+        selected = []
+        for i in ids:
+            p = cache.get(str(i))
+            if p is not None and getattr(p, "valid", False):
+                selected.append({"path": p.path, "new_content": p.new_content})
+        if not selected:
+            write({"stage": "done", "level": "info",
+                   "msg": "nothing to apply — the proposal expired or held no valid "
+                          "selection; click Evolve again",
+                   "data": {"adopted": False, "rolled_back": False, "changed": [],
+                            "reason": "no valid selection"}})
+            return
+        if not self._evolve_lock.acquire(blocking=False):
+            write({"stage": "done", "level": "info",
+                   "msg": "an evolve cycle is already running — try again shortly",
+                   "data": {"busy": True, "adopted": False, "rolled_back": False}})
+            return
+        self._evolving.set()
+        try:
+            client = make_client(cfg)
+            write({"stage": "evolve", "level": "tool", "data": {},
+                   "msg": f"applying {len(selected)} selected change(s)"
+                          + (" and measuring fitness…" if measure else "…")})
+            res = evolve_mod.apply_selected(
+                client, cfg, selected, emit=write, measure=measure,
+                note=getattr(_Handler, "_proposal_directive", ""))
+            write({"stage": "done",
+                   "level": "result" if res.adopted else "info",
+                   "msg": res.reason, "data": {
+                       "adopted": res.adopted, "rolled_back": res.rolled_back,
+                       "verdict": res.verdict, "incumbent": res.incumbent_fitness,
+                       "candidate": res.candidate_fitness, "delta": res.fitness_delta,
+                       "changed": res.changed, "rationale": res.rationale,
+                       "reason": res.reason, "snapshot_id": res.snapshot_id}})
+            if res.adopted:
+                _Handler._proposal = {}   # consumed
+        except (BrokenPipeError, ConnectionError):
+            return
+        except Exception as e:
+            try:
+                write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
+            except Exception:
+                pass
+        finally:
+            self._evolving.clear()
+            self._evolve_lock.release()
+
+    def _stream_run(self, prompt: str, want_web, history=None, think="auto"):
+        """Run the pipeline, streaming each stage event as one NDJSON line."""
+        import dataclasses
+        from .pipeline import capture_memory
+        write = self._ndjson_writer()
+        # Per-request overrides, without mutating the shared handler config.
+        # Thinking OFF is also a "fast" mode: cap the critique/revise loop to one pass
+        # so a reply is a couple of model calls, not the full iterate cycle.
+        overrides = {"think": think}
+        if think == "off":
+            overrides["max_iterations"] = min(1, self.cfg.max_iterations)
+        cfg = dataclasses.replace(self.cfg, **overrides)
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
         broker = _build_broker(cfg, web=web_eff)
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,
-                               emit=write)
+                               emit=write, history=history)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
                 "iterations": rec.iterations, "elapsed_s": rec.elapsed_s,
                 "dry_run": rec.dry_run}})
+            # Fill long-term memory AFTER the answer is on screen, so it never delays
+            # the response. Best-effort; a "saved N fact(s)" event streams if it stores.
+            try:
+                from .pipeline import format_history
+                convo = format_history(history,
+                                       max_turns=getattr(cfg, "max_history_turns", 12))
+                capture_memory(client, cfg, prompt, rec.answer,
+                               conversation=convo, emit=write)
+            except Exception:
+                pass
         except (BrokenPipeError, ConnectionError):
             return  # client navigated away mid-stream
         except Exception as e:
@@ -496,7 +977,12 @@ def _doctor_data(cfg: Config) -> dict:
     except Exception:
         pass
     if cfg.backend == "auto":
-        eff = "anthropic" if (has_key or oauth) else "dry-run (stub)"
+        if has_key or oauth:
+            eff = "anthropic"
+        elif getattr(cfg, "offline_backend", "") == "ollama":
+            eff = "ollama"
+        else:
+            eff = "dry-run (stub)"
     else:
         eff = cfg.backend
     last = archive.adopted_history(limit=1)
@@ -542,6 +1028,8 @@ def _lan_ip() -> str:
 
 def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False):
     _Handler.cfg = Config.load()
+    _Handler.bind_host = host
+    _Handler.bind_port = port
     httpd = ThreadingHTTPServer((host, port), _Handler)
     local = f"http://127.0.0.1:{port}"
     print(f"Apple-Gorilla web app running:")

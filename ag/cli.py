@@ -58,6 +58,14 @@ def cmd_run(args) -> int:
                 print(f"[{ev['stage']}] {ev['msg']}", file=sys.stderr)
     rec = run_pipeline(client, cfg, args.prompt, verbose=args.verbose,
                        web=web_effective, broker=broker, emit=trace)
+    # Fill long-term memory from normal CLI use too (best-effort, gated by auto_memory).
+    try:
+        from .pipeline import capture_memory
+        saved = capture_memory(client, cfg, args.prompt, rec.answer, emit=trace)
+        if saved and args.verbose:
+            print(f"[memory] saved {len(saved)} durable fact(s)", file=sys.stderr)
+    except Exception:
+        pass
     if args.show_prompt:
         print("=== ENGINEERED PROMPT ===")
         print(rec.engineered_prompt)
@@ -78,6 +86,27 @@ def cmd_evolve(args) -> int:
     if getattr(args, "history", False):
         return _print_evolve_history()
     client = _client(args, cfg)
+    if getattr(args, "propose", False):
+        # List candidate changes for the human to review — apply nothing (mirrors the
+        # web app's propose→select→apply flow; the GUI is where you pick and apply).
+        res = evolve_mod.propose(client, cfg,
+                                 directive=getattr(args, "note", "") or "")
+        if not res.attempted:
+            print(f"not attempted: {res.reason}")
+            return 0
+        if res.rationale:
+            print(f"rationale: {res.rationale}")
+        if not res.patches:
+            print("no changes proposed")
+            return 0
+        print(f"{res.reason}:")
+        for p in res.patches:
+            flag = "OK " if p.valid else "SKIP"
+            print(f"  [{flag}] {p.id}  {p.path}  ({p.n_bytes} B)"
+                  + ("" if p.valid else f"  -- {p.error}"))
+        print("\nApply selected changes from the web app (python -m ag serve), where "
+              "you can pick which to keep; safety tests still gate whatever you apply.")
+        return 0
     # Split-backend evolution: a stronger model proposes the edit, the deploy backend
     # (client) still measures fitness — so an adopted change is verified on the model
     # you actually run. --evolver-backend overrides config.evolver_backend.
@@ -93,7 +122,8 @@ def cmd_evolve(args) -> int:
             print(f"warning: evolver backend '{evolver_backend}' unavailable ({e}) — "
                   f"proposing with the deploy backend instead")
     result = evolve_mod.evolve(client, cfg, apply=args.apply, dry_run=args.dry_run,
-                               evolver_client=evolver_client)
+                               evolver_client=evolver_client,
+                               directive=getattr(args, "note", "") or "")
     print(f"attempted={result.attempted} adopted={result.adopted} "
           f"rolled_back={result.rolled_back}")
     print(f"reason: {result.reason}")
@@ -427,6 +457,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="in manual mode, commit a passing candidate")
     e.add_argument("--history", action="store_true",
                    help="show the measured fitness lineage instead of evolving")
+    e.add_argument("--propose", action="store_true",
+                   help="list candidate changes for review and apply NOTHING "
+                        "(pick + apply them in the web app)")
+    e.add_argument("--note", "--directive", dest="note", default="",
+                   help="free-text instruction steering WHAT to improve this cycle "
+                        "(safety + fitness gates still apply)")
     e.add_argument("--evolver-backend", dest="evolver_backend",
                    choices=["auto", "anthropic", "ollama", "dry"], default=None,
                    help="model that PROPOSES edits (e.g. anthropic); fitness is still "

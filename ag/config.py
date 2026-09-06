@@ -20,6 +20,10 @@ class Config:
     """Runtime configuration. Persisted to config.json (itself an evolvable file)."""
 
     backend: str = "auto"                     # auto | anthropic | ollama | dry
+    # When backend == "auto" and no Anthropic creds are present, fall back to this
+    # instead of the dry-run stub — so "use Claude when signed in, else run locally"
+    # works with one setting. "ollama" | "dry".
+    offline_backend: str = "ollama"
     model: str = "claude-opus-5"
     ollama_model: str = "llama3.1"            # used when backend == ollama
     # 127.0.0.1, NOT localhost: on many systems 'localhost' resolves to IPv6 ::1
@@ -29,6 +33,11 @@ class Config:
     ollama_keep_alive: str = "30m"            # keep the model resident between calls
     ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     effort: str = "high"                      # low | medium | high | xhigh | max
+    # Extended-thinking control (like the Claude app's toggle). "off" disables the
+    # model's chain-of-thought (fastest), "on" forces it, "auto" leaves the model to
+    # its default. Applies to thinking-capable backends (Qwen3 via Ollama, Claude via
+    # the API); ignored by models that don't think.
+    think: str = "auto"                       # off | auto | on
     max_output_tokens: int = 32000            # main answer generation
     meta_output_tokens: int = 16000           # optimizer / critic / evolve calls
     max_iterations: int = 2                   # critique->revise rounds
@@ -63,6 +72,8 @@ class Config:
     allow_local_tools: bool = False           # calc/file-read/python-exec/memory tools
     max_tool_steps: int = 4                    # reason->act->observe loop bound
     use_memory: bool = True                    # recall durable memory into context
+    auto_memory: bool = True                    # after a run, distill+store durable facts
+    max_history_turns: int = 12                 # conversation turns kept as working memory
     max_memories: int = 200                    # cap on retained memories
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs

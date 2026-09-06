@@ -85,6 +85,32 @@ def test_optimizer_receives_user_context():
     assert "do a thing" in seen["user"]
 
 
+def test_thinking_toggle_maps_per_backend():
+    from ag import model
+    from ag.config import Config
+    off = Config(); off.think = "off"
+    on = Config(); on.think = "on"
+    auto = Config(); auto.think = "auto"
+    # Ollama: only "on" forces the think flag; "off" uses a /no_think prompt suffix.
+    assert model._ollama_think(on) is True
+    assert model._ollama_think(off) is None and model._no_think(off) is True
+    assert model._ollama_think(auto) is None and model._no_think(auto) is False
+    # Claude: off -> disabled, otherwise adaptive
+    assert model._anthropic_thinking(off) == {"type": "disabled"}
+    assert model._anthropic_thinking(on) == {"type": "adaptive"}
+    assert model._anthropic_thinking(auto) == {"type": "adaptive"}
+
+
+def test_strip_thinking_cleans_leaked_reasoning():
+    from ag.model import _strip_thinking
+    # paired block removed
+    assert _strip_thinking("<think>reasoning here</think>\n\n408") == "408"
+    # orphaned block (opener lost, as with Ollama think=false) removed
+    assert _strip_thinking("let me work it out ...\n</think>\n408") == "408"
+    # ordinary answers pass through untouched
+    assert _strip_thinking("just the answer") == "just the answer"
+
+
 def test_backend_selection(monkeypatch):
     from ag import model
     from ag.model import make_client, DryRunClient, OllamaClient
@@ -92,11 +118,15 @@ def test_backend_selection(monkeypatch):
     assert isinstance(make_client(cfg, dry_run=True), DryRunClient)
     assert isinstance(make_client(cfg, backend="dry"), DryRunClient)
     assert isinstance(make_client(cfg, backend="ollama"), OllamaClient)
-    # auto with NO creds/profile -> dry-run stub. Force the no-creds condition so
-    # the test is hermetic regardless of whether this machine is logged in.
+    # auto with NO creds/profile falls back to the configured offline backend, so AG
+    # still answers with a real local model instead of the stub. Force the no-creds
+    # condition so the test is hermetic regardless of whether this machine is logged in.
     monkeypatch.setattr(model, "_has_anthropic_creds", lambda: False)
     monkeypatch.setattr(model, "has_oauth_profile", lambda: False)
-    assert isinstance(make_client(cfg, backend="auto"), DryRunClient)
+    off = Config(); off.offline_backend = "ollama"
+    assert isinstance(make_client(off, backend="auto"), OllamaClient)
+    dry = Config(); dry.offline_backend = "dry"
+    assert isinstance(make_client(dry, backend="auto"), DryRunClient)
 
 
 def test_oauth_profile_detection(tmp_path, monkeypatch):

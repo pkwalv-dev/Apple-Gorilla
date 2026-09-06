@@ -102,7 +102,7 @@ class ApiClient:
             model=cfg.model,
             max_tokens=mt,
             system=system,
-            thinking={"type": "adaptive"},
+            thinking=_anthropic_thinking(cfg),
             output_config={"effort": cfg.effort},
             messages=[{"role": "user", "content": user}],
         ) as stream:
@@ -139,37 +139,103 @@ class OllamaClient:
         # the pipeline's 3-4 calls per run, avoiding costly reloads (big latency win).
         options = dict(getattr(cfg, "ollama_options", {}) or {})
         options["num_predict"] = max_tokens or cfg.max_output_tokens
+        # Extended-thinking OFF: Qwen3 (and similar) honour a `/no_think` switch in the
+        # prompt — a cleaner suppression than Ollama's think=false (which can leak the
+        # reasoning into the answer). Appended to the user turn.
+        user_content = user + ("\n\n/no_think" if _no_think(cfg) else "")
         payload = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": user_content},
             ],
             "stream": False,
             "keep_alive": getattr(cfg, "ollama_keep_alive", "30m"),
             "options": options,
         }
-        req = urllib.request.Request(
-            f"{self._host}/api/chat",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
+        # `think` is a top-level Ollama field honoured by thinking models; only "on"
+        # forces it. Non-thinking models reject it, so we retry once without it below.
+        think = _ollama_think(cfg)
+        if think is not None:
+            payload["think"] = think
+
+        def _call(body: dict) -> dict:
+            req = urllib.request.Request(
+                f"{self._host}/api/chat",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
+
+        try:
+            try:
+                data = _call(payload)
+            except urllib.error.HTTPError as he:
+                body = ""
+                try:
+                    body = he.read().decode("utf-8", "replace")
+                except Exception:
+                    pass
+                # Model doesn't support the think flag -> drop it and retry once.
+                if "think" in payload and "think" in body.lower():
+                    payload.pop("think", None)
+                    data = _call(payload)
+                else:
+                    raise
         except urllib.error.URLError as e:
             raise RuntimeError(
                 f"Cannot reach Ollama at {self._host} ({e}). "
                 f"Is `ollama serve` running and `{self._model}` pulled?"
             ) from e
-        text = (data.get("message") or {}).get("content", "")
+        text = _strip_thinking((data.get("message") or {}).get("content", ""))
         return ModelResult(
             text=text,
             input_tokens=data.get("prompt_eval_count", 0) or 0,
             output_tokens=data.get("eval_count", 0) or 0,
             model=self._model,
         )
+
+
+def _ollama_think(cfg: Config):
+    """Ollama's top-level `think` flag from cfg.think.
+
+    Only "on" forces it. "off" is handled by a `/no_think` prompt suffix instead —
+    Ollama's `think=false` leaks the model's reasoning into the answer on some builds
+    rather than suppressing it. "auto" leaves the model to its default.
+    """
+    return True if getattr(cfg, "think", "auto") == "on" else None
+
+
+def _no_think(cfg: Config) -> bool:
+    """True when the user asked to turn extended thinking OFF."""
+    return getattr(cfg, "think", "auto") == "off"
+
+
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove any chain-of-thought that leaked into a model's answer text.
+
+    Thinking models emit reasoning in <think>…</think>. AG's answer should be the
+    conclusion only, so drop paired blocks — and, defensively, an orphaned block that
+    ends with </think> but lost its opener (seen with Ollama's think=false).
+    """
+    if not text:
+        return text
+    t = _THINK_RE.sub("", text)
+    low = t.lower()
+    if "</think>" in low and "<think>" not in low:
+        t = t[low.rfind("</think>") + len("</think>"):]
+    return t.strip()
+
+
+def _anthropic_thinking(cfg: Config) -> dict:
+    """Map cfg.think to the Claude API thinking config."""
+    return ({"type": "disabled"} if getattr(cfg, "think", "auto") == "off"
+            else {"type": "adaptive"})
 
 
 def _has_anthropic_creds() -> bool:
@@ -249,12 +315,17 @@ def make_client(cfg: Optional[Config] = None, *, backend: Optional[str] = None,
         return OllamaClient(cfg)
     if choice == "anthropic":
         return ApiClient()
-    # auto: use Claude when an API key OR an OAuth profile is present.
+    # auto: use Claude when an API key OR an OAuth profile is present; otherwise fall
+    # back to the configured offline backend (default: local Ollama) so AG still
+    # answers with a real model offline, never silently downgrading to the stub.
     if _has_anthropic_creds() or has_oauth_profile():
         try:
             return ApiClient()
         except Exception:
-            return DryRunClient()
+            pass
+    offline = (getattr(cfg, "offline_backend", "") or "dry").lower()
+    if offline == "ollama":
+        return OllamaClient(cfg)
     return DryRunClient()
 
 

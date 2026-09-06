@@ -38,6 +38,38 @@ def test_page_has_self_improvement_ui():
         assert hook in server.PAGE, f"self-improvement UI missing {hook!r}"
 
 
+def test_page_has_working_memory_and_directive_ui():
+    # The intelligence upgrades must be wired into the page: conversation history is
+    # sent with a run, the context bar shows a Conversation chip, an Evolve directive
+    # box exists, and the "where is it running" indicator is present.
+    for hook in ("history:hist", "chip-history", "id=\"directive\"", "id=\"whereami\"",
+                 "/whereami", "renderWhere()", "directive:directive"):
+        assert hook in server.PAGE, f"page missing {hook!r}"
+
+
+def test_page_has_thinking_selector():
+    # Extended-thinking must be user-selectable (like the Claude app) and sent per run.
+    for hook in ("id=\"think\"", "think:$('think').value", "value=\"auto\"",
+                 "value=\"off\"", "value=\"on\"", "saveThink()"):
+        assert hook in server.PAGE, f"thinking selector missing {hook!r}"
+
+
+def test_page_has_propose_select_apply_ui():
+    # Evolve is now human-in-the-loop: propose changes, select which to keep, apply.
+    for hook in ("/evolve/propose", "/evolve/apply", "renderProposal", "applySelected(",
+                 "Apply selected", "class=\"psel\""):
+        assert hook in server.PAGE, f"propose/select/apply UI missing {hook!r}"
+
+
+def test_whereami_shape():
+    d = server._Handler._whereami(server._Handler)
+    for key in ("host", "port", "local_only", "brain", "evolving", "url",
+                "can_evolve_while_running"):
+        assert key in d, f"whereami missing {key!r}"
+    assert isinstance(d["evolving"], bool)
+    assert d["can_evolve_while_running"] is True
+
+
 def test_doctor_data_shape():
     d = server._doctor_data(Config())
     for key in ("backend", "effective_backend", "fitness_gate", "bench_tasks",

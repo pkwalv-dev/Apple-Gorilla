@@ -68,18 +68,84 @@ def _split_engineered(text: str) -> tuple[str, str]:
     return sys_part, user_part.strip()
 
 
-def optimize(client, cfg: Config, raw_prompt: str,
-             user_context: str = "") -> tuple[str, str, str]:
-    """Return (engineered_system, engineered_user, raw_optimizer_text)."""
-    if user_context:
+def format_history(history, *, max_turns: int = 12, max_chars: int = 4000) -> str:
+    """Render prior conversation turns into a compact labeled transcript.
+
+    `history` is a list of {"role": "user"|"ai", "text": str}. Only the most recent
+    `max_turns` are kept (older context is the least useful and the most expensive),
+    and the whole block is capped at `max_chars` so it never crowds out the answer on
+    a small local context window. Returns "" when there is nothing to show.
+    """
+    if not history:
+        return ""
+    turns = [h for h in history if isinstance(h, dict) and str(h.get("text", "")).strip()]
+    turns = turns[-max(1, max_turns):]
+    lines = []
+    for h in turns:
+        who = "User" if str(h.get("role")) == "user" else "Apple-Gorilla"
+        text = str(h.get("text", "")).strip().replace("\r", "")
+        if len(text) > 1200:               # clamp any single very long turn
+            text = text[:1200] + " …"
+        lines.append(f"{who}: {text}")
+    block = "\n".join(lines)
+    if len(block) > max_chars:             # keep the most recent tail within budget
+        block = "…\n" + block[-max_chars:]
+    return block
+
+
+def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
+                   *, conversation: str = "", emit=None) -> list:
+    """Distill durable facts from a finished exchange and store them (best-effort).
+
+    This is what lets long-term memory actually FILL from normal use, so future
+    sessions have something to recall. Gated by cfg.auto_memory; never raises into
+    the caller and never runs on the dry-run stub (its output is uninformative).
+    """
+    from .model import DryRunClient
+    if not getattr(cfg, "auto_memory", True) or isinstance(client, DryRunClient):
+        return []
+    try:
+        from . import memory
         user = (
+            (f"# Earlier context\n{conversation}\n\n" if conversation else "")
+            + f"# User's message\n{raw_prompt}\n\n# AG's answer\n{answer[:2000]}\n"
+        )
+        res = client.complete(system=prompts.MEMORY_DISTILLER_SYSTEM, user=user,
+                              cfg=cfg, max_tokens=400)
+        data = extract_json(res.text) or {}
+        facts = [str(f).strip() for f in (data.get("facts") or []) if str(f).strip()]
+        saved = []
+        for f in facts[:3]:
+            m = memory.remember(f, max_memories=cfg.max_memories)
+            if m is not None:
+                saved.append(f)
+        if saved:
+            _emit(emit, "memory",
+                  f"saved {len(saved)} durable fact(s) to long-term memory",
+                  level="tool", saved=saved)
+        return saved
+    except Exception as e:
+        _emit(emit, "memory", f"memory capture skipped: {e}", level="info")
+        return []
+
+
+def optimize(client, cfg: Config, raw_prompt: str,
+             user_context: str = "", conversation: str = "") -> tuple[str, str, str]:
+    """Return (engineered_system, engineered_user, raw_optimizer_text)."""
+    parts = []
+    if user_context:
+        parts.append(
             "# About the requester "
             "(tailor depth, framing, and assumed background to them; "
-            "do NOT imitate their voice)\n"
-            f"{user_context}\n\n# Raw request\n{raw_prompt}"
-        )
-    else:
-        user = raw_prompt
+            "do NOT imitate their voice)\n" + user_context)
+    if conversation:
+        parts.append(
+            "# Conversation so far (resolve references like 'it'/'that'/'the "
+            "previous one' against this; keep continuity with what was already said)\n"
+            + conversation)
+    parts.append("# Latest request (engineer THIS, in the context above)\n"
+                 + raw_prompt)
+    user = "\n\n".join(parts) if (user_context or conversation) else raw_prompt
     res = client.complete(
         system=prompts.OPTIMIZER_SYSTEM,
         user=user,
@@ -145,7 +211,8 @@ def gather_web_context(query: str, broker, *, max_results: int = 3,
     from .tools import web
     _emit(emit, "web", f"searching the web: {query[:80]}", level="web")
     results = web.web_search(query, broker=broker, max_results=max_results)
-    _emit(emit, "web", f"{len(results)} result(s) found", level="web")
+    _emit(emit, "web", f"{len(results)} result(s) found", level="web",
+          count=len(results))
     blocks = []
     for r in results[:max_results]:
         try:
@@ -159,15 +226,23 @@ def gather_web_context(query: str, broker, *, max_results: int = 3,
 
 
 def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
-        web: bool = False, broker=None, emit=None) -> RunRecord:
+        web: bool = False, broker=None, emit=None, history=None) -> RunRecord:
     """Full pipeline for a single request.
 
     `emit` (optional) receives structured stage events for a live view (the web
     app's realtime log). It is a pure observer and defaults to None for the CLI.
+    `history` (optional) is prior conversation turns ({"role","text"}) that give AG
+    working memory: it resolves follow-ups and stays coherent across the chat.
     """
     ensure_dirs()
     t0 = time.time()
     total_in = total_out = 0
+
+    convo = format_history(history, max_turns=getattr(cfg, "max_history_turns", 12))
+    if convo:
+        _emit(emit, "conversation",
+              f"carrying {len([h for h in history if str(h.get('text','')).strip()])}"
+              " earlier turn(s) as working memory", level="tool")
 
     web_ctx = ""
     if web and broker is not None:
@@ -182,14 +257,23 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
 
     user_ctx = load_user_context()
     _emit(emit, "optimize", "engineering the prompt"
-          + (" (with your profile)" if user_ctx else ""), level="tool")
-    eng_sys, eng_user, _ = optimize(client, cfg, raw_prompt, user_context=user_ctx)
+          + (" (with your profile)" if user_ctx else "")
+          + (" (in conversation context)" if convo else ""), level="tool",
+          uses_profile=bool(user_ctx))
+    eng_sys, eng_user, _ = optimize(client, cfg, raw_prompt, user_context=user_ctx,
+                                    conversation=convo)
     _emit(emit, "optimize", "engineered prompt ready", level="info")
     if verbose:
         print(f"[optimize] engineered prompt ready "
               f"(user context: {'yes' if user_ctx else 'none'})")
 
     exec_sys = eng_sys
+    if convo:
+        exec_sys = (
+            f"{exec_sys}\n\n# Conversation so far (this is a continuing chat — stay "
+            "consistent with it and resolve any references to earlier turns)\n"
+            f"{convo}"
+        )
     if user_ctx:
         exec_sys = (
             f"{exec_sys}\n\n# About the person you're helping "
@@ -208,8 +292,11 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         if mem_ctx:
             exec_sys = (f"{exec_sys}\n\n# Relevant memory (durable facts AG has "
                         f"retained about this user/context)\n{mem_ctx}")
+            facts = [ln[2:] if ln.startswith("- ") else ln
+                     for ln in mem_ctx.splitlines() if ln.strip()]
             _emit(emit, "memory",
-                  f"recalled {len(mem_ctx.splitlines())} fact(s)", level="tool")
+                  f"recalled {len(facts)} fact(s) from earlier", level="tool",
+                  facts=facts)
 
     # With local tools enabled, run the reason→act→observe loop so AG can compute,
     # read files, run code, and use memory — not just summarize. Otherwise, one shot.

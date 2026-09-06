@@ -41,7 +41,7 @@ from typing import List, Optional
 from . import archive, backup, prompts
 from .config import ROOT, Config
 from .model import extract_json
-from .pipeline import recent_runs
+from .pipeline import recent_runs, _emit
 
 
 @dataclass
@@ -62,6 +62,43 @@ class EvolveResult:
     candidate_stdev: Optional[float] = None   # spread across benchmark samples
     samples: int = 0                          # how many times fitness was measured
     margin: Optional[float] = None            # significance threshold actually used
+
+
+@dataclass
+class ProposalPatch:
+    """One candidate self-edit, surfaced for the human to accept or reject."""
+
+    id: str
+    path: str
+    new_content: str
+    valid: bool
+    error: str = ""
+    n_bytes: int = 0
+    diff: str = ""
+
+    def summary(self) -> dict:
+        """The light view the GUI renders/selects on (omits full file content)."""
+        return {"id": self.id, "path": self.path, "valid": self.valid,
+                "error": self.error, "bytes": self.n_bytes, "diff": self.diff}
+
+
+@dataclass
+class ProposeResult:
+    """Candidate self-edits from one propose() call — nothing has been applied."""
+
+    attempted: bool
+    reason: str
+    rationale: str = ""
+    parent_hash: str = ""
+    directive: str = ""
+    patches: List[ProposalPatch] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {"attempted": self.attempted, "reason": self.reason,
+                "rationale": self.rationale, "parent_hash": self.parent_hash,
+                "directive": self.directive,
+                "n_valid": sum(1 for p in self.patches if p.valid),
+                "patches": [p.summary() for p in self.patches]}
 
 
 def _fitness_verdict(incumbent: Optional[float], candidate: Optional[float], *,
@@ -247,13 +284,17 @@ def _validate_patch(rel: str, content: str) -> Optional[str]:
 
 
 def evolve(client, cfg: Config, *, apply: bool = False,
-           dry_run: bool = False, emit=None, evolver_client=None) -> EvolveResult:
+           dry_run: bool = False, emit=None, evolver_client=None,
+           directive: str = "") -> EvolveResult:
     """Attempt one gated self-improvement.
 
     `client` is the DEPLOY backend: it answers the benchmark, so fitness is always
     measured on the model you actually run. `evolver_client` (optional) is the model
     that PROPOSES the edit — pass a stronger one (e.g. Claude) to get smart mutations
     while the deploy model does the free, honest measuring. Defaults to `client`.
+    `directive` (optional) is a free-text instruction from the user steering WHAT to
+    improve this cycle; it aims the proposer but never bypasses the safety/fitness
+    gates or the evolvable-path restriction.
     """
     if cfg.autonomy_level == "never":
         return EvolveResult(False, False, False, reason="autonomy_level=never")
@@ -289,17 +330,33 @@ def evolve(client, cfg: Config, *, apply: bool = False,
             archive.set_cached_fitness(parent_hash, incumbent)
 
     briefing = _direction(cfg, telemetry, bench_res=bench_res)
+    directive = (directive or "").strip()
+    if directive:
+        briefing["user_directive"] = directive
+        _emit(emit, "evolve", f"user directive: {directive[:120]}", level="tool")
+
+    directive_block = ""
+    if directive:
+        directive_block = (
+            "\n\n# USER DIRECTIVE (highest priority — aim this cycle's change at "
+            "satisfying this request, as long as it stays within your safety rules and "
+            "the evolvable files; if it would require editing a non-evolvable file or "
+            "weakening a gate, do the closest safe thing and say so in the rationale)\n"
+            + directive)
 
     user = (
         "# Directed-evolution briefing (aim your change here)\n"
         + json.dumps(briefing, indent=2)
+        + directive_block
         + "\n\n# Recent run telemetry (incl. accuracy/quality/speed scorecards)\n"
         + json.dumps(telemetry, indent=2)[:8000]
         + "\n\n# Current evolvable files\n"
         + json.dumps(evolvable, indent=2)[:12000]
-        + "\n\nPropose the single small, safe change most likely to make a failing "
-        "benchmark task pass (or lift the weakest axis) without breaking anything, "
-        "per your rules."
+        + "\n\nPropose the single small, safe change most likely to "
+        + ("satisfy the USER DIRECTIVE above (falling back to making a failing "
+           "benchmark task pass or lifting the weakest axis) " if directive
+           else "make a failing benchmark task pass (or lift the weakest axis) ")
+        + "without breaking anything, per your rules."
     )
     res = proposer.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
                             max_tokens=cfg.meta_output_tokens)
@@ -431,3 +488,216 @@ def evolve(client, cfg: Config, *, apply: bool = False,
                         candidate_fitness=candidate, fitness_delta=delta,
                         verdict=verdict, candidate_stdev=cand_stdev, samples=cand_n,
                         margin=margin)
+
+
+# --- Human-in-the-loop evolution -------------------------------------------
+# The functions below replace AG's *automatic* adopt/reject decision with a
+# curated one: propose() surfaces candidate edits (AG's own and any driven by the
+# user's directive) without touching a file; the human picks which to keep; and
+# apply_selected() applies exactly those, still enforcing the SAFETY test gate so a
+# selection can never leave AG on code that fails its own suite.
+
+def _diff_preview(rel: str, new_content: str, *, max_lines: int = 80) -> str:
+    """A short unified diff of an evolvable file vs the proposed content, for review."""
+    import difflib
+    try:
+        old = (ROOT / rel).read_text(encoding="utf-8")
+    except OSError:
+        old = ""
+    lines = list(difflib.unified_diff(
+        old.splitlines(), new_content.splitlines(),
+        fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm=""))
+    if not lines:
+        return "(no textual change)"
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"… (+{len(lines) - max_lines} more diff lines)"]
+    return "\n".join(lines)
+
+
+def _evolver_prompt(cfg: Config, directive: str) -> str:
+    """Build the proposer's user message (shared by propose() and evolve())."""
+    telemetry = recent_runs(limit=5)
+    evolvable = _read_evolvable(cfg)
+    briefing = _direction(cfg, telemetry, bench_res=None)
+    directive = (directive or "").strip()
+    directive_block = ""
+    if directive:
+        briefing["user_directive"] = directive
+        directive_block = (
+            "\n\n# USER DIRECTIVE (highest priority — aim this cycle's change at "
+            "satisfying this request, within your safety rules and the evolvable "
+            "files; if it would require editing a non-evolvable file or weakening a "
+            "gate, do the closest safe thing and say so in the rationale)\n" + directive)
+    return (
+        "# Directed-evolution briefing (aim your change here)\n"
+        + json.dumps(briefing, indent=2)
+        + directive_block
+        + "\n\n# Recent run telemetry (incl. accuracy/quality/speed scorecards)\n"
+        + json.dumps(telemetry, indent=2)[:8000]
+        + "\n\n# Current evolvable files\n"
+        + json.dumps(evolvable, indent=2)[:12000]
+        + "\n\nPropose small, safe change(s) most likely to "
+        + ("satisfy the USER DIRECTIVE above (falling back to making a failing "
+           "benchmark task pass or lifting the weakest axis) " if directive
+           else "make a failing benchmark task pass (or lift the weakest axis) ")
+        + "without breaking anything, per your rules. You may return more than one "
+        "patch; each will be shown to a human who chooses which to keep.")
+
+
+def propose(client, cfg: Config, *, evolver_client=None, directive: str = "",
+            emit=None) -> ProposeResult:
+    """Generate candidate self-edits and return them WITHOUT applying anything.
+
+    This is the human-in-the-loop replacement for the automatic decision: no
+    snapshot, no write, no adoption happens here. The caller shows the candidates
+    and calls apply_selected() with the chosen subset.
+    """
+    if cfg.autonomy_level == "never":
+        return ProposeResult(False, "autonomy_level=never")
+    if not gate_available():
+        return ProposeResult(False, "gate unavailable: " + GATE_MISSING_MSG)
+
+    proposer = evolver_client or client
+    parent_hash = archive.evolvable_hash(_read_evolvable(cfg))
+    directive = (directive or "").strip()
+    if directive:
+        _emit(emit, "evolve", f"user directive: {directive[:120]}", level="tool")
+    _emit(emit, "evolve", "asking the proposer for candidate change(s)…", level="tool")
+
+    user = _evolver_prompt(cfg, directive)
+    res = proposer.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
+                            max_tokens=cfg.meta_output_tokens)
+    data = extract_json(res.text) or {}
+    raw_patches = data.get("patches", []) or []
+    rationale = str(data.get("rationale", ""))
+
+    patches: List[ProposalPatch] = []
+    for i, patch in enumerate(raw_patches):
+        rel = str((patch or {}).get("path", "")) or "(unspecified)"
+        content = (patch or {}).get("new_content", "")
+        content = content if isinstance(content, str) else str(content)
+        if rel not in cfg.evolvable_paths:
+            patches.append(ProposalPatch(
+                id=f"p{i}", path=rel, new_content="", valid=False,
+                error="not an evolvable file — AG may only edit its declared set"))
+            _emit(emit, "evolve", f"proposed {rel} — rejected (not evolvable)",
+                  level="error")
+            continue
+        err = _validate_patch(rel, content)
+        patches.append(ProposalPatch(
+            id=f"p{i}", path=rel, new_content=content, valid=(err is None),
+            error=err or "", n_bytes=len(content.encode("utf-8")),
+            diff=_diff_preview(rel, content)))
+        _emit(emit, "evolve",
+              f"proposed change to {rel}" + (f" — INVALID: {err}" if err else ""),
+              level="result" if err is None else "error")
+
+    n_valid = sum(1 for p in patches if p.valid)
+    if not patches:
+        reason = "no changes proposed"
+    elif n_valid:
+        reason = f"{n_valid} change(s) proposed — select which to apply"
+    else:
+        reason = "changes proposed but none are valid to apply"
+    return ProposeResult(True, reason, rationale=rationale, parent_hash=parent_hash,
+                         directive=directive, patches=patches)
+
+
+def apply_selected(client, cfg: Config, selected, *, emit=None,
+                   measure: bool = False, note: str = "") -> EvolveResult:
+    """Apply a user-chosen subset of proposed patches, keeping the human's decision.
+
+    `selected` is a list of {"path","new_content"} (as produced by propose()). The
+    human already decided WHAT to keep by selecting, so there is no automatic
+    fitness adopt/reject here. The SAFETY test gate is still enforced — a selection
+    that breaks the suite is reverted, because that would break AG itself. Fitness is
+    measured only when `measure=True`, and then purely as reported information.
+    """
+    if cfg.autonomy_level == "never":
+        return EvolveResult(False, False, False, reason="autonomy_level=never")
+    if not gate_available():
+        return EvolveResult(False, False, False,
+                            reason="gate unavailable: " + GATE_MISSING_MSG)
+
+    # Re-validate defensively — never trust the selection to be well-formed or in-scope.
+    valid = []
+    for item in (selected or []):
+        rel = str((item or {}).get("path", ""))
+        content = (item or {}).get("new_content", "")
+        if not isinstance(content, str) or rel not in cfg.evolvable_paths:
+            continue
+        if _validate_patch(rel, content):
+            continue
+        valid.append((rel, content))
+    if not valid:
+        return EvolveResult(True, False, False,
+                            reason="no valid selected change(s) to apply")
+
+    parent_hash = archive.evolvable_hash(_read_evolvable(cfg))
+    rationale = (note or "").strip() or "user-selected change"
+
+    incumbent = incumbent_sem = None
+    do_fitness = bool(getattr(cfg, "fitness_gate", True)) and measure
+    if do_fitness:
+        incumbent = archive.get_cached_fitness(parent_hash)
+        if incumbent is None:
+            bres = _measure_fitness(client, cfg, emit=emit)
+            incumbent = bres.fitness
+            incumbent_sem = bres.sem
+            archive.set_cached_fitness(parent_hash, incumbent)
+
+    snap = backup.snapshot(cfg.evolvable_paths, note=f"pre-apply: {rationale[:80]}")
+    backup.prune_snapshots(cfg.max_snapshots)
+    changed = []
+    for rel, content in valid:
+        (ROOT / rel).write_text(content)
+        changed.append(rel)
+    _emit(emit, "evolve",
+          f"applied {len(changed)} selected change(s): " + ", ".join(changed),
+          level="tool")
+
+    # SAFETY gate stays hard: keeping code that fails the suite would break AG.
+    passed, output = run_tests()
+    if not passed:
+        backup.restore(snap)
+        archive.record(archive.Entry(
+            ts=archive.now_ts(), parent_hash=parent_hash, candidate_hash="",
+            incumbent_fitness=incumbent, candidate_fitness=None, delta=None,
+            tests_passed=False, adopted=False, verdict="reverted",
+            rationale=rationale, changed=changed, snapshot_id=snap.id))
+        _emit(emit, "evolve", "safety tests FAILED — reverting selection", level="error")
+        return EvolveResult(
+            True, False, True, rationale=rationale, changed=changed,
+            test_output=output, snapshot_id=snap.id,
+            reason="reverted: the selected change(s) broke the safety test suite",
+            incumbent_fitness=incumbent)
+
+    # Fitness is INFORMATIONAL here — the human chose to keep, so we do not reject on it.
+    candidate = delta = cand_stdev = None
+    cand_n = 0
+    candidate_hash = archive.evolvable_hash(_read_evolvable(cfg))
+    if do_fitness:
+        cres = _measure_fitness(client, cfg, emit=emit)
+        candidate = cres.fitness
+        cand_stdev = cres.stdev
+        cand_n = cres.n
+        archive.set_cached_fitness(candidate_hash, candidate)
+        delta = round(candidate - incumbent, 3) if incumbent is not None else None
+
+    commit = backup.git_commit_evolve(
+        f"AG user-selected change: {rationale[:56]}", branch=cfg.evolve_branch)
+    archive.record(archive.Entry(
+        ts=archive.now_ts(), parent_hash=parent_hash, candidate_hash=candidate_hash,
+        incumbent_fitness=incumbent, candidate_fitness=candidate, delta=delta,
+        tests_passed=True, adopted=True, verdict="user-selected", rationale=rationale,
+        changed=changed, snapshot_id=snap.id, candidate_stdev=cand_stdev,
+        samples=cand_n))
+    reason = "applied & kept — safety tests passed"
+    if delta is not None:
+        reason += f"; fitness {incumbent}->{candidate} (Δ{delta:+}, informational)"
+    return EvolveResult(True, True, False, rationale=rationale, changed=changed,
+                        test_output=output, snapshot_id=snap.id, commit=commit,
+                        reason=reason, incumbent_fitness=incumbent,
+                        candidate_fitness=candidate, fitness_delta=delta,
+                        verdict="user-selected", candidate_stdev=cand_stdev,
+                        samples=cand_n)
