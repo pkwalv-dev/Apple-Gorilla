@@ -32,6 +32,10 @@ class Config:
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_keep_alive: str = "30m"            # keep the model resident between calls
     ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
+    # When the local Ollama server isn't reachable, try to launch `ollama serve`
+    # ourselves (local hosts only) so the offline backend "just works" without the
+    # user starting it by hand. Set false to require a manually-started server.
+    ollama_autostart: bool = True
     effort: str = "high"                      # low | medium | high | xhigh | max
     # Extended-thinking control (like the Claude app's toggle). "off" disables the
     # model's chain-of-thought (fastest), "on" forces it, "auto" leaves the model to
