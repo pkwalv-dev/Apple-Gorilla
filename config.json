@@ -8,6 +8,7 @@
   "ollama_options": {
     "num_ctx": 16384
   },
+  "ollama_autostart": true,
   "effort": "high",
   "max_output_tokens": 32000,
   "meta_output_tokens": 16000,

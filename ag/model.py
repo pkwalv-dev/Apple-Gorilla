@@ -198,6 +198,105 @@ class OllamaClient:
         )
 
 
+def _ollama_reachable(host: str, timeout: float = 1.5) -> bool:
+    """True if the Ollama HTTP API answers at `host` within `timeout` seconds."""
+    import urllib.request
+    url = host.rstrip("/") + "/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return 200 <= getattr(resp, "status", 200) < 500
+    except Exception:
+        return False
+
+
+def _is_local_host(host: str) -> bool:
+    """True only for loopback/any-local hosts — we never try to start a remote server."""
+    from urllib.parse import urlparse
+    h = (urlparse(host).hostname or "").lower()
+    return h in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "")
+
+
+def _find_ollama_exe() -> Optional[str]:
+    """Locate the `ollama` binary on PATH, or in common per-OS install locations."""
+    import shutil
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    candidates = []
+    if os.name == "nt":
+        for base in (os.environ.get("LOCALAPPDATA"),
+                     os.environ.get("ProgramFiles"),
+                     os.environ.get("ProgramW6432")):
+            if base:
+                candidates.append(Path(base) / "Programs" / "Ollama" / "ollama.exe")
+                candidates.append(Path(base) / "Ollama" / "ollama.exe")
+    else:
+        candidates += [
+            Path("/usr/local/bin/ollama"), Path("/opt/homebrew/bin/ollama"),
+            Path("/usr/bin/ollama"), Path.home() / ".local" / "bin" / "ollama",
+            Path("/Applications/Ollama.app/Contents/Resources/ollama"),
+        ]
+    for c in candidates:
+        try:
+            if Path(c).exists():
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
+def _spawn_ollama_serve(exe: str) -> bool:
+    """Launch `ollama serve` detached so it outlives this process. Best-effort."""
+    import subprocess
+    try:
+        if os.name == "nt":
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, survives us.
+            flags = 0x00000008 | 0x00000200
+            subprocess.Popen(
+                [exe, "serve"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                [exe, "serve"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        return True
+    except Exception:
+        return False
+
+
+def ensure_ollama_running(cfg: Config, *, timeout: float = 12.0) -> bool:
+    """Make sure the local Ollama server is up, starting it if needed.
+
+    Best-effort and never raises: if Ollama can't be reached or launched, callers
+    proceed unchanged and `OllamaClient.complete()` surfaces its own clear
+    "is `ollama serve` running?" error. Returns True iff the API is reachable by the
+    time we return.
+
+    Only a *local* host is auto-started (we never poke a remote one), and only when
+    `cfg.ollama_autostart` is set. After spawning, we poll until the HTTP API answers
+    (the model itself loads lazily on first request — we only need the server up).
+    """
+    host = cfg.ollama_host
+    if _ollama_reachable(host):
+        return True
+    if not getattr(cfg, "ollama_autostart", True) or not _is_local_host(host):
+        return False
+    exe = _find_ollama_exe()
+    if not exe or not _spawn_ollama_serve(exe):
+        return False
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _ollama_reachable(host, timeout=1.0):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _ollama_think(cfg: Config):
     """Ollama's top-level `think` flag from cfg.think.
 
@@ -312,6 +411,7 @@ def make_client(cfg: Optional[Config] = None, *, backend: Optional[str] = None,
     if choice == "dry":
         return DryRunClient()
     if choice == "ollama":
+        ensure_ollama_running(cfg)
         return OllamaClient(cfg)
     if choice == "anthropic":
         return ApiClient()
@@ -325,6 +425,7 @@ def make_client(cfg: Optional[Config] = None, *, backend: Optional[str] = None,
             pass
     offline = (getattr(cfg, "offline_backend", "") or "dry").lower()
     if offline == "ollama":
+        ensure_ollama_running(cfg)
         return OllamaClient(cfg)
     return DryRunClient()
 
