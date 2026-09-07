@@ -204,6 +204,50 @@ def test_ollama_cancel_stops_stream_and_closes(monkeypatch):
     assert closed["v"]           # connection closed from the reading thread
 
 
+def test_image_generate_saves_png(tmp_path, monkeypatch):
+    import base64 as _b64, json as _json, io as _io
+    import urllib.request as _u
+    from ag import images
+    from ag.config import Config as _Cfg
+    # a 1x1 PNG
+    png = _b64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return _json.dumps({"images": [_b64.b64encode(png).decode()]}).encode()
+
+    monkeypatch.setattr(images, "IMAGES_DIR", tmp_path)
+    monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp())
+    res = images.generate("a red bicycle", _Cfg())
+    assert res.data_url.startswith("data:image/png;base64,")
+    from pathlib import Path
+    assert Path(res.path).exists() and Path(res.path).read_bytes() == png
+
+
+def test_image_generate_unreachable_raises(monkeypatch):
+    import urllib.request as _u, urllib.error as _e
+    import pytest
+    from ag import images
+    from ag.config import Config as _Cfg
+    def boom(*a, **k): raise _e.URLError("refused")
+    monkeypatch.setattr(_u, "urlopen", boom)
+    with pytest.raises(RuntimeError):
+        images.generate("x", _Cfg())
+
+
+def test_generate_image_tool_offered_when_enabled():
+    from ag import reason
+    from ag.permissions import PermissionBroker
+    cfg = Config()
+    names = {t.name for t in reason.available_tools(PermissionBroker(), None, cfg)}
+    assert "generate_image" in names
+    cfg2 = Config(); cfg2.allow_image_gen = False
+    names2 = {t.name for t in reason.available_tools(PermissionBroker(), None, cfg2)}
+    assert "generate_image" not in names2
+
+
 def test_ollama_empty_answer_salvaged(monkeypatch):
     # If suppression/stripping leaves nothing but the model DID emit content
     # (e.g. a truncated <think> with no answer after), don't return a blank answer.

@@ -117,6 +117,22 @@ def _report_web(cfg: Config) -> ToolReport:
                       "grant. Set allow_web=true for standing access.")
 
 
+def _report_images(cfg: Config) -> ToolReport:
+    if not getattr(cfg, "allow_image_gen", False):
+        return ToolReport("image generation", "capability", "degraded", 7, 4,
+                          "Wired but disabled: set allow_image_gen to enable the local "
+                          "Stable Diffusion txt2img tool + GUI panel.")
+    from . import images
+    if images.sd_reachable(cfg):
+        return ToolReport("image generation", "capability", "available", 8, 8,
+                          "Local Stable Diffusion (Automatic1111/Forge) at "
+                          + cfg.sd_host + ". Keyless, offline; 'generate_image' tool + "
+                          "GUI panel. Images saved to state/images/.")
+    return ToolReport("image generation", "capability", "degraded", 8, 5,
+                      "Enabled but no SD server reachable at " + cfg.sd_host
+                      + ". Start Automatic1111/Forge with --api.")
+
+
 def _report_subagents(cfg: Config) -> ToolReport:
     if cfg.allow_local_tools:
         return ToolReport("sub-agents", "agent", "available", 7, 8,
@@ -204,6 +220,7 @@ def inventory(cfg: Optional[Config] = None) -> List[ToolReport]:
         _report_dry(cfg),
         _report_web(cfg),
         _report_subagents(cfg),
+        _report_images(cfg),
         _report_local_tools(cfg),
         _report_memory(cfg),
         _report_host(cfg),

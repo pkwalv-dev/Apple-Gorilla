@@ -44,7 +44,19 @@ def _registry(client=None, cfg=None) -> List[Tool]:
             return "delegate error: provide a 'task' for the sub-agent"
         return agents.spawn(client, cfg, broker, role=role, task=task).output
 
-    return [
+    def _generate_image(args, broker):
+        from . import images
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            return "generate_image error: provide a 'prompt'"
+        try:
+            res = images.generate(prompt, cfg,
+                                  negative_prompt=str(args.get("negative", "")))
+        except Exception as e:
+            return f"generate_image error: {e}"
+        return f"image generated and saved to {res.path}"
+
+    reg = [
         Tool("calc", "expr", None,
              'exact arithmetic, e.g. {"tool":"calc","args":{"expr":"(17*23)-4"}}',
              lambda args, broker: local.calc(str(args.get("expr", "")))),
@@ -70,6 +82,14 @@ def _registry(client=None, cfg=None) -> List[Tool]:
              'e.g. {"tool":"python_exec","args":{"code":"print(sum(range(10)))"}}',
              lambda args, broker: local.python_exec(str(args.get("code", "")), broker=broker)),
     ]
+    # Local image generation, offered only when enabled in config.
+    if cfg is None or getattr(cfg, "allow_image_gen", False):
+        reg.append(Tool(
+            "generate_image", "prompt", None,
+            'create an image from a text prompt via the local Stable Diffusion server, '
+            'e.g. {"tool":"generate_image","args":{"prompt":"a red bicycle at sunset"}}',
+            _generate_image))
+    return reg
 
 
 def available_tools(broker, client=None, cfg=None) -> List[Tool]:

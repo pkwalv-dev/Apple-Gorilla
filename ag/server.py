@@ -130,6 +130,16 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 
 <table id="tools" class="panel"></table>
 
+<div class="panel" id="imagepanel">
+  <span class="grouplabel">Image generation — local Stable Diffusion <span class="cmd-note" id="imgnote"></span></span>
+  <textarea id="imgprompt" class="directive" rows="2"
+    placeholder="Describe an image to generate. Needs a local Stable Diffusion server (Automatic1111/Forge) running with --api; prompts never leave your machine."></textarea>
+  <div class="controls">
+    <button class="cmd" id="imgbtn" onclick="genImage()">Generate image</button>
+  </div>
+  <div id="imgout"></div>
+</div>
+
 <div class="panel" id="improve">
   <div class="btngroup cmd-group">
     <span class="grouplabel">Commands — run &amp; modify AG</span>
@@ -684,8 +694,33 @@ async function logoutClaude(){
   try{ await fetch('/logout',{method:'POST'}); }catch(e){}
   loadAuth(); loadModels(); renderWhere();
 }
+/* ---- local image generation ------------------------------------------ */
+async function loadImageStatus(){
+  const n=$('imgnote'); if(!n) return;
+  try{
+    const s=await fetch('/image/status').then(r=>r.json());
+    if(!s.enabled){ n.textContent='· disabled in config'; }
+    else if(s.reachable){ n.textContent='· ready at '+escapeHtml(s.host); }
+    else { n.textContent='· no server at '+escapeHtml(s.host)+' (start Automatic1111/Forge with --api)'; }
+  }catch(e){}
+}
+async function genImage(){
+  const p=$('imgprompt')?$('imgprompt').value.trim():''; if(!p) return;
+  const btn=$('imgbtn'), out=$('imgout');
+  if(btn) btn.disabled=true;
+  if(out) out.innerHTML='<div class="ct-hint">generating… (local diffusion can take a while)</div>';
+  try{
+    const r=await fetch('/image',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt:p})}).then(r=>r.json());
+    if(r.ok){ out.innerHTML='<img src="'+r.data_url+'" alt="'+escapeHtml(p)
+      +'" style="max-width:100%;border-radius:10px;margin-top:8px">'
+      +'<div class="ct-hint">saved to '+escapeHtml(r.path)+'</div>'; }
+    else { out.innerHTML='<div class="result bad">'+escapeHtml(r.error||'failed')+'</div>'; }
+  }catch(e){ out.innerHTML='<div class="result bad">request failed: '+escapeHtml(''+e)+'</div>'; }
+  if(btn) btn.disabled=false;
+}
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
-restoreThink(); restoreMode(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth();
+restoreThink(); restoreMode(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
 </script></body></html>"""
 
 def _render_page() -> str:
@@ -790,6 +825,14 @@ class _Handler(BaseHTTPRequestHandler):
             st["model"] = self.cfg.model
             st["console_url"] = "https://console.anthropic.com/settings/keys"
             self._send(200, json.dumps(st), "application/json")
+        elif self.path == "/image/status":
+            from . import images
+            cfg = self.cfg
+            self._send(200, json.dumps({
+                "enabled": bool(getattr(cfg, "allow_image_gen", False)),
+                "reachable": images.sd_reachable(cfg) if getattr(
+                    cfg, "allow_image_gen", False) else False,
+                "host": cfg.sd_host}), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -826,6 +869,34 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def do_POST(self):
+        if self.path == "/image":
+            from . import images
+            cfg = self.cfg
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+                prompt = str(payload.get("prompt", "")).strip()
+                if not prompt:
+                    raise ValueError("empty prompt")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+                return
+            if not getattr(cfg, "allow_image_gen", False):
+                self._send(200, json.dumps(
+                    {"ok": False, "error": "image generation is disabled "
+                     "(set allow_image_gen)"}), "application/json")
+                return
+            try:
+                res = images.generate(prompt, cfg,
+                                      negative_prompt=str(payload.get("negative", "")))
+                self._send(200, json.dumps({
+                    "ok": True, "data_url": res.data_url, "path": res.path,
+                    "width": res.width, "height": res.height}), "application/json")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+            return
         if self.path == "/stop":
             try:
                 n = int(self.headers.get("Content-Length", "0"))
