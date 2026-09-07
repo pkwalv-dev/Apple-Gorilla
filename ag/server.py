@@ -19,8 +19,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Config
-from .model import make_client
+from .model import make_client, Canceller, Cancelled
 from .pipeline import run as run_pipeline
+
+
+class _Interrupted(Exception):
+    """Raised inside a run's on_delta when the viewer disconnects (Stop / closed tab),
+    so generation is halted upstream instead of running to completion unseen."""
 
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -43,6 +48,13 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 /* live activity indicator on the pending reply bubble */
 .body.pending{opacity:.85;font-style:italic}
 .act-timer{opacity:.6;font-variant-numeric:tabular-nums;font-style:normal}
+/* verbose live output (reasoning + streamed tokens) */
+.verbose{margin-top:8px;font-size:12px}
+.verbose summary{cursor:pointer;color:#8b949e}
+.vbody{white-space:pre-wrap;max-height:260px;overflow:auto;margin-top:6px;padding:8px;
+  border-radius:8px;background:rgba(127,127,127,.08);font-family:var(--mono),monospace;
+  font-size:11px;line-height:1.45}
+#stopbtn{background:#b91c1c;color:#fff}
 </style></head><body>
 <div class="wrap">
 <header>
@@ -73,8 +85,10 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
   <div class="controls">
     <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
+    <button class="cmd" id="stopbtn" onclick="stopRun()" hidden>Stop</button>
     <span class="cmd-note">executes a request</span>
     <span class="ctl-right">
+      <label class="ctl" title="Stream the model's raw output — including its reasoning (Ollama's &lt;think&gt; blocks) — live as it is generated. Stop ends the response and returns control immediately; a local model may take a moment more to wind down in the background."><input type="checkbox" id="verbose"> show reasoning</label>
       <label class="ctl" title="Fast = ONE model call (no prompt-engineering, no self-review) — quick and best for iterating. Full = engineer the prompt, then self-critique and revise for higher quality (several calls, much slower). Context (web/profile/memory/history) applies in both.">mode
         <select id="mode" class="ctl-select" onchange="saveMode()">
           <option value="fast">fast · 1 call</option>
@@ -226,7 +240,10 @@ function appendAssistant(){
   const el=document.createElement('div'); el.className='msg ai processing';
   el.innerHTML='<div class="who">apple-gorilla<span class="ts">'+nowStr()+'</span></div>'
     +'<div class="body pending"><span class="act-stage">…starting</span>'
-    +'<span class="act-timer"></span></div><div class="live-ctx"></div>';
+    +'<span class="act-timer"></span></div>'
+    +'<details class="verbose" hidden><summary>reasoning &amp; live output</summary>'
+    +'<pre class="vbody"></pre></details>'
+    +'<div class="live-ctx"></div>';
   $('chat').appendChild(el); $('chat').scrollTop=$('chat').scrollHeight;
   return el;
 }
@@ -295,18 +312,40 @@ function applyContext(ev,ai){
   }
 }
 
+let CURRENT_ABORT=null, CURRENT_RUNID=null, RUN_STOPPED=false;
+function setRunning(on){
+  const rb=$('runbtn'), sb=$('stopbtn');
+  if(rb){ rb.hidden=on; rb.disabled=on; }
+  if(sb){ sb.hidden=!on; }
+}
+function stopRun(){
+  $('status').textContent='stopping…'; RUN_STOPPED=true;
+  // Signal the server to halt generation. We deliberately DON'T abort the fetch: we
+  // keep reading so the server's stream loop reaches its cancel check and closes the
+  // model connection from its own thread (a client abort can wedge the write on some
+  // platforms). The server closes the stream right after it cancels.
+  if(CURRENT_RUNID){ try{ fetch('/stop',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({run_id:CURRENT_RUNID})}); }catch(e){} }
+}
 async function go(){
   const p=$('p').value.trim(); if(!p)return;
-  $('runbtn').disabled=true; $('status').textContent='running…';
+  setRunning(true); $('status').textContent='running…';
   $('log').innerHTML=''; $('cards').style.display='none';
   ['acc','qual','spd','ovr'].forEach(x=>setCard(x,null));
   // prior turns become AG's working memory (the current prompt is sent separately)
   const hist=CHAT.slice(-20).map(m=>({role:m.role,text:m.text}));
   resetContext(); appendUser(p); const ai=appendAssistant(); startActivity(ai); $('p').value='';
+  const ctrl=new AbortController(); CURRENT_ABORT=ctrl; RUN_STOPPED=false;
+  const runId=(self.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Date.now())+Math.random();
+  CURRENT_RUNID=runId;
+  const verbose=$('verbose')?$('verbose').checked:false;
   try{
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      signal:ctrl.signal,
       body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
-        model:($('model')?$('model').value:''),mode:($('mode')?$('mode').value:'')})});
+        model:($('model')?$('model').value:''),mode:($('mode')?$('mode').value:''),
+        verbose:verbose,run_id:runId})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
@@ -321,15 +360,32 @@ async function go(){
     if(!ai._committed){ stopActivity(ai);
       const b=ai.querySelector('.body');
       if(b&&b.classList.contains('pending')){ b.className='body';
-        b.textContent='(the run ended without an answer — see the trace above)';
-        ai.classList.remove('processing'); $('status').textContent='ended'; } }
-  }catch(e){ stopActivity(ai); addEv({stage:'error',level:'error',msg:'request failed: '+e});
-    $('status').textContent='error';
-    const b=ai.querySelector('.body'); b.className='body'; b.textContent='(request failed: '+escapeHtml(''+e)+')';
-    ai.classList.remove('processing'); }
-  $('runbtn').disabled=false;
+        b.textContent=RUN_STOPPED?'(stopped by you)'
+          :'(the run ended without an answer — see the trace above)';
+        ai.classList.remove('processing');
+        $('status').textContent=RUN_STOPPED?'stopped':'ended'; } }
+  }catch(e){
+    stopActivity(ai);
+    const b=ai.querySelector('.body'); b.className='body'; ai.classList.remove('processing');
+    if(e&&e.name==='AbortError'){          // user hit Stop
+      b.textContent='(stopped by you)'; $('status').textContent='stopped';
+    } else {
+      addEv({stage:'error',level:'error',msg:'request failed: '+e});
+      $('status').textContent='error';
+      b.textContent='(request failed: '+escapeHtml(''+e)+')';
+    }
+  }
+  CURRENT_ABORT=null; CURRENT_RUNID=null; setRunning(false);
 }
 function handle(ev,ai){
+  if(ev.stage==='delta'){   // live streamed model output (verbose mode)
+    const det=ai.querySelector('.verbose');
+    if(det){ det.hidden=false; det.open=true;
+      const pre=det.querySelector('.vbody');
+      if(pre){ pre.textContent+=((ev.data&&ev.data.text)||''); } }
+    $('chat').scrollTop=$('chat').scrollHeight; return;
+  }
+  if(ev.stage==='progress'){ return; }   // heartbeat only (keeps Stop responsive)
   if(ev.stage==='error'){   // terminal pipeline error — make it visible, don't hang
     stopActivity(ai);
     const b=ai.querySelector('.body'); b.className='body';
@@ -688,6 +744,11 @@ class _Handler(BaseHTTPRequestHandler):
     # that a cycle is in progress and lets us reject overlapping evolves.
     _evolve_lock = threading.Lock()
     _evolving = threading.Event()
+    # Cancellation registry: run_id -> True when the viewer asked to stop that run.
+    # Checked every streamed chunk so Stop halts generation promptly and reliably,
+    # rather than relying on a TCP write eventually failing.
+    _cancel: dict = {}
+    _cancel_lock = threading.Lock()
     # Last set of proposed self-edits, cached so the GUI can apply a chosen subset by
     # id (the browser never sends code back — AG applies exactly what it proposed).
     _proposal: dict = {}
@@ -765,6 +826,22 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def do_POST(self):
+        if self.path == "/stop":
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+                rid = str(payload.get("run_id", ""))[:64]
+            except Exception:
+                rid = ""
+            if rid:
+                with _Handler._cancel_lock:
+                    c = _Handler._cancel.get(rid)
+                    if c is None:
+                        _Handler._cancel[rid] = True   # sentinel: cancel on registration
+                if hasattr(c, "cancel"):
+                    c.cancel()                         # stop an already-running generation
+            self._send(200, json.dumps({"ok": bool(rid)}), "application/json")
+            return
         if self.path in ("/login/key", "/logout"):
             # Sign-in is a local action: only honour it from this machine, even when
             # bound to 0.0.0.0 for LAN viewing.
@@ -847,7 +924,9 @@ class _Handler(BaseHTTPRequestHandler):
             think = "auto"
         model = str(payload.get("model", "")).strip()[:100]
         mode = str(payload.get("mode", "")).lower().strip()
-        self._stream_run(prompt, want_web, history, think, model, mode)
+        verbose = bool(payload.get("verbose", False))
+        run_id = str(payload.get("run_id", ""))[:64]
+        self._stream_run(prompt, want_web, history, think, model, mode, verbose, run_id)
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -1081,8 +1160,15 @@ class _Handler(BaseHTTPRequestHandler):
         return {}
 
     def _stream_run(self, prompt: str, want_web, history=None, think="auto", model="",
-                    mode=""):
-        """Run the pipeline, streaming each stage event as one NDJSON line."""
+                    mode="", verbose=False, run_id=""):
+        """Run the pipeline, streaming each stage event as one NDJSON line.
+
+        The model's output is always streamed internally via `on_delta`: when
+        `verbose` is set the chunks are forwarded to the browser as 'delta' events so
+        the viewer sees the reasoning/output live; otherwise a light heartbeat keeps
+        the connection observable. Either way, if the viewer disconnects (Stop button /
+        closed tab) the next write fails, we raise, and generation is halted upstream.
+        """
         import dataclasses
         from .pipeline import capture_memory
         write = self._ndjson_writer()
@@ -1094,10 +1180,36 @@ class _Handler(BaseHTTPRequestHandler):
         fast = (mode == "fast") if mode in ("fast", "full") else None
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
         broker = _build_broker(cfg, web=web_eff)
+
+        # A Canceller lets /stop close the upstream model connection at any point (even
+        # during prompt-eval), so Stop is prompt and reliable — not only once tokens flow.
+        canceller = Canceller()
+        if run_id:
+            with _Handler._cancel_lock:
+                pre = _Handler._cancel.get(run_id)
+                _Handler._cancel[run_id] = canceller
+            if pre is True:            # /stop arrived before we registered
+                canceller.cancel()
+
+        state = {"n": 0}
+
+        def on_delta(text):
+            state["n"] += 1
+            try:
+                if verbose:
+                    write({"stage": "delta", "level": "token", "msg": "",
+                           "data": {"text": text}})
+                elif state["n"] % 16 == 0:
+                    write({"stage": "progress", "level": "info", "msg": "",
+                           "data": {"tokens": state["n"]}})
+            except (BrokenPipeError, ConnectionError):
+                raise _Interrupted()   # viewer closed the tab mid-stream
+
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,
-                               emit=write, history=history, fast=fast)
+                               emit=write, history=history, fast=fast,
+                               on_delta=on_delta, cancel=canceller)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
                 "iterations": rec.iterations, "elapsed_s": rec.elapsed_s,
@@ -1112,13 +1224,17 @@ class _Handler(BaseHTTPRequestHandler):
                                conversation=convo, emit=write)
             except Exception:
                 pass
-        except (BrokenPipeError, ConnectionError):
-            return  # client navigated away mid-stream
+        except (BrokenPipeError, ConnectionError, _Interrupted, Cancelled):
+            return  # viewer stopped the run or navigated away mid-stream
         except Exception as e:
             try:
                 write({"stage": "error", "level": "error", "msg": str(e), "data": {}})
             except Exception:
                 pass
+        finally:
+            if run_id:
+                with _Handler._cancel_lock:
+                    _Handler._cancel.pop(run_id, None)
 
     def log_message(self, *a):  # quiet
         pass

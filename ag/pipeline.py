@@ -227,7 +227,7 @@ def gather_web_context(query: str, broker, *, max_results: int = 3,
 
 def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         web: bool = False, broker=None, emit=None, history=None,
-        fast: Optional[bool] = None) -> RunRecord:
+        fast: Optional[bool] = None, on_delta=None, cancel=None) -> RunRecord:
     """Pipeline for a single request.
 
     `emit` (optional) receives structured stage events for a live view (the web
@@ -321,14 +321,19 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
     if cfg.allow_local_tools and broker is not None:
         from . import reason
         rr = reason.solve(client, cfg, system=exec_sys, user=eng_user,
-                          broker=broker, emit=emit)
+                          broker=broker, emit=emit, on_delta=on_delta, cancel=cancel)
         answer = rr.answer
         total_in += rr.input_tokens
         total_out += rr.output_tokens
         if rr.steps:
             _emit(emit, "execute", f"used {len(rr.steps)} tool step(s)", level="info")
     else:
-        exec_res = client.complete(system=exec_sys, user=eng_user, cfg=cfg)
+        _kw = {}
+        if on_delta is not None:
+            _kw["on_delta"] = on_delta
+        if cancel is not None:
+            _kw["cancel"] = cancel
+        exec_res = client.complete(system=exec_sys, user=eng_user, cfg=cfg, **_kw)
         answer = exec_res.text
         total_in += exec_res.input_tokens
         total_out += exec_res.output_tokens
