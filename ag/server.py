@@ -136,6 +136,7 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     placeholder="Describe an image to generate. Needs a local Stable Diffusion server (Automatic1111/Forge) running with --api; prompts never leave your machine."></textarea>
   <div class="controls">
     <button class="cmd" id="imgbtn" onclick="genImage()">Generate image</button>
+    <button class="cmd" id="imgstartbtn" onclick="startImageServer()" hidden>Start server</button>
   </div>
   <div id="imgout"></div>
 </div>
@@ -696,19 +697,30 @@ async function logoutClaude(){
 }
 /* ---- local image generation ------------------------------------------ */
 async function loadImageStatus(){
-  const n=$('imgnote'); if(!n) return;
+  const n=$('imgnote'), sb=$('imgstartbtn'); if(!n) return;
   try{
     const s=await fetch('/image/status').then(r=>r.json());
-    if(!s.enabled){ n.textContent='· disabled in config'; }
-    else if(s.reachable){ n.textContent='· ready at '+escapeHtml(s.host); }
-    else { n.textContent='· no server at '+escapeHtml(s.host)+' (start Automatic1111/Forge with --api)'; }
+    if(!s.enabled){ n.textContent='· disabled in config'; if(sb) sb.hidden=true; }
+    else if(s.reachable){ n.textContent='· ready at '+escapeHtml(s.host); if(sb) sb.hidden=true; }
+    else { n.textContent='· no server at '+escapeHtml(s.host)+' — click Start server, or launch Automatic1111/Forge with --api';
+      if(sb) sb.hidden=false; }
   }catch(e){}
+}
+async function startImageServer(){
+  const n=$('imgnote'), sb=$('imgstartbtn');
+  if(sb) sb.disabled=true; if(n) n.textContent='· starting image server (first start loads a model — up to a few minutes)…';
+  try{
+    const r=await fetch('/image/start',{method:'POST'}).then(r=>r.json());
+    if(!r.ok && n) n.textContent='· '+escapeHtml(r.error||'could not start the server');
+  }catch(e){ if(n) n.textContent='· start failed: '+escapeHtml(''+e); }
+  if(sb) sb.disabled=false;
+  loadImageStatus();
 }
 async function genImage(){
   const p=$('imgprompt')?$('imgprompt').value.trim():''; if(!p) return;
   const btn=$('imgbtn'), out=$('imgout');
   if(btn) btn.disabled=true;
-  if(out) out.innerHTML='<div class="ct-hint">generating… (local diffusion can take a while)</div>';
+  if(out) out.innerHTML='<div class="ct-hint">generating… (if the server is not running AG will start it first — the first image can take a few minutes)</div>';
   try{
     const r=await fetch('/image',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({prompt:p})}).then(r=>r.json());
@@ -869,6 +881,20 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def do_POST(self):
+        if self.path == "/image/start":
+            from . import images
+            cfg = self.cfg
+            if not getattr(cfg, "allow_image_gen", False):
+                self._send(200, json.dumps({"ok": False,
+                           "error": "image generation is disabled"}), "application/json")
+                return
+            ok = images.ensure_sd_running(cfg)
+            self._send(200, json.dumps({
+                "ok": ok, "reachable": ok, "host": cfg.sd_host,
+                "error": "" if ok else "could not start a Stable Diffusion server "
+                "(none installed/found, or it did not come up). Set sd_cmd to your "
+                "launcher, or start it manually with --api."}), "application/json")
+            return
         if self.path == "/image":
             from . import images
             cfg = self.cfg
