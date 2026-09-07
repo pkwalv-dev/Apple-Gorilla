@@ -35,11 +35,24 @@ class Tool:
     run: Callable[..., str]
 
 
-def _registry() -> List[Tool]:
+def _registry(client=None, cfg=None) -> List[Tool]:
+    def _delegate(args, broker):
+        from . import agents
+        role = str(args.get("role", "worker"))
+        task = str(args.get("task", "")).strip()
+        if not task:
+            return "delegate error: provide a 'task' for the sub-agent"
+        return agents.spawn(client, cfg, broker, role=role, task=task).output
+
     return [
         Tool("calc", "expr", None,
              'exact arithmetic, e.g. {"tool":"calc","args":{"expr":"(17*23)-4"}}',
              lambda args, broker: local.calc(str(args.get("expr", "")))),
+        Tool("delegate", "task", "spawn_agent",
+             'hand a focused subtask to a fresh sub-agent and get its result back, '
+             'e.g. {"tool":"delegate","args":{"role":"researcher",'
+             '"task":"list the tradeoffs of X"}}',
+             _delegate),
         Tool("recall", "query", None,
              'search AG memory, e.g. {"tool":"recall","args":{"query":"my timezone"}}',
              lambda args, broker: local.memory_recall(str(args.get("query", "")))),
@@ -59,10 +72,10 @@ def _registry() -> List[Tool]:
     ]
 
 
-def available_tools(broker) -> List[Tool]:
+def available_tools(broker, client=None, cfg=None) -> List[Tool]:
     """Only tools whose grant is held (or that need none) are offered this run."""
     out = []
-    for t in _registry():
+    for t in _registry(client, cfg):
         if t.grant is None or (broker is not None and broker.check(t.grant)):
             out.append(t)
     return out
@@ -113,7 +126,7 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None) -> ReasonResult:
     """Run the reason→act→observe loop and return the final answer + trace."""
     from .pipeline import _emit  # reuse the pipeline's safe emitter
-    tools = available_tools(broker)
+    tools = available_tools(broker, client, cfg)
     if not tools:  # nothing to use — behave like a normal single call
         res = client.complete(system=system, user=user, cfg=cfg)
         return ReasonResult(res.text, [], res.input_tokens, res.output_tokens)

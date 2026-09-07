@@ -118,13 +118,15 @@ def _report_web(cfg: Config) -> ToolReport:
 
 
 def _report_subagents(cfg: Config) -> ToolReport:
-    if cfg.allow_external_tools:
-        return ToolReport("sub-agents", "agent", "available", 6, 6,
-                          "Bounded, non-recursive role-scoped calls. Gated by "
-                          "'spawn_agent'; runs sequentially (no parallel fan-out yet).")
-    return ToolReport("sub-agents", "agent", "degraded", 6, 5,
-                      "Implemented but gated off: needs allow_external_tools + a "
-                      "'spawn_agent' grant. No parallelism yet.")
+    if cfg.allow_local_tools:
+        return ToolReport("sub-agents", "agent", "available", 7, 8,
+                          "Wired into the reason loop as the 'delegate' tool: AG can "
+                          "hand a focused subtask to a bounded, non-recursive sub-agent "
+                          "and use the result. Runs sequentially (no parallel fan-out "
+                          "yet).")
+    return ToolReport("sub-agents", "agent", "degraded", 7, 5,
+                      "Implemented but off: enable allow_local_tools to grant "
+                      "'spawn_agent' and expose the 'delegate' tool.")
 
 
 def _report_host(cfg: Config) -> ToolReport:

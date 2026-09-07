@@ -91,6 +91,55 @@ def test_source_and_profile_writes_force_utf8():
             assert "encoding=" in window, f"{mod}: write_text without encoding= near {m.start()}"
 
 
+def test_delegate_tool_wired_and_spawns_subagent():
+    # Sub-agents are wired into the reason loop as the 'delegate' tool: with the
+    # spawn_agent grant it is offered, and invoking it runs exactly one sub-agent call.
+    from ag import reason
+    from ag.permissions import PermissionBroker
+    from ag.model import ModelResult
+
+    class _C:
+        def __init__(self): self.n = 0
+        def complete(self, **kw): self.n += 1; return ModelResult(text="sub result")
+
+    cfg = Config()
+    granted = PermissionBroker(allow_external_tools=True); granted.grant("spawn_agent")
+    c = _C()
+    tools = {t.name: t for t in reason.available_tools(granted, c, cfg)}
+    assert "delegate" in tools
+    out = tools["delegate"].run({"role": "researcher", "task": "do x"}, granted)
+    assert out == "sub result" and c.n == 1
+
+    # Without the grant the tool is not offered.
+    ungranted = PermissionBroker(allow_external_tools=True)
+    assert "delegate" not in {t.name for t in reason.available_tools(ungranted, c, cfg)}
+
+
+def test_local_tools_and_agents_on_by_default_code_exec_off():
+    cfg = Config()
+    assert cfg.allow_local_tools is True
+    assert cfg.allow_code_exec is False
+
+
+def test_saved_api_key_round_trip(tmp_path, monkeypatch):
+    import os
+    from ag import model
+    monkeypatch.setattr(model, "_oauth_profile_dir", lambda: tmp_path)
+    assert model.saved_api_key() is None
+    model.save_api_key("  sk-ant-TESTKEY-1234567890  ")   # trimmed on save
+    assert model.saved_api_key() == "sk-ant-TESTKEY-1234567890"
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        st = model.signin_status()
+        assert st["signed_in"] and st["method"] == "api-key"
+    assert model.clear_api_key() is True
+    assert model.saved_api_key() is None
+    try:
+        model.save_api_key("")
+        assert False, "empty key should raise"
+    except ValueError:
+        pass
+
+
 def test_ollama_empty_answer_salvaged(monkeypatch):
     # If suppression/stripping leaves nothing but the model DID emit content
     # (e.g. a truncated <think> with no answer after), don't return a blank answer.

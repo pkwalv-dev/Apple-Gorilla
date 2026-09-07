@@ -77,9 +77,15 @@ class Config:
     # bench_samples=1 to fall back to the cheap single-shot (tolerance-only) gate.
     bench_samples: int = 3                      # benchmark repeats per fitness estimate
     fitness_k: float = 1.0                      # required margin in standard errors
-    allow_external_tools: bool = False        # default-deny for Chrome/network/etc.
+    allow_external_tools: bool = False        # default-deny for Chrome/browser/etc.
     allow_web: bool = True                     # AG's standing internet access
-    allow_local_tools: bool = False           # calc/file-read/python-exec/memory tools
+    # The agentic reason->act->observe loop with the SAFE tools on by default: exact
+    # arithmetic, memory recall/save, read-only file/dir access, and delegating a
+    # focused subtask to a sub-agent. This is what lets AG *act*, not just summarise.
+    allow_local_tools: bool = True
+    # Arbitrary code execution (python_exec, a real subprocess) stays OPT-IN — it is
+    # the one local tool that can change the machine, so it is never granted by default.
+    allow_code_exec: bool = False
     max_tool_steps: int = 4                    # reason->act->observe loop bound
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts

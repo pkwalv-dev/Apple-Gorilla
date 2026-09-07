@@ -46,7 +46,7 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 </style></head><body>
 <div class="wrap">
 <header>
-  <div class="logo">🦍</div>
+  <div class="logo">AG</div>
   <div class="brand"><h1>Apple-Gorilla<span class="ver" title="app version">v__VERSION__</span></h1>
     <div class="sub">self-improving prompt executor</div></div>
   <div id="status">ready</div>
@@ -63,27 +63,30 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 
 <!-- when & how self-evolution is happening (populated from /doctor + /evolve/history) -->
 <div id="evostatus" class="evostatus" title="When and how AG evolves itself">
-  <span class="dot"></span><b>🧬 Evolve</b> loading status…
+  <span class="dot"></span><b>Evolve</b> loading status…
 </div>
+
+<!-- Claude sign-in (populated from /auth); lets `auto` use Claude instead of local -->
+<div id="signin" class="whereami" title="Sign in so AG's auto backend uses Claude" hidden></div>
 
 <div class="panel">
   <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
   <div class="controls">
-    <button class="cmd primary" id="runbtn" onclick="go()">▶ Run</button>
+    <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
     <span class="cmd-note">executes a request</span>
     <span class="ctl-right">
-      <label class="ctl" title="Fast = ONE model call (no prompt-engineering, no self-review) — quick and best for iterating. Full = engineer the prompt, then self-critique and revise for higher quality (several calls, much slower). Context (web/profile/memory/history) applies in both.">⚡ mode
+      <label class="ctl" title="Fast = ONE model call (no prompt-engineering, no self-review) — quick and best for iterating. Full = engineer the prompt, then self-critique and revise for higher quality (several calls, much slower). Context (web/profile/memory/history) applies in both.">mode
         <select id="mode" class="ctl-select" onchange="saveMode()">
           <option value="fast">fast · 1 call</option>
           <option value="full">full · review</option>
         </select>
       </label>
-      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">🤖 model
+      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
         <select id="model" class="ctl-select" onchange="saveModel()">
           <option value="">loading…</option>
         </select>
       </label>
-      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to its default. Independent of the fast/full mode above.">🧠 thinking
+      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to its default. Independent of the fast/full mode above.">thinking
         <select id="think" class="ctl-select" onchange="saveThink()">
           <option value="auto">auto</option>
           <option value="off">off · fast</option>
@@ -95,16 +98,32 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   </div>
 </div>
 
+<h2>Conversation</h2>
+<!-- context bar: lights up to show which sources feed the CURRENT answer -->
+<div id="ctxbar" title="What AG is drawing on for the current answer — each lights up as it is used">
+  <span class="ctxlbl">context in use:</span>
+  <span class="chip" id="chip-history">Conversation <b class="cc" id="cc-history"></b></span>
+  <span class="chip" id="chip-profile">Profile</span>
+  <span class="chip" id="chip-memory">Memory <b class="cc" id="cc-memory"></b></span>
+  <span class="chip" id="chip-web">Web <b class="cc" id="cc-web"></b></span>
+</div>
+<div class="panel chatwrap">
+  <div class="chat-toolbar">
+    <span class="ct-hint">earlier exchanges are kept here — scroll to revisit</span>
+    <button class="linkbtn spacer" onclick="clearChat()">Clear conversation</button>
+  </div>
+  <div id="chat"></div>
+
 <table id="tools" class="panel"></table>
 
 <div class="panel" id="improve">
   <div class="btngroup cmd-group">
-    <span class="grouplabel">⚙ Commands — run &amp; modify AG</span>
+    <span class="grouplabel">Commands — run &amp; modify AG</span>
     <textarea id="directive" class="directive" rows="2"
-      placeholder="Optional — tell Evolve what to improve in plain text (e.g. “make answers more concise”, “sharpen the web-search prompt”). This steers the next Evolve; safety &amp; fitness gates still apply."></textarea>
+      placeholder="Optional — tell Evolve what to improve in plain text (e.g. "make answers more concise", "sharpen the web-search prompt"). This steers the next Evolve; safety &amp; fitness gates still apply."></textarea>
     <div class="controls">
-      <button class="cmd" onclick="doBench()">📊 Benchmark</button>
-      <button class="cmd evolve" onclick="doEvolve()">🧬 Evolve</button>
+      <button class="cmd" onclick="doBench()">Benchmark</button>
+      <button class="cmd evolve" onclick="doEvolve()">Evolve</button>
       <label class="toggle">proposer
         <select id="proposer">
           <option value="">deploy backend</option>
@@ -115,11 +134,11 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     </div>
   </div>
   <div class="btngroup view-group">
-    <span class="grouplabel">👁 Views — read-only, change nothing</span>
+    <span class="grouplabel">Views — read-only, change nothing</span>
     <div class="controls">
-      <button class="view" onclick="loadTools()">🧰 Tools &amp; friction</button>
-      <button class="view" onclick="loadHistory()">📜 History</button>
-      <button class="view" onclick="loadDoctor()">🩺 Status</button>
+      <button class="view" onclick="loadTools()">Tools &amp; friction</button>
+      <button class="view" onclick="loadHistory()">History</button>
+      <button class="view" onclick="loadDoctor()">Status</button>
     </div>
   </div>
   <div id="improveout"></div>
@@ -139,21 +158,6 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
 <div class="panel" style="padding:8px"><div id="log"></div></div>
 
-<h2>Conversation</h2>
-<!-- context bar: lights up to show which sources feed the CURRENT answer -->
-<div id="ctxbar" title="What AG is drawing on for the current answer — each lights up as it is used">
-  <span class="ctxlbl">context in use:</span>
-  <span class="chip" id="chip-history">💬 Conversation <b class="cc" id="cc-history"></b></span>
-  <span class="chip" id="chip-profile">👤 Profile</span>
-  <span class="chip" id="chip-memory">🧠 Memory <b class="cc" id="cc-memory"></b></span>
-  <span class="chip" id="chip-web">🌐 Web <b class="cc" id="cc-web"></b></span>
-</div>
-<div class="panel chatwrap">
-  <div class="chat-toolbar">
-    <span class="ct-hint">earlier exchanges are kept here — scroll to revisit</span>
-    <button class="linkbtn spacer" onclick="clearChat()">Clear conversation</button>
-  </div>
-  <div id="chat"></div>
 </div>
 </div>
 
@@ -184,12 +188,12 @@ function clearChat(){
 function ctxFooter(c){
   if(!c) return '';
   const bits=[];
-  if(c.history) bits.push('💬 '+c.history+' prior turn'+(c.history>1?'s':''));
-  if(c.profile) bits.push('👤 profile');
-  if(c.memory&&c.memory.length) bits.push('🧠 '+c.memory.length+' memory fact'+(c.memory.length>1?'s':''));
-  if(c.web) bits.push('🌐 '+c.web+' web source'+(c.web>1?'s':''));
-  if(c.saved&&c.saved.length) bits.push('💾 remembered '+c.saved.length+' new fact'+(c.saved.length>1?'s':''));
-  if(c.overall!=null) bits.push('⭐ '+c.overall+' overall');
+  if(c.history) bits.push(''+c.history+' prior turn'+(c.history>1?'s':''));
+  if(c.profile) bits.push('profile');
+  if(c.memory&&c.memory.length) bits.push(''+c.memory.length+' memory fact'+(c.memory.length>1?'s':''));
+  if(c.web) bits.push(''+c.web+' web source'+(c.web>1?'s':''));
+  if(c.saved&&c.saved.length) bits.push('remembered '+c.saved.length+' new fact'+(c.saved.length>1?'s':''));
+  if(c.overall!=null) bits.push(''+c.overall+' overall');
   let h=bits.length? '<div class="ctx">'+bits.map(b=>'<span>'+escapeHtml(b)+'</span>').join('')+'</div>':'';
   if(c.memory&&c.memory.length){
     h+='<details class="memfacts"><summary>memory facts used</summary><ul>'
@@ -230,11 +234,11 @@ function appendAssistant(){
 /* ---- live activity indicator: what the model is doing + how long ------- */
 /* Makes a snag visible: the stage label shows the current step and the timer
    keeps ticking, so a stall (timer climbing, stage unchanged) is obvious. */
-const STAGE_LABELS={conversation:'💬 reading the conversation',
-  web:'🌐 searching the web',optimize:'⚙️ engineering the prompt',
-  memory:'🧠 recalling memory',execute:'✍️ generating the answer',
-  critique:'🔍 reviewing the answer',revise:'✏️ revising the answer',
-  score:'📊 scoring the answer'};
+const STAGE_LABELS={conversation:'reading the conversation',
+  web:'searching the web',optimize:'engineering the prompt',
+  memory:'recalling memory',execute:'generating the answer',
+  reason:'using tools',critique:'reviewing the answer',
+  revise:'revising the answer',score:'scoring the answer'};
 function fmtDur(ms){const s=Math.floor(ms/1000);
   return s>=60?(Math.floor(s/60)+':'+String(s%60).padStart(2,'0')):(s+'s');}
 function startActivity(ai){
@@ -272,14 +276,14 @@ function applyContext(ev,ai){
     $('chip-memory').classList.add('active');
     if(f.length){ curCtx.memory=f; $('cc-memory').textContent=f.length;
       if(ai){ const lc=ai.querySelector('.live-ctx');
-        if(lc) lc.innerHTML='<div class="using">🧠 drawing on '+f.length
+        if(lc) lc.innerHTML='<div class="using">drawing on '+f.length
           +' remembered fact(s):</div><ul>'+f.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+'</ul>'; } }
     if(saved.length){ curCtx.saved=saved;
       // the save arrives AFTER the answer is committed — patch the finished bubble
       if(ai&&ai._committed&&ai._entry){
         ai._entry.ctx=ai._entry.ctx||{}; ai._entry.ctx.saved=saved; saveChat();
         ai.insertAdjacentHTML('beforeend',
-          '<details class="memfacts" open><summary>💾 saved '+saved.length
+          '<details class="memfacts" open><summary>saved '+saved.length
           +' fact(s) to long-term memory</summary><ul>'
           +saved.map(f=>'<li>'+escapeHtml(f)+'</li>').join('')+'</ul></details>');
       }
@@ -329,7 +333,7 @@ function handle(ev,ai){
   if(ev.stage==='error'){   // terminal pipeline error — make it visible, don't hang
     stopActivity(ai);
     const b=ai.querySelector('.body'); b.className='body';
-    b.textContent='⚠ '+(ev.msg||'the run failed'); ai.classList.remove('processing');
+    b.textContent=''+(ev.msg||'the run failed'); ai.classList.remove('processing');
     addEv(ev); $('status').textContent='error'; return;
   }
   if(ev.stage==='done'){
@@ -364,11 +368,11 @@ function handle(ev,ai){
 async function renderWhere(){
   try{
     const w=await fetch('/whereami').then(r=>r.json());
-    let h='<span class="dot ok"></span>📍 running at <b>'+escapeHtml(w.url)+'</b>';
+    let h='<span class="dot ok"></span>running at <b>'+escapeHtml(w.url)+'</b>';
     h+=w.local_only?' <span class="tagpill local">local-only</span>'
       :' <span class="tagpill lan">also on LAN: '+escapeHtml(w.lan_url||'')+'</span>';
-    h+=' · 🧠 brain <b>'+escapeHtml(w.brain)+'</b>';
-    h+=w.evolving?' · <span class="tagpill evolving">🧬 evolving now — runs still work</span>'
+    h+=' · brain <b>'+escapeHtml(w.brain)+'</b>';
+    h+=w.evolving?' · <span class="tagpill evolving">evolving now — runs still work</span>'
       :' · <span class="tagpill idle">can evolve while running</span>';
     $('whereami').innerHTML=h;
     const eb=document.querySelector('button.cmd.evolve');
@@ -387,19 +391,19 @@ async function renderEvoStatus(){
     ]);
     const last=(hist.history||[])[0];
     const ready=(doc.evolve_gate||'').indexOf('ready')===0;
-    let h='<span class="dot '+(ready?'ok':'off')+'"></span><b>🧬 Evolve</b> ';
+    let h='<span class="dot '+(ready?'ok':'off')+'"></span><b>Evolve</b> ';
     h+='gate '+(ready?'<span class="g-ok">ready</span>':'<span class="g-off">'+escapeHtml(doc.evolve_gate||'?')+'</span>');
     h+=' · proposer <b>'+escapeHtml(doc.evolver_backend||doc.effective_backend||doc.backend||'?')+'</b>';
     h+=' · verified by <b>'+(doc.fitness_gate?'benchmark + tests':'tests')+'</b>';
     h+=' · '+doc.snapshots+' snapshot(s)';
     if(last){
-      const v=last.adopted?'✓ adopted':escapeHtml(last.verdict||'no change');
+      const v=last.adopted?'OK adopted':escapeHtml(last.verdict||'no change');
       const dl=(last.delta!=null?' Δ'+last.delta:'');
       h+=' — last run <b>'+escapeHtml(last.ts||'')+'</b>: '+v+dl;
     }else{ h+=' — <i>no evolve runs yet</i>'; }
     es.classList.remove('busy'); es.innerHTML=h;
   }catch(e){ es.classList.remove('busy');
-    es.innerHTML='<span class="dot off"></span><b>🧬 Evolve</b> status unavailable'; }
+    es.innerHTML='<span class="dot off"></span><b>Evolve</b> status unavailable'; }
 }
 async function checkUpdate(){
   try{
@@ -453,14 +457,14 @@ async function doEvolve(){
   $('log').innerHTML=''; $('improveout').innerHTML=''; $('status').textContent='proposing…';
   const directive=$('directive').value.trim();
   const es=$('evostatus'); es.classList.add('busy');
-  es.innerHTML='<span class="dot spin"></span><b>🧬 Proposing changes…</b> '
+  es.innerHTML='<span class="dot spin"></span><b>Proposing changes…</b> '
     +(directive?'toward your request':'analysing AG');
   renderWhere();
   try{ await streamPost('/evolve/propose',{proposer:$('proposer').value,directive:directive}, ev=>{
     if(ev.stage==='done'){ renderProposal(ev.data||{});
       $('status').textContent='proposed'; renderEvoStatus(); renderWhere(); return; }
     if(ev.stage==='evolve'||ev.stage==='bench'){
-      es.innerHTML='<span class="dot spin"></span><b>🧬 Proposing changes…</b> '+escapeHtml(ev.msg||''); }
+      es.innerHTML='<span class="dot spin"></span><b>Proposing changes…</b> '+escapeHtml(ev.msg||''); }
     addEv(ev);
   }); }catch(e){ addEv({stage:'error',level:'error',msg:'propose failed: '+e});
     $('status').textContent='error'; renderEvoStatus(); renderWhere(); }
@@ -468,9 +472,9 @@ async function doEvolve(){
 // Render the proposed changes as a checklist — YOU decide which to apply.
 function renderProposal(d){
   const pts=d.patches||[];
-  if(d.busy){ $('improveout').innerHTML='<div class="result">⏳ '+escapeHtml(d.reason||'evolve already running')+'</div>'; return; }
+  if(d.busy){ $('improveout').innerHTML='<div class="result">'+escapeHtml(d.reason||'evolve already running')+'</div>'; return; }
   if(!pts.length){ $('improveout').innerHTML='<div class="result">'+escapeHtml(d.reason||'no changes proposed')+'</div>'; return; }
-  let h='<div class="proposal"><div class="phead"><b>🧬 Proposed changes — select the ones you want</b>'
+  let h='<div class="proposal"><div class="phead"><b>Proposed changes — select the ones you want</b>'
     +'<span class="pnote">nothing is applied until you click Apply selected</span></div>';
   if(d.rationale) h+='<div class="prationale"><b>AG\\'s rationale:</b> '+escapeHtml(d.rationale)+'</div>';
   for(const p of pts){
@@ -486,7 +490,7 @@ function renderProposal(d){
   const anyValid=pts.some(p=>p.valid);
   h+='<div class="pactions">'
     +'<label class="toggle"><input type="checkbox" id="measurefit"> measure fitness impact (slow)</label>'
-    +'<button class="cmd" onclick="applySelected()" '+(anyValid?'':'disabled')+'>✓ Apply selected</button>'
+    +'<button class="cmd" onclick="applySelected()" '+(anyValid?'':'disabled')+'>OK Apply selected</button>'
     +'<button class="view" onclick="discardProposal()">Discard proposal</button>'
     +'<span class="pnote">safety tests still run on whatever you apply</span></div></div>';
   $('improveout').innerHTML=h;
@@ -499,15 +503,15 @@ async function applySelected(){
   const measure=!!($('measurefit')&&$('measurefit').checked);
   $('log').innerHTML=''; $('status').textContent='applying…';
   const es=$('evostatus'); es.classList.add('busy');
-  es.innerHTML='<span class="dot spin"></span><b>🧬 Applying your selection…</b>';
+  es.innerHTML='<span class="dot spin"></span><b>Applying your selection…</b>';
   renderWhere();
   try{ await streamPost('/evolve/apply',{ids:ids,measure:measure}, ev=>{
     if(ev.stage==='done'){ const d=ev.data||{};
-      if(d.busy){ $('improveout').innerHTML='<div class="result">⏳ '+escapeHtml(d.reason||'evolve already running')+'</div>';
+      if(d.busy){ $('improveout').innerHTML='<div class="result">'+escapeHtml(d.reason||'evolve already running')+'</div>';
         renderEvoStatus(); renderWhere(); return; }
       const cls=d.adopted?'ok':(d.rolled_back?'bad':'');
       let h='<div class="result '+cls+'"><b>'
-        +(d.adopted?'✓ Applied & kept':(d.rolled_back?'↩ Reverted (safety)':'Not applied'))
+        +(d.adopted?'OK Applied & kept':(d.rolled_back?'-> Reverted (safety)':'Not applied'))
         +'</b><br>'+escapeHtml(d.reason||'')+'<br>';
       if(d.delta!=null) h+='fitness '+d.incumbent+'→'+(d.candidate!=null?d.candidate:'?')
         +'/10 (Δ'+d.delta+', informational)<br>';
@@ -519,7 +523,7 @@ async function applySelected(){
       renderEvoStatus(); renderWhere();
       return; }
     if(ev.stage==='evolve'||ev.stage==='bench'){
-      es.innerHTML='<span class="dot spin"></span><b>🧬 Applying your selection…</b> '+escapeHtml(ev.msg||''); }
+      es.innerHTML='<span class="dot spin"></span><b>Applying your selection…</b> '+escapeHtml(ev.msg||''); }
     addEv(ev);
   }); }catch(e){ addEv({stage:'error',level:'error',msg:'apply failed: '+e});
     $('status').textContent='error'; renderEvoStatus(); renderWhere(); }
@@ -531,7 +535,7 @@ async function loadHistory(){
     return; }
   let h='<div class="result"><b>Fitness lineage</b> (newest first)<table class="hist">';
   for(const r of d.history){
-    const mark=r.adopted?'✓ adopted':'· '+(r.verdict||'n/a');
+    const mark=r.adopted?'OK adopted':'· '+(r.verdict||'n/a');
     let fit='';
     if(r.incumbent_fitness!=null&&r.candidate_fitness!=null)
       fit=r.incumbent_fitness+'→'+r.candidate_fitness+'/10 (Δ'+r.delta+')';
@@ -590,10 +594,43 @@ async function loadModels(){
     sel.value=(saved&&vals.includes(saved))?saved:(d.current||d.options[0].value);
   }catch(e){ sel.innerHTML='<option value="">(could not load models)</option>'; }
 }
+/* ---- Claude sign-in ---------------------------------------------------- */
+async function loadAuth(){
+  const el=$('signin'); if(!el) return;
+  try{
+    const a=await fetch('/auth').then(r=>r.json());
+    el.hidden=false;
+    if(a.signed_in){
+      el.innerHTML='Signed in to Claude ('+escapeHtml(a.method)+') — auto uses <b>'
+        +escapeHtml(a.model)+'</b>. <button class="linkbtn" onclick="logoutClaude()">sign out</button>';
+    } else {
+      el.innerHTML='Not signed in to Claude — running locally. '
+        +'<a href="'+escapeHtml(a.console_url)+'" target="_blank" rel="noopener">Get an API key</a>, '
+        +'paste it: <input id="apikey" type="password" placeholder="sk-ant-…" '
+        +'style="width:210px;vertical-align:middle"> '
+        +'<button class="cmd" onclick="saveKey()">Sign in</button>'
+        +'<div class="ct-hint">On a Claude subscription? Install Claude Code and run its '
+        +'login (or `ant auth login`) — AG reads that OAuth profile automatically.</div>';
+    }
+  }catch(e){}
+}
+async function saveKey(){
+  const f=$('apikey'); const k=f?f.value.trim():''; if(!k) return;
+  try{
+    const r=await fetch('/login/key',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:k})}).then(r=>r.json());
+    if(r.ok){ if(f) f.value=''; loadAuth(); loadModels(); renderWhere();
+      $('status').textContent='signed in to Claude'; }
+    else { alert('Sign in failed: '+(r.error||'unknown')); }
+  }catch(e){ alert('Sign in failed: '+e); }
+}
+async function logoutClaude(){
+  try{ await fetch('/logout',{method:'POST'}); }catch(e){}
+  loadAuth(); loadModels(); renderWhere();
+}
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
-restoreThink(); restoreMode(); loadModels(); loadChat(); renderWhere(); renderEvoStatus();
+restoreThink(); restoreMode(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth();
 </script></body></html>"""
-
 
 def _render_page() -> str:
     """Assemble the page from the evolvable theme (fonts + CSS) and the template."""
@@ -604,9 +641,7 @@ def _render_page() -> str:
             .replace("__THEME__", theme.THEME_CSS)
             .replace("__VERSION__", __version__))
 
-
 PAGE = _render_page()
-
 
 def _clean_history(raw, *, max_turns: int = 40, max_len: int = 4000) -> list:
     """Sanitise conversation history from the client into [{role, text}] pairs.
@@ -627,7 +662,6 @@ def _clean_history(raw, *, max_turns: int = 40, max_len: int = 4000) -> list:
             out.append({"role": role, "text": text[:max_len]})
     return out
 
-
 def _build_broker(cfg: Config, *, web=None):
     web = cfg.allow_web if web is None else web
     if not (web or cfg.allow_local_tools):
@@ -637,10 +671,11 @@ def _build_broker(cfg: Config, *, web=None):
     if web:
         broker.grant("network")
     if cfg.allow_local_tools:
-        broker.grant("filesystem_read")
-        broker.grant("code_exec")
+        broker.grant("filesystem_read")   # read-only file/dir access
+        broker.grant("spawn_agent")       # delegate a subtask to a sub-agent
+        if getattr(cfg, "allow_code_exec", False):
+            broker.grant("code_exec")     # arbitrary Python — opt-in only
     return broker
-
 
 class _Handler(BaseHTTPRequestHandler):
     cfg: Config = Config()
@@ -688,6 +723,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(self._whereami()), "application/json")
         elif self.path == "/models":
             self._send(200, json.dumps(_models_data(self.cfg)), "application/json")
+        elif self.path == "/auth":
+            from .model import signin_status
+            st = signin_status()
+            st["model"] = self.cfg.model
+            st["console_url"] = "https://console.anthropic.com/settings/keys"
+            self._send(200, json.dumps(st), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -724,6 +765,38 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def do_POST(self):
+        if self.path in ("/login/key", "/logout"):
+            # Sign-in is a local action: only honour it from this machine, even when
+            # bound to 0.0.0.0 for LAN viewing.
+            if self.client_address and self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._send(403, json.dumps({"ok": False, "error": "sign-in is local-only"}),
+                           "application/json")
+                return
+            from .model import save_api_key, clear_api_key, signin_status
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            except Exception:
+                payload = {}
+            if self.path == "/logout":
+                clear_api_key()
+                self._send(200, json.dumps({"ok": True, **signin_status()}),
+                           "application/json")
+                return
+            key = str(payload.get("key", "")).strip()
+            if len(key) < 10 or any(c.isspace() for c in key):
+                self._send(200, json.dumps(
+                    {"ok": False, "error": "that does not look like a valid key"}),
+                    "application/json")
+                return
+            try:
+                save_api_key(key)
+                self._send(200, json.dumps({"ok": True, **signin_status()}),
+                           "application/json")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+            return
         if self.path == "/update/apply":
             self._stream_update()
             return
@@ -1050,7 +1123,6 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
 
-
 def _doctor_data(cfg: Config) -> dict:
     """Environment / readiness snapshot for the GUI Status button (same facts as the
     `ag doctor` CLI). Read-only; probes Ollama without hard-failing."""
@@ -1095,7 +1167,6 @@ def _doctor_data(cfg: Config) -> dict:
         "last_improvement": last[0] if last else None, "allow_web": cfg.allow_web,
     }
 
-
 def _list_ollama_models(cfg: Config) -> list:
     """Names of models currently pulled in the local Ollama (empty if unreachable)."""
     import urllib.request
@@ -1107,7 +1178,6 @@ def _list_ollama_models(cfg: Config) -> list:
                     if m.get("name")]
     except Exception:
         return []
-
 
 def _models_data(cfg: Config) -> dict:
     """Models the GUI selector can offer, and the current effective choice.
@@ -1135,7 +1205,6 @@ def _models_data(cfg: Config) -> dict:
     return {"options": options, "current": current, "cloud": cloud,
             "ollama_reachable": bool(models)}
 
-
 def run_prompt(cfg: Config, prompt: str) -> tuple[str, str]:
     """Run one prompt through the pipeline; returns (answer, meta-string).
 
@@ -1150,7 +1219,6 @@ def run_prompt(cfg: Config, prompt: str) -> tuple[str, str]:
             f"overall={sc.get('overall', '?')}")
     return rec.answer, meta
 
-
 def _lan_ip() -> str:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1160,7 +1228,6 @@ def _lan_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
-
 
 def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False):
     _Handler.cfg = Config.load()
