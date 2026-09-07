@@ -15,7 +15,7 @@ def load_principles() -> str:
     for name in ("principles.md", "about_me.md"):
         p = PROFILE_DIR / name
         if p.exists():
-            content = p.read_text().strip()
+            content = p.read_text(encoding="utf-8").strip()
             if content:
                 parts.append(f"# {name}\n{content}")
     if not parts:
@@ -35,7 +35,7 @@ def load_user_context() -> str:
     if not p.exists():
         return ""
     substantive = []
-    for line in p.read_text().splitlines():
+    for line in p.read_text(encoding="utf-8").splitlines():
         s = line.strip()
         if not s or s.startswith("#") or s.startswith(">"):
             continue

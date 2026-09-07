@@ -42,6 +42,12 @@ class Config:
     # its default. Applies to thinking-capable backends (Qwen3 via Ollama, Claude via
     # the API); ignored by models that don't think.
     think: str = "auto"                       # off | auto | on
+    # Interactive pipeline shape. "fast" = ONE model call (skip prompt-engineering
+    # AND the self-critique/revise loop) — the responsive default, so AG stays usable
+    # and quick to iterate with on a local model. "full" = engineer the prompt, then
+    # self-critique and revise (several calls, higher quality, much slower). Web,
+    # profile, memory, and conversation context apply in BOTH modes.
+    pipeline_mode: str = "fast"               # fast | full
     max_output_tokens: int = 32000            # main answer generation
     meta_output_tokens: int = 16000           # optimizer / critic / evolve calls
     max_iterations: int = 2                   # critique->revise rounds

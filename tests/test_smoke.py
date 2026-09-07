@@ -33,12 +33,62 @@ def test_extract_json_variants():
 def test_pipeline_dry_run_produces_answer():
     cfg = Config()
     client = make_client(dry_run=True)
-    rec = run_pipeline(client, cfg, "Explain why the sky is blue.")
+    # Exercise the FULL pipeline (optimize + critique) explicitly; the default is now
+    # the single-call fast path (covered by test_fast_mode_is_single_call_...).
+    rec = run_pipeline(client, cfg, "Explain why the sky is blue.", fast=False)
     assert rec.answer
     assert rec.dry_run is True
     assert rec.iterations >= 0
     # dry-run critic auto-passes, so no revision loops.
     assert rec.critiques and rec.critiques[0]["verdict"] == "pass"
+
+
+def test_fast_mode_is_single_call_and_skips_review():
+    # Fast mode must make exactly ONE model call (no optimize, no critique/revise) so
+    # AG stays quick to iterate with. Full mode makes several.
+    from ag.model import ModelResult
+
+    class _Counter:
+        def __init__(self): self.n = 0
+        def complete(self, **kw):
+            self.n += 1
+            return ModelResult(text='{"accuracy":9,"quality":9,"score":9,'
+                                    '"verdict":"pass"}\nAnswer.')
+
+    fast_cfg = Config(); fast_cfg.pipeline_mode = "fast"
+    fc = _Counter()
+    rec = run_pipeline(fc, fast_cfg, "hi", fast=True)
+    assert fc.n == 1                 # exactly one model call
+    assert rec.iterations == 0       # no revise loop
+    assert rec.critiques == []       # no self-review
+    assert rec.answer                # non-empty answer
+    # Honest scorecard: speed is measured; unjudged axes are None, not a fake 0.
+    assert rec.scorecard["speed"] is not None
+    assert rec.scorecard["accuracy"] is None
+    assert rec.scorecard["overall"] is None
+
+    full_cfg = Config(); full_cfg.pipeline_mode = "full"
+    fu = _Counter()
+    run_pipeline(fu, full_cfg, "hi", fast=False)
+    assert fu.n >= 3                 # optimize + execute + at least one critique
+
+
+def test_pipeline_mode_default_is_fast():
+    assert Config().pipeline_mode == "fast"
+
+
+def test_source_and_profile_writes_force_utf8():
+    # Regression: AG's self-evolve once wrote source files with the platform default
+    # encoding (cp1252 on Windows), corrupting non-ASCII (em-dash -> curly quote) in
+    # ag/prompts.py. Every write_text of human text MUST pass encoding="utf-8".
+    import re
+    from pathlib import Path
+    ag = Path(__file__).resolve().parent.parent / "ag"
+    for mod in ("evolve.py", "ingest.py", "backup.py", "memory.py"):
+        src = (ag / mod).read_text(encoding="utf-8")
+        for m in re.finditer(r"\.write_text\(", src):
+            window = src[m.start():m.start() + 220]
+            assert "encoding=" in window, f"{mod}: write_text without encoding= near {m.start()}"
 
 
 def test_ollama_empty_answer_salvaged(monkeypatch):

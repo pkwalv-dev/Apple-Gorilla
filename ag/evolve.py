@@ -193,8 +193,11 @@ def _direction(cfg: Config, telemetry: list, bench_res=None) -> dict:
     avg = {}
     if cards:
         for a in ("accuracy", "quality", "speed"):
-            vals = [float(c.get(a, 0.0)) for c in cards]
-            avg[a] = round(sum(vals) / len(vals), 2)
+            # Skip unscored axes (None, e.g. fast-mode runs) rather than treating
+            # them as 0, which would misdirect evolution.
+            vals = [float(c[a]) for c in cards if c.get(a) is not None]
+            if vals:
+                avg[a] = round(sum(vals) / len(vals), 2)
     briefing = {
         "weakest_score_axis": axis,
         "recent_axis_averages": avg,
@@ -224,7 +227,7 @@ def _read_evolvable(cfg: Config) -> dict:
     files = {}
     for rel in cfg.evolvable_paths:
         p = ROOT / rel
-        files[rel] = p.read_text() if p.exists() else ""
+        files[rel] = p.read_text(encoding="utf-8") if p.exists() else ""
     return files
 
 
@@ -394,7 +397,7 @@ def evolve(client, cfg: Config, *, apply: bool = False,
     # 2) Apply candidate patches.
     changed = []
     for rel, content in valid:
-        (ROOT / rel).write_text(content)
+        (ROOT / rel).write_text(content, encoding="utf-8")
         changed.append(rel)
 
     # 3) Gate 1 (SAFETY): the change must keep the test suite green.
@@ -650,7 +653,7 @@ def apply_selected(client, cfg: Config, selected, *, emit=None,
     backup.prune_snapshots(cfg.max_snapshots)
     changed = []
     for rel, content in valid:
-        (ROOT / rel).write_text(content)
+        (ROOT / rel).write_text(content, encoding="utf-8")
         changed.append(rel)
     _emit(emit, "evolve",
           f"applied {len(changed)} selected change(s): " + ", ".join(changed),
