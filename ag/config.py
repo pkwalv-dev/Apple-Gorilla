@@ -36,6 +36,15 @@ class Config:
     # ourselves (local hosts only) so the offline backend "just works" without the
     # user starting it by hand. Set false to require a manually-started server.
     ollama_autostart: bool = True
+    # Local image generation via an Automatic1111/Forge-compatible Stable Diffusion
+    # server (POST {sd_host}/sdapi/v1/txt2img). Keyless and offline; you run the SD
+    # server separately. Disabled features degrade with a clear "not reachable" note.
+    allow_image_gen: bool = True
+    sd_host: str = "http://127.0.0.1:7860"
+    sd_steps: int = 25
+    sd_width: int = 512
+    sd_height: int = 512
+    sd_sampler: str = "Euler a"
     effort: str = "high"                      # low | medium | high | xhigh | max
     # Extended-thinking control (like the Claude app's toggle). "off" disables the
     # model's chain-of-thought (fastest), "on" forces it, "auto" leaves the model to
