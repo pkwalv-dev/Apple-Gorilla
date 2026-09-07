@@ -81,9 +81,21 @@ def test_doctor_data_shape():
 
 def test_build_broker_respects_allow_web():
     on = Config(); on.allow_web = True
-    off = Config(); off.allow_web = False
     assert server._build_broker(on) is not None
+    # A broker is built if EITHER web or local tools are enabled. Only when both are
+    # off is there nothing to gate, so no broker is created.
+    off = Config(); off.allow_web = False; off.allow_local_tools = False
     assert server._build_broker(off) is None
+
+
+def test_build_broker_grants_agent_tools_but_not_code_exec_by_default():
+    cfg = Config()  # allow_local_tools on, allow_code_exec off by default
+    broker = server._build_broker(cfg)
+    assert broker.check("spawn_agent")       # delegation is on by default
+    assert broker.check("filesystem_read")   # read-only file access on
+    assert not broker.check("code_exec")     # arbitrary code stays opt-in
+    cfg2 = Config(); cfg2.allow_code_exec = True
+    assert server._build_broker(cfg2).check("code_exec")
 
 
 def test_run_prompt_dry_run_produces_answer(monkeypatch):

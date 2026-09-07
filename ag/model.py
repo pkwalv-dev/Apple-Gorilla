@@ -79,16 +79,22 @@ class ApiClient:
         # decoder never runs. Responses here are small, so identity is fine.
         headers = {"Accept-Encoding": "identity"}
         kwargs = {"default_headers": headers, "timeout": 60.0, "max_retries": 1}
-        if not _has_anthropic_creds():
-            # No API key: authenticate with the `ant auth login` OAuth profile. The
-            # SDK does NOT auto-read that credentials file, so we load the bearer
-            # token and pass it explicitly, plus the OAuth beta header /v1/messages
-            # requires. (A bare client would have no auth at all and fail obscurely.)
+        # Credential resolution, in order: env var (SDK reads it) -> a key the user
+        # saved through AG's own sign-in -> an OAuth profile (Claude subscription).
+        if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            pass  # the SDK picks these up from the environment
+        elif saved_api_key():
+            kwargs["api_key"] = saved_api_key()
+        else:
+            # OAuth profile: the SDK does NOT auto-read that credentials file, so we
+            # load the bearer token and pass it explicitly, plus the OAuth beta header
+            # /v1/messages requires.
             token = _load_oauth_token()
             if token is None:
                 raise RuntimeError(
-                    "No ANTHROPIC_API_KEY and no readable OAuth profile. Set a key, "
-                    "or run `ant auth login` (or sign in via Claude Code)."
+                    "Not signed in to Claude. Sign in from AG (web app 'Sign in' box "
+                    "or `ag login --key sk-...`), set ANTHROPIC_API_KEY, or use a "
+                    "Claude Code / `ant auth login` OAuth profile."
                 )
             headers["anthropic-beta"] = "oauth-2025-04-20"
             kwargs["auth_token"] = token
@@ -357,7 +363,62 @@ def _anthropic_thinking(cfg: Config) -> dict:
 
 def _has_anthropic_creds() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+                or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                or saved_api_key())
+
+
+def _saved_key_path() -> Path:
+    """Where AG stores an API key the user saved via `ag login` / the web sign-in.
+
+    Kept in the user's config dir (NOT the repo), so it is never committed and is
+    shared with the OAuth profile location.
+    """
+    return _oauth_profile_dir() / "ag_api_key"
+
+
+def saved_api_key() -> Optional[str]:
+    """The API key the user saved through AG's own sign-in, if any."""
+    try:
+        key = _saved_key_path().read_text(encoding="utf-8").strip()
+        return key or None
+    except OSError:
+        return None
+
+
+def save_api_key(key: str) -> None:
+    """Persist a user-provided API key locally (0600 where supported). The user
+    enters their own key; AG only stores it so `auto` can use Claude."""
+    key = (key or "").strip()
+    if not key:
+        raise ValueError("empty API key")
+    p = _saved_key_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(key, encoding="utf-8")
+    try:
+        import os as _os
+        _os.chmod(p, 0o600)
+    except OSError:
+        pass
+
+
+def clear_api_key() -> bool:
+    """Remove any saved API key (sign out of the key path). True if one existed."""
+    try:
+        _saved_key_path().unlink()
+        return True
+    except OSError:
+        return False
+
+
+def signin_status() -> dict:
+    """How AG will authenticate to Claude right now — for the GUI/CLI sign-in view."""
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return {"signed_in": True, "method": "env"}
+    if saved_api_key():
+        return {"signed_in": True, "method": "api-key"}
+    if has_oauth_profile():
+        return {"signed_in": True, "method": "oauth", "token": oauth_token_status()}
+    return {"signed_in": False, "method": "none"}
 
 
 def _oauth_profile_dir() -> Path:

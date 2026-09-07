@@ -155,7 +155,7 @@ def _print_evolve_history() -> int:
         return 0
     print("evolution lineage (newest first):")
     for r in rows:
-        mark = "✓ adopted" if r.get("adopted") else "· " + (r.get("verdict") or "n/a")
+        mark = "OK adopted" if r.get("adopted") else "· " + (r.get("verdict") or "n/a")
         inc, cand = r.get("incumbent_fitness"), r.get("candidate_fitness")
         fit = ""
         if inc is not None and cand is not None:
@@ -361,6 +361,34 @@ def cmd_setup_ollama(args) -> int:
     return 0
 
 
+def cmd_login(args) -> int:
+    """Sign in to Claude so the `auto` backend uses it instead of the local model."""
+    from . import model
+    if getattr(args, "clear", False):
+        print("Removed the saved API key." if model.clear_api_key()
+              else "No saved API key to remove.")
+        return 0
+    if getattr(args, "key", None):
+        try:
+            model.save_api_key(args.key)
+        except ValueError as e:
+            print(f"error: {e}")
+            return 1
+        print(f"Signed in. `auto` will now use Claude ({Config.load().model}).")
+        return 0
+    st = model.signin_status()
+    if st["signed_in"]:
+        print(f"Already signed in to Claude (method: {st['method']}).")
+        return 0
+    print("Not signed in to Claude. Two ways to sign in:")
+    print("  1) API key — create one at https://console.anthropic.com/settings/keys, then:")
+    print("       python -m ag login --key sk-ant-...")
+    print("     (or paste it into the web app's Sign in box: python -m ag serve)")
+    print("  2) Claude subscription — install Claude Code and run its login, or")
+    print("     `ant auth login`; AG reads that OAuth profile automatically.")
+    return 0
+
+
 def cmd_memory(args) -> int:
     from . import memory
     if args.action == "add":
@@ -506,6 +534,13 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--open", action="store_true", help="open a browser on start")
     sv.set_defaults(func=cmd_serve)
+
+    lg = sub.add_parser("login",
+                        help="sign in to Claude so `auto` uses it (saves an API key)")
+    lg.add_argument("--key", default=None,
+                    help="Anthropic API key to save (sk-ant-...)")
+    lg.add_argument("--clear", action="store_true", help="remove the saved API key")
+    lg.set_defaults(func=cmd_login)
 
     so = sub.add_parser("setup-ollama",
                         help="switch config to the local Ollama backend")
