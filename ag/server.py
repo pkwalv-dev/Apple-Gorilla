@@ -72,12 +72,18 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     <button class="cmd primary" id="runbtn" onclick="go()">▶ Run</button>
     <span class="cmd-note">executes a request</span>
     <span class="ctl-right">
+      <label class="ctl" title="Fast = ONE model call (no prompt-engineering, no self-review) — quick and best for iterating. Full = engineer the prompt, then self-critique and revise for higher quality (several calls, much slower). Context (web/profile/memory/history) applies in both.">⚡ mode
+        <select id="mode" class="ctl-select" onchange="saveMode()">
+          <option value="fast">fast · 1 call</option>
+          <option value="full">full · review</option>
+        </select>
+      </label>
       <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">🤖 model
         <select id="model" class="ctl-select" onchange="saveModel()">
           <option value="">loading…</option>
         </select>
       </label>
-      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off · fast' also skips AG's self-revision pass for a quicker reply; 'on' makes the model reason step-by-step.">🧠 thinking
+      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to its default. Independent of the fast/full mode above.">🧠 thinking
         <select id="think" class="ctl-select" onchange="saveThink()">
           <option value="auto">auto</option>
           <option value="off">off · fast</option>
@@ -296,7 +302,7 @@ async function go(){
   try{
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
-        model:($('model')?$('model').value:'')})});
+        model:($('model')?$('model').value:''),mode:($('mode')?$('mode').value:'')})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
@@ -566,6 +572,9 @@ function saveThink(){ try{ localStorage.setItem('ag_think',$('think').value); }c
 function restoreThink(){ try{ const v=localStorage.getItem('ag_think');
   if(v&&$('think')) $('think').value=v; }catch(e){} }
 function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
+function saveMode(){ try{ localStorage.setItem('ag_mode',$('mode').value); }catch(e){} }
+function restoreMode(){ try{ const v=localStorage.getItem('ag_mode');
+  if(v&&$('mode')) $('mode').value=v; }catch(e){} }
 async function loadModels(){
   const sel=$('model'); if(!sel) return;
   try{
@@ -582,7 +591,7 @@ async function loadModels(){
   }catch(e){ sel.innerHTML='<option value="">(could not load models)</option>'; }
 }
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
-restoreThink(); loadModels(); loadChat(); renderWhere(); renderEvoStatus();
+restoreThink(); restoreMode(); loadModels(); loadChat(); renderWhere(); renderEvoStatus();
 </script></body></html>"""
 
 
@@ -764,7 +773,8 @@ class _Handler(BaseHTTPRequestHandler):
         if think not in ("off", "auto", "on"):
             think = "auto"
         model = str(payload.get("model", "")).strip()[:100]
-        self._stream_run(prompt, want_web, history, think, model)
+        mode = str(payload.get("mode", "")).lower().strip()
+        self._stream_run(prompt, want_web, history, think, model, mode)
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -997,25 +1007,24 @@ class _Handler(BaseHTTPRequestHandler):
             return {"backend": "ollama", "ollama_model": model}
         return {}
 
-    def _stream_run(self, prompt: str, want_web, history=None, think="auto", model=""):
+    def _stream_run(self, prompt: str, want_web, history=None, think="auto", model="",
+                    mode=""):
         """Run the pipeline, streaming each stage event as one NDJSON line."""
         import dataclasses
         from .pipeline import capture_memory
         write = self._ndjson_writer()
         # Per-request overrides, without mutating the shared handler config.
-        # Thinking OFF is also a "fast" mode: cap the critique/revise loop to one pass
-        # so a reply is a couple of model calls, not the full iterate cycle.
         overrides = {"think": think}
-        if think == "off":
-            overrides["max_iterations"] = min(1, self.cfg.max_iterations)
         overrides.update(self._parse_model_choice(model))
         cfg = dataclasses.replace(self.cfg, **overrides)
+        # Pipeline shape: explicit request mode wins, else the config default.
+        fast = (mode == "fast") if mode in ("fast", "full") else None
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
         broker = _build_broker(cfg, web=web_eff)
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,
-                               emit=write, history=history)
+                               emit=write, history=history, fast=fast)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
                 "iterations": rec.iterations, "elapsed_s": rec.elapsed_s,

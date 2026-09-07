@@ -110,5 +110,5 @@ def distill(client, cfg: Config, messages: List[str]) -> str:
 def write_profile(markdown: str) -> Path:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     dest = PROFILE_DIR / "about_me.md"
-    dest.write_text(markdown.rstrip() + "\n")
+    dest.write_text(markdown.rstrip() + "\n", encoding="utf-8")
     return dest

@@ -43,7 +43,7 @@ def snapshot(paths: List[str], note: str = "") -> Snapshot:
         shutil.copy2(src, target)
         saved.append(rel)
     (dest / "MANIFEST.txt").write_text(
-        f"note: {note}\n" + "\n".join(saved) + "\n"
+        f"note: {note}\n" + "\n".join(saved) + "\n", encoding="utf-8"
     )
     return Snapshot(id=sid, path=dest, files=saved)
 
@@ -67,7 +67,7 @@ def restore_by_id(sid: str) -> List[str]:
     manifest = dest / "MANIFEST.txt"
     if not manifest.exists():
         raise FileNotFoundError(f"No snapshot '{sid}'")
-    files = [ln for ln in manifest.read_text().splitlines()
+    files = [ln for ln in manifest.read_text(encoding="utf-8").splitlines()
              if ln and not ln.startswith("note:")]
     return restore(Snapshot(id=sid, path=dest, files=files))
 

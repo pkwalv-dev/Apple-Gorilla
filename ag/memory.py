@@ -50,7 +50,7 @@ def _ensure() -> None:
     ensure_dirs()
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     if not MEMORY_FILE.exists():
-        MEMORY_FILE.write_text("")
+        MEMORY_FILE.write_text("", encoding="utf-8")
 
 
 def remember(text: str, tags: Optional[List[str]] = None, *,

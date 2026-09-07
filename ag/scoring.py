@@ -86,15 +86,34 @@ def build_scorecard(*, accuracy: float, quality: float, elapsed_s: float,
     )
 
 
+def measured_only(elapsed_s: float, output_tokens: int, *,
+                  budget_s: float) -> Scorecard:
+    """Scorecard for a run with no critic judgement (fast mode).
+
+    Speed is *measured*; accuracy, quality and overall are left unscored (None)
+    rather than a misleading 0 — the answer wasn't judged, so we don't claim a score.
+    """
+    spd = speed_score(elapsed_s, output_tokens, budget_s=budget_s)
+    return Scorecard(
+        accuracy=None, quality=None, speed=spd, overall=None, answer_score=None,
+        elapsed_s=round(elapsed_s, 3), output_tokens=int(output_tokens), weights={},
+    )
+
+
 def weakest_axis(cards: list) -> str:
     """Across recent scorecards, which axis is lowest on average.
 
-    Used to *direct* evolution at the dimension that most needs improvement.
+    Used to *direct* evolution at the dimension that most needs improvement. Runs with
+    an unscored axis (None, e.g. fast-mode runs) are skipped for that axis rather than
+    counted as zero, so they don't falsely drag an average down.
     """
     if not cards:
         return "accuracy"
     axes = ("accuracy", "quality", "speed")
-    avg = {a: sum(float(c.get(a, 0.0)) for c in cards) / len(cards) for a in axes}
+    avg = {}
+    for a in axes:
+        vals = [float(c[a]) for c in cards if c.get(a) is not None]
+        avg[a] = (sum(vals) / len(vals)) if vals else 0.0
     return min(axes, key=lambda a: avg[a])
 
 

@@ -67,7 +67,9 @@ def test_critique_falls_back_to_score_without_subscores():
 def test_pipeline_populates_scorecard():
     cfg = Config()
     client = make_client(dry_run=True)
-    rec = run_pipeline(client, cfg, "Explain entropy.")
+    # Full mode produces the judged+measured blend; fast mode (the default) leaves the
+    # judged axes unscored and is covered in test_smoke.
+    rec = run_pipeline(client, cfg, "Explain entropy.", fast=False)
     sc = rec.scorecard
     assert sc and set(("accuracy", "quality", "speed", "overall")).issubset(sc)
     assert 0.0 <= sc["overall"] <= 10.0

@@ -10,6 +10,7 @@
   },
   "ollama_autostart": true,
   "effort": "high",
+  "pipeline_mode": "fast",
   "max_output_tokens": 32000,
   "meta_output_tokens": 16000,
   "max_iterations": 2,

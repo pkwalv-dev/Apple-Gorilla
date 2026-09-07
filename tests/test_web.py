@@ -128,7 +128,8 @@ def test_pipeline_threads_conversation_history():
     hist = [{"role": "user", "text": "My name is Sam"},
             {"role": "ai", "text": "Nice to meet you Sam"}]
     cfg = Config(); cfg.auto_memory = False
-    pipeline.run(Spy(), cfg, "what's my name?", web=False, history=hist)
+    # Full mode threads history through the optimizer as well as the executor.
+    pipeline.run(Spy(), cfg, "what's my name?", web=False, history=hist, fast=False)
     assert "Sam" in seen["opt_user"], "history missing from optimizer prompt"
     assert "Sam" in seen["exec_sys"], "history missing from executor system"
 
