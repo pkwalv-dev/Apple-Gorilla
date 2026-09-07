@@ -123,12 +123,23 @@ class ReasonResult:
 
 
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
-          emit=None, max_steps: Optional[int] = None) -> ReasonResult:
-    """Run the reason→act→observe loop and return the final answer + trace."""
+          emit=None, max_steps: Optional[int] = None, on_delta=None,
+          cancel=None) -> ReasonResult:
+    """Run the reason→act→observe loop and return the final answer + trace.
+
+    `on_delta(text)` streams each model call's output live; `cancel` (a Canceller) lets
+    a run be stopped at any point. Both are optional.
+    """
     from .pipeline import _emit  # reuse the pipeline's safe emitter
+    # Only forward these when set, so stub clients that don't accept them still work.
+    dkw = {}
+    if on_delta is not None:
+        dkw["on_delta"] = on_delta
+    if cancel is not None:
+        dkw["cancel"] = cancel
     tools = available_tools(broker, client, cfg)
     if not tools:  # nothing to use — behave like a normal single call
-        res = client.complete(system=system, user=user, cfg=cfg)
+        res = client.complete(system=system, user=user, cfg=cfg, **dkw)
         return ReasonResult(res.text, [], res.input_tokens, res.output_tokens)
 
     max_steps = cfg.max_tool_steps if max_steps is None else max_steps
@@ -139,7 +150,8 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     tin = tout = 0
 
     for _ in range(max(1, max_steps)):
-        res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg)
+        res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg,
+                              **dkw)
         tin += res.input_tokens
         tout += res.output_tokens
         action = _parse_action(res.text, tools)
@@ -161,7 +173,7 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     res = client.complete(
         system=system,
         user=transcript + "\nUsing the observations above, give your final answer.",
-        cfg=cfg)
+        cfg=cfg, **dkw)
     return ReasonResult(res.text.strip(), steps, tin + res.input_tokens,
                         tout + res.output_tokens)
 

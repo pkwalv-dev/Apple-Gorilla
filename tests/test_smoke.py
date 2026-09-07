@@ -140,6 +140,70 @@ def test_saved_api_key_round_trip(tmp_path, monkeypatch):
         pass
 
 
+def test_ollama_streaming_forwards_deltas_and_interrupts(monkeypatch):
+    import json as _json
+    import urllib.request as _u
+    import pytest
+    from ag import model
+    from ag.config import Config as _Cfg
+
+    lines = [
+        _json.dumps({"message": {"content": "Hel"}}).encode(),
+        _json.dumps({"message": {"content": "lo"}}).encode(),
+        _json.dumps({"message": {"content": ""}, "done": True,
+                     "eval_count": 2, "prompt_eval_count": 1}).encode(),
+    ]
+
+    class _Resp:
+        def __init__(self, ls): self._ls = ls
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def __iter__(self): return iter(self._ls)
+
+    monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp(lines))
+    got = []
+    res = model.OllamaClient(_Cfg()).complete(
+        system="s", user="u", cfg=_Cfg(), on_delta=lambda t: got.append(t))
+    assert "".join(got) == "Hello"          # every chunk was streamed live
+    assert res.text == "Hello" and res.output_tokens == 2
+
+    # Interruption: raising in on_delta stops consumption immediately.
+    class _Boom(Exception): pass
+    monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp(lines))
+    with pytest.raises(_Boom):
+        model.OllamaClient(_Cfg()).complete(
+            system="s", user="u", cfg=_Cfg(),
+            on_delta=lambda t: (_ for _ in ()).throw(_Boom()))
+
+
+def test_ollama_cancel_stops_stream_and_closes(monkeypatch):
+    import json as _json
+    import urllib.request as _u
+    import pytest
+    from ag import model
+    from ag.config import Config as _Cfg
+
+    canceller = model.Canceller()
+    closed = {"v": False}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): closed["v"] = True; return False   # same-thread close
+        def __iter__(self):
+            yield _json.dumps({"message": {"content": "hi"}}).encode()
+            canceller.cancel()                       # user hits Stop mid-stream
+            yield _json.dumps({"message": {"content": " more"}}).encode()
+
+    monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp())
+    seen = []
+    with pytest.raises(model.Cancelled):
+        model.OllamaClient(_Cfg()).complete(
+            system="s", user="u", cfg=_Cfg(),
+            on_delta=lambda t: seen.append(t), cancel=canceller)
+    assert seen == ["hi"]        # stopped right after the flag was set
+    assert closed["v"]           # connection closed from the reading thread
+
+
 def test_ollama_empty_answer_salvaged(monkeypatch):
     # If suppression/stripping leaves nothing but the model DID emit content
     # (e.g. a truncated <think> with no answer after), don't return a blank answer.

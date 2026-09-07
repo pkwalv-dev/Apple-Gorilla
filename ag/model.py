@@ -25,6 +25,39 @@ class ModelResult:
     dry_run: bool = False
 
 
+class Cancelled(Exception):
+    """Raised inside a streaming completion when its Canceller has been tripped."""
+
+
+class Canceller:
+    """A thread-safe stop signal for an in-flight generation.
+
+    The generating thread registers its live HTTP response; another thread (the web
+    server's /stop handler) calls cancel(), which trips the flag AND closes the
+    response. Closing it unblocks a read that is stuck in the model's prompt-eval /
+    reasoning phase, so a run can be interrupted promptly — not only once tokens flow.
+    """
+
+    def __init__(self) -> None:
+        import threading
+        self.stopped = False
+        self._resp = None
+        self._lock = threading.Lock()
+
+    def register(self, resp) -> None:
+        with self._lock:
+            self._resp = resp
+
+    def cancel(self) -> None:
+        # Set the flag; the reading thread sees it between chunks and closes the
+        # connection itself. We deliberately do NOT close the socket from this thread:
+        # a cross-thread close of a blocked read is unreliable (notably on Windows) and
+        # can leave the upstream generation running. The same-thread close on the next
+        # chunk is what actually cancels the model.
+        with self._lock:
+            self.stopped = True
+
+
 class DryRunClient:
     """Deterministic offline stand-in for the API.
 
@@ -33,7 +66,8 @@ class DryRunClient:
     """
 
     def complete(self, *, system: str, user: str, cfg: Config,
-                 max_tokens: Optional[int] = None) -> ModelResult:
+                 max_tokens: Optional[int] = None, on_delta=None,
+                 cancel=None) -> ModelResult:
         tag = _role_tag(system)
         if tag == "optimizer":
             text = (
@@ -64,6 +98,8 @@ class DryRunClient:
         else:
             text = ("[dry-run answer] " + _first_line(user, "your prompt") +
                     "\nSet ANTHROPIC_API_KEY to get a real response.")
+        if on_delta is not None:
+            on_delta(text)   # exercise the streaming path (and interrupt hook) offline
         return ModelResult(text=text, model="dry-run", dry_run=True)
 
 
@@ -101,7 +137,8 @@ class ApiClient:
         self._client = anthropic.Anthropic(**kwargs)
 
     def complete(self, *, system: str, user: str, cfg: Config,
-                 max_tokens: Optional[int] = None) -> ModelResult:
+                 max_tokens: Optional[int] = None, on_delta=None,
+                 cancel=None) -> ModelResult:
         mt = max_tokens or cfg.max_output_tokens
         # Stream for large generations to avoid HTTP timeouts (skill guidance).
         with self._client.messages.stream(
@@ -112,6 +149,16 @@ class ApiClient:
             output_config={"effort": cfg.effort},
             messages=[{"role": "user", "content": user}],
         ) as stream:
+            if cancel is not None:
+                cancel.register(stream)          # /stop can close the stream
+            if on_delta is not None or cancel is not None:
+                # Forward answer text as it streams; a Stop (cancel/on_delta raising)
+                # exits the context manager and halts the request.
+                for chunk in stream.text_stream:
+                    if cancel is not None and cancel.stopped:
+                        raise Cancelled()
+                    if chunk and on_delta is not None:
+                        on_delta(chunk)
             msg = stream.get_final_message()
         text = "".join(b.text for b in msg.content if b.type == "text")
         u = msg.usage
@@ -136,7 +183,12 @@ class OllamaClient:
         self._model = cfg.ollama_model
 
     def complete(self, *, system: str, user: str, cfg: Config,
-                 max_tokens: Optional[int] = None) -> ModelResult:
+                 max_tokens: Optional[int] = None, on_delta=None,
+                 cancel=None) -> ModelResult:
+        """Generate an answer. If `on_delta(text)` is given, stream the model's output
+        live — every content/reasoning chunk is passed to it as it arrives. A `cancel`
+        Canceller (if given) makes the call interruptible at any point: cancel() closes
+        the Ollama connection, so even the prompt-eval/reasoning phase can be stopped."""
         import urllib.error
         import urllib.request
 
@@ -149,13 +201,15 @@ class OllamaClient:
         # prompt — a cleaner suppression than Ollama's think=false (which can leak the
         # reasoning into the answer). Appended to the user turn.
         user_content = user + ("\n\n/no_think" if _no_think(cfg) else "")
+        # Stream when the caller wants live tokens OR the ability to interrupt.
+        stream = on_delta is not None or cancel is not None
         payload = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
             ],
-            "stream": False,
+            "stream": stream,
             "keep_alive": getattr(cfg, "ollama_keep_alive", "30m"),
             "options": options,
         }
@@ -165,19 +219,24 @@ class OllamaClient:
         if think is not None:
             payload["think"] = think
 
-        def _call(body: dict) -> dict:
+        def _open(body: dict):
+            headers = {"Content-Type": "application/json"}
+            if stream:
+                # No keep-alive for streamed calls: we want closing the response to
+                # actually tear down the socket so Ollama sees the disconnect and
+                # cancels generation (keep-alive can otherwise hold it open).
+                headers["Connection"] = "close"
             req = urllib.request.Request(
                 f"{self._host}/api/chat",
                 data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            return urllib.request.urlopen(req, timeout=600)
 
         try:
             try:
-                data = _call(payload)
+                resp = _open(payload)
             except urllib.error.HTTPError as he:
                 body = ""
                 try:
@@ -187,7 +246,7 @@ class OllamaClient:
                 # Model doesn't support the think flag -> drop it and retry once.
                 if "think" in payload and "think" in body.lower():
                     payload.pop("think", None)
-                    data = _call(payload)
+                    resp = _open(payload)
                 else:
                     raise
         except urllib.error.URLError as e:
@@ -195,19 +254,67 @@ class OllamaClient:
                 f"Cannot reach Ollama at {self._host} ({e}). "
                 f"Is `ollama serve` running and `{self._model}` pulled?"
             ) from e
-        content = (data.get("message") or {}).get("content", "")
+
+        if not stream:
+            with resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            content = (data.get("message") or {}).get("content", "")
+            pin = data.get("prompt_eval_count", 0) or 0
+            pout = data.get("eval_count", 0) or 0
+        else:
+            content, pin, pout = self._consume_stream(resp, on_delta, cancel)
+
         text = _strip_thinking(content)
         # Defense in depth: if suppression/stripping left nothing but the model did
         # emit content (e.g. a truncated <think> with no answer after it), salvage the
         # de-tagged content rather than returning a blank answer to the pipeline.
         if not text and content.strip():
             text = re.sub(r"</?think>", "", content).strip()
-        return ModelResult(
-            text=text,
-            input_tokens=data.get("prompt_eval_count", 0) or 0,
-            output_tokens=data.get("eval_count", 0) or 0,
-            model=self._model,
-        )
+        return ModelResult(text=text, input_tokens=pin, output_tokens=pout,
+                           model=self._model)
+
+    @staticmethod
+    def _consume_stream(resp, on_delta, cancel=None):
+        """Read Ollama's NDJSON stream, forwarding each chunk to on_delta live.
+
+        Returns (full_content, prompt_tokens, eval_tokens). on_delta (if given) receives
+        the model's reasoning (`thinking`) and answer (`content`) text as it streams and
+        may raise to interrupt. A `cancel` Canceller is registered so /stop can close the
+        connection mid-read; a read that fails after cancel() is reported as Cancelled.
+        """
+        parts, pin, pout = [], 0, 0
+        if cancel is not None:
+            cancel.register(resp)
+        try:
+            with resp:
+                for raw in resp:
+                    if cancel is not None and cancel.stopped:
+                        raise Cancelled()
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    msg = obj.get("message") or {}
+                    th = msg.get("thinking")
+                    if th and on_delta is not None:
+                        on_delta(th)                 # may raise to interrupt
+                    c = msg.get("content")
+                    if c:
+                        parts.append(c)
+                        if on_delta is not None:
+                            on_delta(c)              # may raise to interrupt
+                    if obj.get("done"):
+                        pin = obj.get("prompt_eval_count", 0) or 0
+                        pout = obj.get("eval_count", 0) or 0
+        except (OSError, ValueError):
+            # A closed-mid-read from cancel() surfaces here — report it as a cancel.
+            if cancel is not None and cancel.stopped:
+                raise Cancelled()
+            raise
+        return "".join(parts), pin, pout
 
 
 def _ollama_reachable(host: str, timeout: float = 1.5) -> bool:
