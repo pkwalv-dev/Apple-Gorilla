@@ -237,6 +237,33 @@ def test_image_generate_unreachable_raises(monkeypatch):
         images.generate("x", _Cfg())
 
 
+def test_ensure_sd_running(monkeypatch):
+    from ag import images
+    from ag.config import Config as _Cfg
+    # already reachable -> no launch attempt
+    monkeypatch.setattr(images, "sd_reachable", lambda cfg, timeout=1.5: True)
+    monkeypatch.setattr(images, "_launch_sd", lambda cfg: (_ for _ in ()).throw(
+        AssertionError("must not launch when already reachable")))
+    assert images.ensure_sd_running(_Cfg()) is True
+
+    # not reachable, autostart off -> False, no launch
+    monkeypatch.setattr(images, "sd_reachable", lambda cfg, timeout=1.5: False)
+    cfg = _Cfg(); cfg.sd_autostart = False
+    assert images.ensure_sd_running(cfg) is False
+
+    # remote host -> never auto-start
+    cfg2 = _Cfg(); cfg2.sd_host = "http://10.0.0.5:7860"
+    monkeypatch.setattr(images, "_launch_sd", lambda cfg: True)
+    assert images.ensure_sd_running(cfg2) is False
+
+    # local, launch succeeds, becomes reachable after start
+    seq = iter([False, True])
+    monkeypatch.setattr(images, "sd_reachable", lambda cfg, timeout=1.5: next(seq, True))
+    monkeypatch.setattr(images, "_launch_sd", lambda cfg: True)
+    monkeypatch.setattr(images.time, "sleep", lambda *_: None)
+    assert images.ensure_sd_running(_Cfg(), timeout=5) is True
+
+
 def test_generate_image_tool_offered_when_enabled():
     from ag import reason
     from ag.permissions import PermissionBroker

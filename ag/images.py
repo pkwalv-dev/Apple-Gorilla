@@ -45,6 +45,117 @@ def sd_reachable(cfg: Config, timeout: float = 1.5) -> bool:
         return False
 
 
+def _is_local_host(host: str) -> bool:
+    from .model import _is_local_host as _lh
+    return _lh(host)
+
+
+def _find_sd_launcher():
+    """Locate an installed Automatic1111/Forge launcher. Returns (argv, cwd) or None.
+
+    We only *launch* an existing install; we never install SD or download models.
+    """
+    import os
+    home = Path.home()
+    dir_names = ["stable-diffusion-webui", "stable-diffusion-webui-forge",
+                 "stable-diffusion-webui-directml", "forge", "sd-forge", "sdnext",
+                 "automatic", "SD"]
+    roots = [home, Path.cwd()]
+    for env in ("USERPROFILE", "LOCALAPPDATA", "ProgramFiles", "ProgramW6432"):
+        v = os.environ.get(env)
+        if v:
+            roots.append(Path(v))
+    win_scripts = ["webui-user.bat", "webui.bat"]
+    nix_scripts = ["webui.sh"]
+    scripts = win_scripts if os.name == "nt" else nix_scripts
+    seen = set()
+    for root in roots:
+        for d in dir_names:
+            base = root / d
+            if base in seen:
+                continue
+            seen.add(base)
+            for s in scripts:
+                p = base / s
+                try:
+                    if p.exists():
+                        if os.name == "nt":
+                            return (["cmd", "/c", str(p)], str(base))
+                        return (["bash", str(p), "--api"], str(base))
+                except OSError:
+                    continue
+    return None
+
+
+def _spawn_detached(argv, cwd, extra_env=None):
+    import os
+    import subprocess
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    try:
+        if os.name == "nt":
+            flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                             creationflags=flags, close_fds=True)
+        else:
+            subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        return True
+    except Exception:
+        return False
+
+
+def _launch_sd(cfg: Config) -> bool:
+    """Best-effort launch of an installed SD server with its API enabled."""
+    import os
+    import shlex
+    cmd = (getattr(cfg, "sd_cmd", "") or "").strip()
+    if cmd:
+        # Treat a bare path to a script/dir specially; otherwise run as a command.
+        p = Path(cmd)
+        if p.exists() and p.is_file():
+            if os.name == "nt":
+                return _spawn_detached(["cmd", "/c", str(p)], str(p.parent),
+                                       {"COMMANDLINE_ARGS": "--api"})
+            return _spawn_detached(["bash", str(p), "--api"], str(p.parent))
+        argv = cmd.split() if os.name == "nt" else shlex.split(cmd)
+        if "--api" not in argv:
+            argv.append("--api")
+        return _spawn_detached(argv, str(Path.cwd()))
+    found = _find_sd_launcher()
+    if not found:
+        return False
+    argv, cwd = found
+    # webui-user.bat reads COMMANDLINE_ARGS; ensure the API is on for .bat launches.
+    extra = {"COMMANDLINE_ARGS": "--api"} if argv and str(argv[-1]).lower().endswith(".bat") else None
+    return _spawn_detached(argv, cwd, extra)
+
+
+def ensure_sd_running(cfg: Config, *, timeout: float = 180.0) -> bool:
+    """Make sure a local SD server is up, launching an installed one if needed.
+
+    Best-effort and never raises. Returns True once the API is reachable. Only a local
+    host is auto-started, gated by cfg.sd_autostart. Startup includes loading a model,
+    so the first call can take a while (hence the generous timeout).
+    """
+    import time as _t
+    if sd_reachable(cfg):
+        return True
+    if not getattr(cfg, "sd_autostart", True) or not _is_local_host(cfg.sd_host):
+        return False
+    if not _launch_sd(cfg):
+        return False
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        if sd_reachable(cfg, timeout=2.0):
+            return True
+        _t.sleep(2.0)
+    return False
+
+
 def _slug(text: str, n: int = 40) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
     return (s[:n] or "image")
@@ -61,6 +172,9 @@ def generate(prompt: str, cfg: Config, *, negative_prompt: str = "",
     prompt = (prompt or "").strip()
     if not prompt:
         raise ValueError("empty image prompt")
+    # Auto-launch an installed local SD server if it isn't already up.
+    if getattr(cfg, "sd_autostart", True) and not sd_reachable(cfg):
+        ensure_sd_running(cfg)
     host = cfg.sd_host.rstrip("/")
     payload = {
         "prompt": prompt,

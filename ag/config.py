@@ -41,6 +41,13 @@ class Config:
     # server separately. Disabled features degrade with a clear "not reachable" note.
     allow_image_gen: bool = True
     sd_host: str = "http://127.0.0.1:7860"
+    # When the SD server isn't reachable, try to launch an already-installed one
+    # ourselves (local hosts only) with its API enabled, then wait for it to come up.
+    # AG does NOT install Stable Diffusion or download models — that is a large,
+    # GPU-dependent step you do once yourself. sd_cmd overrides auto-discovery: set it
+    # to the launcher (e.g. a path to webui-user.bat / webui.sh, or a full command).
+    sd_autostart: bool = True
+    sd_cmd: str = ""
     sd_steps: int = 25
     sd_width: int = 512
     sd_height: int = 512
