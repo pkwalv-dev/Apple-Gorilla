@@ -123,6 +123,19 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
             _emit(emit, "memory",
                   f"saved {len(saved)} durable fact(s) to long-term memory",
                   level="tool", saved=saved)
+        # Record the exchange as EPISODIC memory — the raw experience the reflection
+        # loop learns from — then periodically distill episodes into semantic facts
+        # and reusable procedures. This is what turns remembering into learning.
+        try:
+            mgr = memory.get_manager("root", cfg=cfg)
+            mgr.record_episode(raw_prompt, answer)
+            if getattr(cfg, "memory_reflect", True):
+                every = max(1, int(getattr(cfg, "memory_reflect_every", 10)))
+                n_ep = len(mgr.store.all("root", [memory.MemoryKind.EPISODIC]))
+                if n_ep % every == 0:
+                    memory.reflect(client, cfg, emit=emit)
+        except Exception:
+            pass  # learning is best-effort; never break a run over it
         return saved
     except Exception as e:
         _emit(emit, "memory", f"memory capture skipped: {e}", level="info")

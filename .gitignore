@@ -8,6 +8,9 @@ state/versions/*/
 state/memory/
 state/archive/
 state/bench/
+state/skills/
+state/images/
+state/fleet/
 !state/versions/.gitkeep
 !state/runs/.gitkeep
 .DS_Store

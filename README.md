@@ -115,10 +115,20 @@ python -m ag doctor            # environment / readiness check
 Plain `run` optimizes → executes → critiques → iterates a *text* answer. Two switches
 let AG actually **compute and act**, so it is useful even with the internet off:
 
-- **Persistent memory** (`use_memory`, on by default). AG recalls durable facts into
-  context each run, so sessions aren't cold-started. Manage it with `ag memory add/recall/
-  list/clear`; the reasoning loop can also `remember`/`recall` mid-task. Stored under
-  `state/memory/` (git-ignored, capped at `max_memories`).
+- **Layered memory that learns** (`use_memory`, on by default). AG's memory is a
+  four-layer system, not a flat note list: **episodic** (what happened each run),
+  **semantic** (durable facts distilled from experience), and **procedural** (reusable
+  strategies that worked). Recall is by **meaning** — each memory carries an embedding
+  (local, keyless `nomic-embed-text` via Ollama; a stdlib hashing fallback when Ollama
+  is absent) and recall blends semantic similarity, keyword overlap, recency, and
+  importance, then expands along **graph links** between related memories. A
+  **reflection loop** periodically distills recent episodes into new facts and
+  procedures — this is what turns remembering into learning. Memory is **namespaced per
+  agent** with lineage inheritance (a spawned AG inherits its parent's + a shared tier
+  and can `promote` discoveries upward), and everything sits behind a `MemoryStore`
+  interface so the engine can grow from JSONL to a vector/graph DB with no changes to
+  AG. Manage it with `ag memory add/recall/list/clear/stats/reflect`; stored under
+  `state/memory/<agent>/` (git-ignored, per-layer caps in `config.json → memory_caps`).
 - **Local tools + reasoning loop** (`--tools`, or `allow_local_tools`). AG runs a bounded
   reason → act → observe loop (`max_tool_steps`) and can call: `calc` (exact arithmetic,
   fixing the small-model math weakness), `read_file`/`list_dir` (gated `filesystem_read`),
@@ -364,6 +374,36 @@ Only files listed in `config.json → evolvable_paths` can ever be touched (defa
 prompts, principles, config). The safety, permission, and backup modules are **not**
 evolvable by design.
 
+## Directed capability acquisition — ask, and AG extends itself
+
+If a prompt needs a capability AG doesn't have, AG can **acquire** it and then use it in
+the same run. It authors a new **skill** (a small tool) with a test, installs any
+declared dependency, runs the test in isolation (the selection gate — a skill that
+fails its own test is discarded), registers the surviving skill, and remembers it so it
+is **reused and inherited, not re-authored**. Capabilities accumulate: each request can
+leave AG permanently more capable. This is "directed evolution" — the *prompt* is the
+direction, the test is the selection, the registry + memory are the heredity.
+
+```bash
+python -m ag acquire "convert a CSV file to JSON"   # author + test + register a skill
+python -m ag skills list                            # what AG has acquired
+python -m ag skills disable <name> | remove <name>  # master control over the registry
+```
+
+Inside a run the model calls the `acquire_skill` tool itself; **sub-agents can acquire
+too** (their authority is capped at the parent's, and anything they author is promoted
+to a shared registry the lineage inherits). It is gated throughout:
+
+- Authoring needs `write_skill`; installs need `install_package` (PyPI, pinned,
+  logged); code fetches are limited to `config.json → github_allowlist` (read-only).
+- `acquisition_autonomy` is the master dial: **`ask` (default)** plans and waits for
+  your approval before it installs or runs anything; `auto` completes end-to-end within
+  the session's grants. A skill's test runs with **no** grants, so authored code cannot
+  touch the network or filesystem while being gated. Skills are additive files under
+  `state/skills/` — they never modify AG's core.
+- **Honest scope:** "any capability" means anything expressible as authorized code on
+  this machine; it does not train model weights, act on other machines, or bypass a gate.
+
 ## Autonomy, Chrome, and tools — permission-gated
 
 `ag/permissions.py` is a **default-deny** broker. Browser/Chrome control, network,
@@ -382,10 +422,20 @@ that require an explicit grant *and* `allow_external_tools: true`. AG has broad
 ag/
   config.py        paths + Config (config.json)
   model.py         Claude client + offline dry-run stub
+  memory/          layered memory system (episodic/semantic/procedural)
+    types.py       Memory record + layer taxonomy
+    embed.py       meaning-based embeddings (Ollama + stdlib fallback) [interface]
+    store.py       MemoryStore interface + JSONL engine (per-agent, per-layer)
+    manager.py     hybrid recall, graph links, namespaces/lineage
+    reflect.py     the learning loop: episodes -> facts + procedures
   prompts.py       meta-prompts   [evolvable]
   profile.py       loads your principles
   pipeline.py      optimize -> execute -> critique -> iterate
   critic/reviser   (in pipeline.py)
+  acquire.py       directed capability acquisition (author->test->register a skill)
+  skills/          the skill registry — acquired capabilities (per-agent, inherited)
+  tools/pkg.py     gated dependency installer (pinned, logged)
+  tools/github.py  vetted-GitHub fetch (allowlist, read-only)
   bench.py         objective benchmark = AG's fitness function [evolvable tasks]
   archive.py       evolution lineage + measured fitness deltas + fitness cache
   evolve.py        measure -> patch -> test-gate -> fitness-gate -> adopt/rollback

@@ -223,6 +223,40 @@ def _direction(cfg: Config, telemetry: list, bench_res=None) -> dict:
     return briefing
 
 
+def _github_refs_block(cfg: Config, *, emit=None) -> str:
+    """Fetch the configured vetted-GitHub reference files and format them for the
+    proposer's briefing. Reference material only — evolve never executes it and still
+    edits only evolvable_paths. Returns '' when disabled/empty/unreachable."""
+    if not getattr(cfg, "evolve_use_github", False):
+        return ""
+    refs = getattr(cfg, "evolve_github_refs", None) or []
+    if not refs:
+        return ""
+    from .permissions import PermissionBroker
+    from .tools import github
+    broker = PermissionBroker(allow_external_tools=True)
+    broker.grant("github_fetch")
+    allow = getattr(cfg, "github_allowlist", []) or []
+    parts = []
+    for r in refs[:5]:
+        repo, path = str(r.get("repo", "")), str(r.get("path", ""))
+        note = str(r.get("note", ""))
+        if not (repo and path):
+            continue
+        text = github.fetch(repo, path, broker=broker, allowlist=allow,
+                            ref=str(r.get("ref", "main")))
+        if text.startswith("github_fetch error") or text.startswith("github_fetch refused"):
+            continue
+        _emit(emit, "evolve", f"reference: {repo}/{path}", level="tool")
+        parts.append(f"## {repo}/{path}" + (f" — {note}" if note else "")
+                     + f"\n```\n{text[:4000]}\n```")
+    if not parts:
+        return ""
+    return ("\n\n# Vetted reference implementations (from your GitHub allowlist — adapt "
+            "the ideas into the evolvable files; do NOT copy blindly, and only edit "
+            "evolvable paths)\n" + "\n\n".join(parts))
+
+
 def _read_evolvable(cfg: Config) -> dict:
     files = {}
     for rel in cfg.evolvable_paths:
@@ -351,6 +385,7 @@ def evolve(client, cfg: Config, *, apply: bool = False,
         "# Directed-evolution briefing (aim your change here)\n"
         + json.dumps(briefing, indent=2)
         + directive_block
+        + _github_refs_block(cfg, emit=emit)
         + "\n\n# Recent run telemetry (incl. accuracy/quality/speed scorecards)\n"
         + json.dumps(telemetry, indent=2)[:8000]
         + "\n\n# Current evolvable files\n"
@@ -535,6 +570,7 @@ def _evolver_prompt(cfg: Config, directive: str) -> str:
         "# Directed-evolution briefing (aim your change here)\n"
         + json.dumps(briefing, indent=2)
         + directive_block
+        + _github_refs_block(cfg)
         + "\n\n# Recent run telemetry (incl. accuracy/quality/speed scorecards)\n"
         + json.dumps(telemetry, indent=2)[:8000]
         + "\n\n# Current evolvable files\n"

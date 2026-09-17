@@ -26,6 +26,9 @@ GATED = {
     "spawn_agent",    # creating sub-agents
     "shell",          # running arbitrary shell commands
     "code_exec",      # executing code (python_exec) in a subprocess
+    "write_skill",    # authoring + registering a new skill (self-extension)
+    "install_package",  # installing a Python dependency for a skill
+    "github_fetch",   # fetching code from the vetted-GitHub allowlist
 }
 
 

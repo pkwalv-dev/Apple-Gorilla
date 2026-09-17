@@ -103,10 +103,47 @@ class Config:
     # the one local tool that can change the machine, so it is never granted by default.
     allow_code_exec: bool = False
     max_tool_steps: int = 4                    # reason->act->observe loop bound
+    # --- Directed capability acquisition (ag/acquire.py, ag/skills/) ---------
+    # When AG lacks a capability a prompt needs, it can AUTHOR a new skill (a tested
+    # tool), install its Python deps, or pull vetted code — then use it. Acquired
+    # skills persist in a registry and are inherited by sub-agents.
+    allow_acquire: bool = True                  # enable self-extension via skills
+    acquisition_autonomy: str = "ask"           # ask (confirm install/run) | auto
+    skill_test_gate: bool = True                # a new skill must pass its own test
+    skill_full_suite_gate: bool = False         # also run AG's full suite (slow, safest)
+    max_acquire_per_run: int = 3                # cap skills acquired in one run
+    max_subagent_depth: int = 2                 # bound recursive sub-agent spawning
+    # Vetted code sources: PyPI is allowed for installs; GitHub fetches are limited to
+    # these "owner/repo" prefixes (raw file reads only). You control this list.
+    github_allowlist: List[str] = field(default_factory=lambda: [
+        "pytorch/pytorch", "huggingface/transformers", "ollama/ollama",
+    ])
+    # Vetted GitHub as evolutionary options: when evolving, inject these reference
+    # files (adapted from proven repos) into the proposer's briefing so a self-edit can
+    # draw on battle-tested implementations. Each entry: {repo, path, note}. Reference
+    # data only — evolve still edits ONLY evolvable_paths and passes both gates. Repos
+    # must be on github_allowlist. Off unless refs are configured.
+    evolve_use_github: bool = False
+    evolve_github_refs: List[dict] = field(default_factory=list)
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory
-    max_memories: int = 200                    # cap on retained memories
+    max_memories: int = 200                    # cap on retained memories (legacy/back-compat)
+    # --- Layered memory system (ag/memory/) ---------------------------------
+    # Recall is by *meaning*: memories carry embeddings and recall blends semantic
+    # similarity, keyword overlap, recency, and importance. Model- and engine-agnostic.
+    memory_embed_backend: str = "auto"          # auto | ollama | hash | none
+    memory_embed_model: str = "nomic-embed-text"  # local Ollama embedding model (keyless)
+    memory_weights: dict = field(default_factory=lambda: {  # recall blend
+        "semantic": 0.55, "keyword": 0.2, "recency": 0.15, "importance": 0.1,
+    })
+    memory_recency_halflife_days: float = 30.0  # recency decay half-life
+    memory_merge_threshold: float = 0.92        # cosine >= this => near-duplicate, merged
+    memory_caps: dict = field(default_factory=lambda: {  # per-layer retention caps
+        "episodic": 2000, "semantic": 1000, "procedural": 500,
+    })
+    memory_reflect: bool = True                 # distill episodes -> facts/procedures
+    memory_reflect_every: int = 10              # run reflection every N auto-memory writes
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main

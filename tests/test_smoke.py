@@ -84,11 +84,13 @@ def test_source_and_profile_writes_force_utf8():
     import re
     from pathlib import Path
     ag = Path(__file__).resolve().parent.parent / "ag"
-    for mod in ("evolve.py", "ingest.py", "backup.py", "memory.py"):
-        src = (ag / mod).read_text(encoding="utf-8")
+    mods = [ag / m for m in ("evolve.py", "ingest.py", "backup.py")]
+    mods += sorted((ag / "memory").glob("*.py"))  # memory is now a package
+    for path in mods:
+        src = path.read_text(encoding="utf-8")
         for m in re.finditer(r"\.write_text\(", src):
             window = src[m.start():m.start() + 220]
-            assert "encoding=" in window, f"{mod}: write_text without encoding= near {m.start()}"
+            assert "encoding=" in window, f"{path.name}: write_text without encoding= near {m.start()}"
 
 
 def test_delegate_tool_wired_and_spawns_subagent():

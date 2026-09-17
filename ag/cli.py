@@ -38,6 +38,15 @@ def _make_broker(cfg, *, web: bool, tools: bool):
         # calc/recall/remember need no grant; these enable file + code tools.
         broker.grant("filesystem_read")
         broker.grant("code_exec")
+        # Directed acquisition: authoring/fetch are safe by default because the
+        # acquisition_autonomy gate stops before install/test in "ask" mode; the
+        # install itself is still separately gated and logged.
+        if getattr(cfg, "allow_acquire", True):
+            broker.grant("write_skill")
+            broker.grant("github_fetch")
+            broker.grant("install_package")
+            if getattr(cfg, "acquisition_autonomy", "ask") == "auto":
+                broker.grant("acquire_auto")
     return broker
 
 
@@ -404,9 +413,99 @@ def cmd_memory(args) -> int:
         mems = memory.all_memories()
         print(f"{len(mems)} memory item(s):")
         for m in mems:
-            print(f"  [{m.id}] {m.text}")
+            print(f"  [{m.kind[:4]}] [{m.id}] {m.text}")
     elif args.action == "clear":
         print(f"cleared {memory.clear()} memory item(s)")
+    elif args.action == "stats":
+        import json as _json
+        print(_json.dumps(memory.get_manager("root").stats(), indent=2))
+    elif args.action == "reflect":
+        cfg = Config.load()
+        from .model import make_client
+        client = make_client(cfg)
+        out = memory.reflect(client, cfg)
+        print(f"reflected: {out}")
+    return 0
+
+
+def cmd_skills(args) -> int:
+    from . import skills
+    reg = skills.get_registry("root")
+    if args.action == "list":
+        items = reg.list(include_disabled=True)
+        print(f"{len(items)} skill(s):")
+        for s in items:
+            flag = "" if s.enabled else " (disabled)"
+            caps = f" [caps: {', '.join(s.capabilities)}]" if s.capabilities else ""
+            print(f"  {s.name}{flag} - {s.description}{caps}")
+    elif args.action in ("disable", "enable"):
+        ok = reg.set_enabled(args.name or "", args.action == "enable")
+        print("done" if ok else f"skill not found: {args.name}")
+    elif args.action == "remove":
+        print("removed" if reg.remove(args.name or "") else f"skill not found: {args.name}")
+    return 0
+
+
+def cmd_acquire(args) -> int:
+    """Author + gate + register a skill on demand. Running this command is the user's
+    explicit approval for the install/test the acquisition performs."""
+    cfg = Config.load()
+    from .model import make_client
+    from .permissions import PermissionBroker
+    from . import acquire
+    client = make_client(cfg, backend=getattr(args, "backend", None))
+    broker = PermissionBroker(allow_external_tools=True)
+    broker.grant("write_skill")
+    broker.grant("install_package")
+    broker.grant("github_fetch")
+    broker.grant("code_exec")
+
+    def trace(ev):
+        if ev.get("stage") == "acquire" or ev.get("level") == "error":
+            print(f"[{ev.get('stage')}] {ev.get('message', '')}", file=sys.stderr)
+
+    res = acquire.author_skill(client, cfg, args.spec or "", broker=broker,
+                               approve=True, emit=trace)
+    print(res.reason)
+    if res.test_output and not res.acquired:
+        print(res.test_output, file=sys.stderr)
+    return 0 if res.acquired else 1
+
+
+def cmd_fleet(args) -> int:
+    from . import fleet
+    if args.action == "list":
+        agents = fleet.list_agents()
+        killed = " (KILL SWITCH ENGAGED)" if fleet.kill_active() else ""
+        print(f"{len(agents)} agent(s){killed}:")
+        for a in agents:
+            print(f"  {a.agent} [{a.status}] role={a.role} parent={a.parent} "
+                  f"depth={a.depth} skills={a.skills_acquired}")
+    elif args.action in ("disable", "enable"):
+        ok = fleet.set_status(args.name or "", "disabled" if args.action == "disable" else "active")
+        print("done" if ok else f"agent not found: {args.name}")
+    elif args.action == "kill":
+        fleet.engage_kill()
+        print("kill switch ENGAGED — all spawning halted, running loops will stop")
+    elif args.action == "revive":
+        fleet.clear_kill()
+        print("kill switch cleared — spawning allowed again")
+    elif args.action == "clear":
+        print(f"cleared {fleet.clear()} agent record(s)")
+    return 0
+
+
+def cmd_bundle(args) -> int:
+    from . import bundle
+    if args.check:
+        checks = bundle.check()
+        allok = all(c.ok for c in checks)
+        for c in checks:
+            print(f"  [{'OK ' if c.ok else 'XX '}] {c.name}" + (f" - {c.detail}" if c.detail else ""))
+        print("portable" if allok else "NOT fully portable — see failures above")
+        return 0 if allok else 1
+    dest = bundle.export(args.out or None)
+    print(f"bundle written: {dest}")
     return 0
 
 
@@ -550,11 +649,30 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
 
-    mem = sub.add_parser("memory", help="AG's persistent memory (add/recall/list/clear)")
-    mem.add_argument("action", choices=["add", "recall", "list", "clear"])
+    mem = sub.add_parser("memory", help="AG's layered memory (add/recall/list/clear/stats/reflect)")
+    mem.add_argument("action", choices=["add", "recall", "list", "clear", "stats", "reflect"])
     mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
     mem.add_argument("-k", type=int, default=5, help="recall: max items")
     mem.set_defaults(func=cmd_memory)
+
+    sk = sub.add_parser("skills", help="acquired skills (list/enable/disable/remove)")
+    sk.add_argument("action", choices=["list", "enable", "disable", "remove"])
+    sk.add_argument("name", nargs="?", default="", help="skill name (for enable/disable/remove)")
+    sk.set_defaults(func=cmd_skills)
+
+    acq = sub.add_parser("acquire", help="author + test + register a new skill on demand")
+    acq.add_argument("spec", help="the capability to acquire, in plain language")
+    acq.set_defaults(func=cmd_acquire)
+
+    fl = sub.add_parser("fleet", help="agent swarm control (list/enable/disable/kill/revive/clear)")
+    fl.add_argument("action", choices=["list", "enable", "disable", "kill", "revive", "clear"])
+    fl.add_argument("name", nargs="?", default="", help="agent name (for enable/disable)")
+    fl.set_defaults(func=cmd_fleet)
+
+    bn = sub.add_parser("bundle", help="export a portable bundle, or --check portability")
+    bn.add_argument("--check", action="store_true", help="audit portability constraints only")
+    bn.add_argument("--out", default="", help="output .zip path (default: alongside the repo)")
+    bn.set_defaults(func=cmd_bundle)
 
     up = sub.add_parser("update",
                         help="check/apply an Ollama model update (on demand, no polling)")
