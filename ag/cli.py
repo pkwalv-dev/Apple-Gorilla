@@ -404,9 +404,18 @@ def cmd_memory(args) -> int:
         mems = memory.all_memories()
         print(f"{len(mems)} memory item(s):")
         for m in mems:
-            print(f"  [{m.id}] {m.text}")
+            print(f"  [{m.kind[:4]}] [{m.id}] {m.text}")
     elif args.action == "clear":
         print(f"cleared {memory.clear()} memory item(s)")
+    elif args.action == "stats":
+        import json as _json
+        print(_json.dumps(memory.get_manager("root").stats(), indent=2))
+    elif args.action == "reflect":
+        cfg = Config.load()
+        from .model import make_client
+        client = make_client(cfg)
+        out = memory.reflect(client, cfg)
+        print(f"reflected: {out}")
     return 0
 
 
@@ -550,8 +559,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
 
-    mem = sub.add_parser("memory", help="AG's persistent memory (add/recall/list/clear)")
-    mem.add_argument("action", choices=["add", "recall", "list", "clear"])
+    mem = sub.add_parser("memory", help="AG's layered memory (add/recall/list/clear/stats/reflect)")
+    mem.add_argument("action", choices=["add", "recall", "list", "clear", "stats", "reflect"])
     mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
     mem.add_argument("-k", type=int, default=5, help="recall: max items")
     mem.set_defaults(func=cmd_memory)
