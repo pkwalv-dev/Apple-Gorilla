@@ -1,6 +1,6 @@
 """Command-line interface for Apple-Gorilla.
 
-  ag run "<prompt>"      optimize -> execute -> critique -> iterate
+  ag run "<prompt>"      execute with context, tools, and memory
   ag evolve              propose + test-gate a self-improvement (auto-rollback)
   ag versions            list source snapshots
   ag rollback <id>       restore a snapshot
@@ -82,11 +82,9 @@ def cmd_run(args) -> int:
     print(rec.answer)
     if args.verbose:
         sc = rec.scorecard or {}
-        print(f"\n[meta] iterations={rec.iterations} elapsed={rec.elapsed_s}s "
-              f"dry_run={rec.dry_run}", file=sys.stderr)
-        print(f"[score] overall={sc.get('overall','?')} "
-              f"accuracy={sc.get('accuracy','?')} quality={sc.get('quality','?')} "
-              f"speed={sc.get('speed','?')}", file=sys.stderr)
+        print(f"\n[meta] elapsed={rec.elapsed_s}s dry_run={rec.dry_run}",
+              file=sys.stderr)
+        print(f"[score] speed={sc.get('speed','?')}", file=sys.stderr)
     return 0
 
 
@@ -495,6 +493,43 @@ def cmd_fleet(args) -> int:
     return 0
 
 
+def cmd_lora(args) -> int:
+    cfg = Config.load()
+    from . import lora
+    if args.action == "status":
+        f = lora.feasibility(cfg)
+        print(f"GPU: {f.gpu} · VRAM: {f.vram_gb} GB · CUDA: {f.cuda}")
+        print(f"base model: {cfg.lora_base_model} (4-bit: {cfg.lora_4bit})")
+        print(f"dataset: {lora.dataset_size()} example(s)")
+        if f.missing_deps:
+            print("missing deps: " + ", ".join(f.missing_deps))
+        for n in f.notes:
+            print("  - " + n)
+        print("trainable now: " + ("YES" if f.ok else "no (see notes above)"))
+    elif args.action == "build-data":
+        def trace(ev):
+            if ev.get("stage") == "lora":
+                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+        st = lora.build_dataset(cfg, emit=trace)
+        print(f"dataset: {st.total} example(s) "
+              f"({st.from_memory} from memory, {st.from_teacher} from teacher) -> {st.path}")
+    elif args.action == "train":
+        def trace(ev):
+            if ev.get("stage") == "lora" or ev.get("level") == "error":
+                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+        res = lora.train(cfg, emit=trace)
+        print(res.reason)
+        if res.ok:
+            print(f"adapter: {res.adapter_path}")
+        return 0 if res.ok else 1
+    elif args.action == "list":
+        ads = lora.list_adapters()
+        print(f"{len(ads)} adapter(s):")
+        for a in ads:
+            print(f"  {a['id']} - base={a.get('base','?')} examples={a.get('examples','?')}")
+    return 0
+
+
 def cmd_bundle(args) -> int:
     from . import bundle
     if args.check:
@@ -668,6 +703,10 @@ def build_parser() -> argparse.ArgumentParser:
     fl.add_argument("action", choices=["list", "enable", "disable", "kill", "revive", "clear"])
     fl.add_argument("name", nargs="?", default="", help="agent name (for enable/disable)")
     fl.set_defaults(func=cmd_fleet)
+
+    lo = sub.add_parser("lora", help="LoRA fine-tune a local model (status/build-data/train/list)")
+    lo.add_argument("action", choices=["status", "build-data", "train", "list"])
+    lo.set_defaults(func=cmd_lora)
 
     bn = sub.add_parser("bundle", help="export a portable bundle, or --check portability")
     bn.add_argument("--check", action="store_true", help="audit portability constraints only")

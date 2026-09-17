@@ -4,9 +4,9 @@
 machine, or from your phone/another device on the same network (bind --host
 0.0.0.0). Cross-platform by virtue of being a web page — any OS with a browser.
 
-The UI drives the same pipeline (optimize -> execute -> critique -> iterate) and
+The UI drives the same pipeline (execute with context, tools, and memory) and
 streams a **realtime log** of AG's thought process, tool/app calls, internet usage,
-errors, and the accuracy/quality/speed scorecard as they happen (newline-delimited
+errors, and the measured speed score as they happen (newline-delimited
 JSON over a single streamed response). This IS an inbound server (for YOUR use); it
 is not a data-farming endpoint — bind to localhost unless you deliberately want
 LAN/phone access.
@@ -87,6 +87,7 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <button class="tab" data-pane="fleet" onclick="switchTab('fleet')">&#9670; Fleet <span class="tct" id="tc-fleet"></span></button>
   <button class="tab" data-pane="skills" onclick="switchTab('skills')">&#10022; Skills <span class="tct" id="tc-skills"></span></button>
   <button class="tab" data-pane="evolve" onclick="switchTab('evolve')">&#8635; Evolve</button>
+  <button class="tab" data-pane="lora" onclick="switchTab('lora')">&#9881; LoRA</button>
   <button class="tab" data-pane="bundle" onclick="switchTab('bundle')">&#10697; Bundle</button>
   <button class="tab" data-pane="images" onclick="switchTab('images')">&#9638; Images</button>
 </nav>
@@ -102,18 +103,12 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     <span class="cmd-note">executes a request</span>
     <span class="ctl-right">
       <label class="ctl" title="Stream the model's raw output — including its reasoning (Ollama's &lt;think&gt; blocks) — live as it is generated. Stop ends the response and returns control immediately; a local model may take a moment more to wind down in the background."><input type="checkbox" id="verbose"> show reasoning</label>
-      <label class="ctl" title="Fast = ONE model call (no prompt-engineering, no self-review) — quick and best for iterating. Full = engineer the prompt, then self-critique and revise for higher quality (several calls, much slower). Context (web/profile/memory/history) applies in both.">mode
-        <select id="mode" class="ctl-select" onchange="saveMode()">
-          <option value="fast">fast · 1 call</option>
-          <option value="full">full · review</option>
-        </select>
-      </label>
       <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
         <select id="model" class="ctl-select" onchange="saveModel()">
           <option value="">loading…</option>
         </select>
       </label>
-      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to its default. Independent of the fast/full mode above.">thinking
+      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to its default.">thinking
         <select id="think" class="ctl-select" onchange="saveThink()">
           <option value="auto">auto</option>
           <option value="off">off · fast</option>
@@ -154,14 +149,8 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 </div>
 
 <div id="cards">
-  <div class="card"><div class="n" id="acc">–</div><div class="l">accuracy</div>
-    <div class="bar"><i id="accb"></i></div></div>
-  <div class="card"><div class="n" id="qual">–</div><div class="l">quality</div>
-    <div class="bar"><i id="qualb"></i></div></div>
-  <div class="card"><div class="n" id="spd">–</div><div class="l">speed</div>
+  <div class="card"><div class="n" id="spd">–</div><div class="l">speed (measured)</div>
     <div class="bar"><i id="spdb"></i></div></div>
-  <div class="card"><div class="n" id="ovr">–</div><div class="l">overall</div>
-    <div class="bar"><i id="ovrb"></i></div></div>
 </div>
 
 <h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
@@ -237,6 +226,23 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     </div>
     <table id="tools" class="panel"></table>
     <div id="improveout"></div>
+  </div>
+</div>
+
+<!-- ================= LORA ================= -->
+<div class="tabpane" id="pane-lora">
+  <div class="panel">
+    <p class="lede"><b>LoRA fine-tuning.</b> Weight-level self-improvement of a
+      <b>local</b> model (never Claude — no weight access): QLoRA a small base on a
+      dataset distilled from AG's memory + a Claude teacher set. Needs an NVIDIA GPU and
+      the training extras (<code>requirements-lora.txt</code>); heavy and explicit.</p>
+    <div id="lorastatus" class="emptyrow">loading status…</div>
+    <div class="controls" style="margin-top:6px">
+      <button class="view" onclick="loadLora()">Refresh</button>
+      <button class="cmd" onclick="loraBuild()">Build dataset</button>
+      <button class="cmd" id="loratrain" onclick="loraTrain()">Train adapter</button>
+    </div>
+    <div id="loraout"></div>
   </div>
 </div>
 
@@ -348,10 +354,9 @@ function appendAssistant(){
 /* Makes a snag visible: the stage label shows the current step and the timer
    keeps ticking, so a stall (timer climbing, stage unchanged) is obvious. */
 const STAGE_LABELS={conversation:'reading the conversation',
-  web:'searching the web',optimize:'engineering the prompt',
-  memory:'recalling memory',execute:'generating the answer',
-  reason:'using tools',critique:'reviewing the answer',
-  revise:'revising the answer',score:'scoring the answer'};
+  web:'searching the web',memory:'recalling memory',
+  execute:'generating the answer',reason:'using tools',
+  acquire:'acquiring a skill',score:'scoring speed'};
 function fmtDur(ms){const s=Math.floor(ms/1000);
   return s>=60?(Math.floor(s/60)+':'+String(s%60).padStart(2,'0')):(s+'s');}
 function startActivity(ai){
@@ -434,7 +439,7 @@ async function go(){
   const p=$('p').value.trim(); if(!p)return;
   setRunning(true); $('status').textContent='running…';
   $('log').innerHTML=''; $('cards').style.display='none';
-  ['acc','qual','spd','ovr'].forEach(x=>setCard(x,null));
+  ['spd'].forEach(x=>setCard(x,null));
   // prior turns become AG's working memory (the current prompt is sent separately)
   const hist=CHAT.slice(-20).map(m=>({role:m.role,text:m.text}));
   resetContext(); appendUser(p); const ai=appendAssistant(); startActivity(ai); $('p').value='';
@@ -446,7 +451,7 @@ async function go(){
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
       signal:ctrl.signal,
       body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
-        model:($('model')?$('model').value:''),mode:($('mode')?$('mode').value:''),
+        model:($('model')?$('model').value:''),
         tools:$('tools').checked,code_exec:$('codeexec').checked,
         acquire:$('acquire').checked,autonomy:$('autonomy').value,
         memory:$('memory').checked,
@@ -511,8 +516,7 @@ function handle(ev,ai){
     const entry={role:'ai',text:d.answer||'(no answer)',ctx:ctx,ts:nowStr()};
     CHAT.push(entry); ai._entry=entry; ai._committed=true; saveChat();
     $('chat').scrollTop=$('chat').scrollHeight;
-    $('status').textContent='done · '+(d.iterations||0)+' iter · '+(d.elapsed_s||0)+'s'
-      +(d.dry_run?' · dry-run':'');
+    $('status').textContent='done · '+(d.elapsed_s||0)+'s'+(d.dry_run?' · dry-run':'');
     checkUpdate();   // one on-demand check AFTER the run — never a background poll
     return;
   }
@@ -520,9 +524,7 @@ function handle(ev,ai){
   applyContext(ev,ai);
   addEv(ev);
   const sc=(ev.data&&ev.data.scorecard);
-  if(sc){ $('cards').style.display='flex';
-    setCard('acc',sc.accuracy); setCard('qual',sc.quality);
-    setCard('spd',sc.speed); setCard('ovr',sc.overall); }
+  if(sc && sc.speed!=null){ $('cards').style.display='grid'; setCard('spd',sc.speed); }
 }
 
 /* ---- where & how AG is running right now ------------------------------ */
@@ -763,9 +765,6 @@ function restoreCtl(){ try{
   if($('memory')) $('memory').checked = g('ag_memory','1')==='1';
 }catch(e){} syncTools(); }
 function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
-function saveMode(){ try{ localStorage.setItem('ag_mode',$('mode').value); }catch(e){} }
-function restoreMode(){ try{ const v=localStorage.getItem('ag_mode');
-  if(v&&$('mode')) $('mode').value=v; }catch(e){} }
 async function loadModels(){
   const sel=$('model'); if(!sel) return;
   try{
@@ -859,6 +858,51 @@ function switchTab(name){
   try{ localStorage.setItem('ag_tab',name); }catch(e){}
   if(name==='fleet') loadFleet();
   if(name==='skills') loadSkills();
+  if(name==='lora') loadLora();
+}
+/* ---- lora ------------------------------------------------------------- */
+let LORA_POLL=null;
+async function loadLora(){
+  try{
+    const d=await (await fetch('/lora/status')).json();
+    const f=d.feasibility||{};
+    const tr=d.training||{};
+    $('lorastatus').className='kv';
+    $('lorastatus').innerHTML=
+      'GPU <b>'+escapeHtml(f.gpu||'?')+'</b> · VRAM <b>'+(f.vram_gb==null?'?':f.vram_gb+' GB')
+      +'</b> · CUDA <b>'+(f.cuda?'yes':'no')+'</b><br>base <b>'+escapeHtml(d.base||'?')
+      +'</b> · dataset <b>'+(d.dataset_size||0)+'</b> example(s) · adapters <b>'+(d.adapters||[]).length+'</b>'
+      +'<br>trainable now: <b>'+(f.ok?'YES':'no')+'</b>'
+      +(f.missing_deps&&f.missing_deps.length?' · missing: '+escapeHtml(f.missing_deps.join(', ')):'')
+      +((f.notes||[]).map(n=>'<br>&nbsp;• '+escapeHtml(n)).join(''))
+      +(tr.running?'<br><b>training in progress…</b>':(tr.last?'<br>last: '+escapeHtml(tr.last):''));
+    $('loratrain').disabled=!!tr.running;
+    const ad=(d.adapters||[]);
+    $('loraout').innerHTML = ad.length
+      ? ad.map(a=>'<div class="skitem"><span class="sknm">'+escapeHtml(a.id)+'</span>'
+          +'<span class="skds">base '+escapeHtml(a.base||'?')+' · '+(a.examples||'?')+' examples</span></div>').join('')
+      : '<div class="emptyrow">No adapters yet. Build a dataset, then train.</div>';
+    if(tr.running && !LORA_POLL){ LORA_POLL=setInterval(loadLora,4000); }
+    if(!tr.running && LORA_POLL){ clearInterval(LORA_POLL); LORA_POLL=null; }
+  }catch(e){ $('lorastatus').textContent='could not load LoRA status: '+e; }
+}
+async function loraBuild(){
+  $('loraout').innerHTML='<div class="result">building dataset (memory + teacher — the teacher set calls the model)…</div>';
+  try{
+    const d=await (await fetch('/lora/build',{method:'POST'})).json();
+    $('loraout').innerHTML='<div class="result ok">dataset: '+(d.total||0)+' example(s) ('
+      +(d.from_memory||0)+' from memory, '+(d.from_teacher||0)+' from teacher)</div>';
+    loadLora();
+  }catch(e){ $('loraout').innerHTML='<div class="result bad">build failed: '+escapeHtml(''+e)+'</div>'; }
+}
+async function loraTrain(){
+  if(!confirm('Start a QLoRA training run? This is heavy and can take a long time.')) return;
+  try{
+    const d=await (await fetch('/lora/train',{method:'POST'})).json();
+    if(!d.started){ $('loraout').innerHTML='<div class="result bad">'+escapeHtml(d.reason||'could not start')+'</div>'; }
+    else{ $('loraout').innerHTML='<div class="result">training started — this runs in the background; status updates above.</div>'; }
+    loadLora();
+  }catch(e){ $('loraout').innerHTML='<div class="result bad">train failed to start: '+escapeHtml(''+e)+'</div>'; }
 }
 function restoreTab(){ let t='chat'; try{ t=localStorage.getItem('ag_tab')||'chat'; }catch(e){}
   if(!document.getElementById('pane-'+t)) t='chat'; switchTab(t); }
@@ -965,7 +1009,7 @@ function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
   if($('evogithub')) $('evogithub').checked=(v==='1'); }catch(e){}
   if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
 
-restoreThink(); restoreMode(); restoreCtl(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+restoreThink(); restoreCtl(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
 </script></body></html>"""
 
 def _render_page() -> str:
@@ -1033,6 +1077,10 @@ class _Handler(BaseHTTPRequestHandler):
     # that a cycle is in progress and lets us reject overlapping evolves.
     _evolve_lock = threading.Lock()
     _evolving = threading.Event()
+    # LoRA training runs in a background thread (it is long); this tracks its state so
+    # the GUI can show progress and reject overlapping runs.
+    _lora_train = {"running": False, "last": ""}
+    _lora_lock = threading.Lock()
     # Cancellation registry: run_id -> True when the viewer asked to stop that run.
     # Checked every streamed chunk so Stop halts generation promptly and reliably,
     # rather than relying on a TCP write eventually failing.
@@ -1107,6 +1155,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "portable": all(c.ok for c in checks),
                 "checks": [c.as_dict() for c in checks]}), "application/json")
+        elif self.path == "/lora/status":
+            from . import lora
+            self._send(200, json.dumps({
+                "feasibility": lora.feasibility(self.cfg).as_dict(),
+                "base": self.cfg.lora_base_model,
+                "dataset_size": lora.dataset_size(),
+                "adapters": lora.list_adapters(),
+                "training": dict(_Handler._lora_train)}), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -1141,6 +1197,37 @@ class _Handler(BaseHTTPRequestHandler):
             "evolving": self._evolving.is_set(),
             "can_evolve_while_running": True,
         }
+
+    def _start_lora_train(self):
+        """Kick off a QLoRA run in a background thread (it is long-running). Refuses to
+        start a second concurrent run; result is reported via _lora_train for the GUI."""
+        from . import lora
+        with _Handler._lora_lock:
+            if _Handler._lora_train.get("running"):
+                self._send(200, json.dumps({"started": False,
+                           "reason": "a training run is already in progress"}),
+                           "application/json")
+                return
+            feas = lora.feasibility(self.cfg)
+            if not feas.ok:
+                reason = "not trainable here: " + (
+                    ", ".join(feas.missing_deps) if feas.missing_deps
+                    else "no CUDA GPU" if not feas.cuda else "; ".join(feas.notes))
+                self._send(200, json.dumps({"started": False, "reason": reason}),
+                           "application/json")
+                return
+            _Handler._lora_train = {"running": True, "last": ""}
+        cfg = self.cfg
+
+        def _worker():
+            try:
+                res = lora.train(cfg)
+                _Handler._lora_train = {"running": False, "last": res.reason}
+            except Exception as e:  # pragma: no cover - defensive
+                _Handler._lora_train = {"running": False, "last": f"error: {e}"}
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._send(200, json.dumps({"started": True}), "application/json")
 
     def _handle_control(self, path: str, payload: dict):
         """Fleet / skills / bundle control-plane endpoints (non-streaming JSON)."""
@@ -1199,13 +1286,24 @@ class _Handler(BaseHTTPRequestHandler):
                     "bytes": dest.stat().st_size if dest.exists() else 0}),
                     "application/json")
                 return
+            if path == "/lora/build":
+                from . import lora
+                st = lora.build_dataset(self.cfg)
+                self._send(200, json.dumps({
+                    "total": st.total, "from_memory": st.from_memory,
+                    "from_teacher": st.from_teacher}), "application/json")
+                return
+            if path == "/lora/train":
+                self._start_lora_train()
+                return
         except Exception as e:
             self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
             return
         self._send(404, "not found", "text/plain")
 
     def do_POST(self):
-        if self.path in ("/fleet/act", "/skills/act", "/skills/acquire", "/bundle/export"):
+        if self.path in ("/fleet/act", "/skills/act", "/skills/acquire", "/bundle/export",
+                         "/lora/build", "/lora/train"):
             try:
                 n = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
@@ -1352,7 +1450,6 @@ class _Handler(BaseHTTPRequestHandler):
         if think not in ("off", "auto", "on"):
             think = "auto"
         model = str(payload.get("model", "")).strip()[:100]
-        mode = str(payload.get("mode", "")).lower().strip()
         verbose = bool(payload.get("verbose", False))
         run_id = str(payload.get("run_id", ""))[:64]
         # Per-run capability toggles from the chat controls (default to the config's
@@ -1364,7 +1461,7 @@ class _Handler(BaseHTTPRequestHandler):
         if autonomy not in ("ask", "auto"):
             autonomy = "ask"
         memory = payload.get("memory", None)
-        self._stream_run(prompt, want_web, history, think, model, mode, verbose, run_id,
+        self._stream_run(prompt, want_web, history, think, model, verbose, run_id,
                          tools=tools, code_exec=code_exec, acquire=acquire,
                          autonomy=autonomy, memory=memory)
 
@@ -1604,7 +1701,7 @@ class _Handler(BaseHTTPRequestHandler):
         return {}
 
     def _stream_run(self, prompt: str, want_web, history=None, think="auto", model="",
-                    mode="", verbose=False, run_id="", *, tools=None, code_exec=False,
+                    verbose=False, run_id="", *, tools=None, code_exec=False,
                     acquire=False, autonomy="ask", memory=None):
         """Run the pipeline, streaming each stage event as one NDJSON line.
 
@@ -1635,8 +1732,6 @@ class _Handler(BaseHTTPRequestHandler):
             overrides["use_memory"] = bool(memory)
             overrides["auto_memory"] = bool(memory)
         cfg = dataclasses.replace(self.cfg, **overrides)
-        # Pipeline shape: explicit request mode wins, else the config default.
-        fast = (mode == "fast") if mode in ("fast", "full") else None
         web_eff = cfg.allow_web if want_web is None else bool(want_web)
         broker = _build_broker(cfg, web=web_eff)
 
@@ -1667,12 +1762,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,
-                               emit=write, history=history, fast=fast,
+                               emit=write, history=history,
                                on_delta=on_delta, cancel=canceller)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
-                "iterations": rec.iterations, "elapsed_s": rec.elapsed_s,
-                "dry_run": rec.dry_run}})
+                "elapsed_s": rec.elapsed_s, "dry_run": rec.dry_run}})
             # Fill long-term memory AFTER the answer is on screen, so it never delays
             # the response. Best-effort; a "saved N fact(s)" event streams if it stores.
             try:
@@ -1790,8 +1884,7 @@ def run_prompt(cfg: Config, prompt: str) -> tuple[str, str]:
     broker = _build_broker(cfg)
     rec = run_pipeline(client, cfg, prompt, web=cfg.allow_web, broker=broker)
     sc = rec.scorecard or {}
-    meta = (f"iterations={rec.iterations} dry_run={rec.dry_run} "
-            f"overall={sc.get('overall', '?')}")
+    meta = f"dry_run={rec.dry_run} speed={sc.get('speed', '?')}"
     return rec.answer, meta
 
 def _lan_ip() -> str:
