@@ -209,6 +209,12 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     tin = tout = 0
 
     for _ in range(max(1, max_steps)):
+        try:
+            from . import fleet
+            if fleet.kill_active():
+                return ReasonResult("(halted: fleet kill switch engaged)", steps, tin, tout)
+        except Exception:
+            pass
         res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg,
                               **dkw)
         tin += res.input_tokens

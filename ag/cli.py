@@ -472,6 +472,43 @@ def cmd_acquire(args) -> int:
     return 0 if res.acquired else 1
 
 
+def cmd_fleet(args) -> int:
+    from . import fleet
+    if args.action == "list":
+        agents = fleet.list_agents()
+        killed = " (KILL SWITCH ENGAGED)" if fleet.kill_active() else ""
+        print(f"{len(agents)} agent(s){killed}:")
+        for a in agents:
+            print(f"  {a.agent} [{a.status}] role={a.role} parent={a.parent} "
+                  f"depth={a.depth} skills={a.skills_acquired}")
+    elif args.action in ("disable", "enable"):
+        ok = fleet.set_status(args.name or "", "disabled" if args.action == "disable" else "active")
+        print("done" if ok else f"agent not found: {args.name}")
+    elif args.action == "kill":
+        fleet.engage_kill()
+        print("kill switch ENGAGED — all spawning halted, running loops will stop")
+    elif args.action == "revive":
+        fleet.clear_kill()
+        print("kill switch cleared — spawning allowed again")
+    elif args.action == "clear":
+        print(f"cleared {fleet.clear()} agent record(s)")
+    return 0
+
+
+def cmd_bundle(args) -> int:
+    from . import bundle
+    if args.check:
+        checks = bundle.check()
+        allok = all(c.ok for c in checks)
+        for c in checks:
+            print(f"  [{'OK ' if c.ok else 'XX '}] {c.name}" + (f" - {c.detail}" if c.detail else ""))
+        print("portable" if allok else "NOT fully portable — see failures above")
+        return 0 if allok else 1
+    dest = bundle.export(args.out or None)
+    print(f"bundle written: {dest}")
+    return 0
+
+
 def cmd_update(args) -> int:
     from . import update
     cfg = Config.load()
@@ -626,6 +663,16 @@ def build_parser() -> argparse.ArgumentParser:
     acq = sub.add_parser("acquire", help="author + test + register a new skill on demand")
     acq.add_argument("spec", help="the capability to acquire, in plain language")
     acq.set_defaults(func=cmd_acquire)
+
+    fl = sub.add_parser("fleet", help="agent swarm control (list/enable/disable/kill/revive/clear)")
+    fl.add_argument("action", choices=["list", "enable", "disable", "kill", "revive", "clear"])
+    fl.add_argument("name", nargs="?", default="", help="agent name (for enable/disable)")
+    fl.set_defaults(func=cmd_fleet)
+
+    bn = sub.add_parser("bundle", help="export a portable bundle, or --check portability")
+    bn.add_argument("--check", action="store_true", help="audit portability constraints only")
+    bn.add_argument("--out", default="", help="output .zip path (default: alongside the repo)")
+    bn.set_defaults(func=cmd_bundle)
 
     up = sub.add_parser("update",
                         help="check/apply an Ollama model update (on demand, no polling)")

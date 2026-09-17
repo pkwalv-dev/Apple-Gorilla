@@ -43,12 +43,18 @@ def spawn(client, cfg: Config, broker: PermissionBroker, *, role: str, task: str
           max_tokens: int = 8000, parent_agent: str = "root", depth: int = 0,
           emit=None) -> SubAgentResult:
     broker.require("spawn_agent")
-    from . import reason
+    from . import fleet, reason
+
+    # Master kill switch: refuse to spawn if the operator has engaged it.
+    if fleet.kill_active():
+        return SubAgentResult(role=role, task=task,
+                              output="(fleet kill switch engaged — spawning halted)")
 
     child_depth = depth + 1
     max_depth = int(getattr(cfg, "max_subagent_depth", 2) or 2)
     child_agent = f"{parent_agent}.{_slug(role)}-{int(time.time() * 1000) % 100000}"
     child_broker = _child_broker(broker, can_spawn=child_depth < max_depth)
+    fleet.record_spawn(child_agent, role=role, parent=parent_agent, depth=child_depth)
 
     system = (
         f"You are a focused sub-agent with the single role: {role}. "
@@ -61,19 +67,26 @@ def spawn(client, cfg: Config, broker: PermissionBroker, *, role: str, task: str
 
     # Heredity: promote skills the child authored up to the shared tier so the parent
     # and siblings inherit the new capability.
-    _promote_new_skills(child_agent)
+    n_promoted = _promote_new_skills(child_agent)
+    from . import fleet
+    if n_promoted:
+        fleet.note_skill_acquired(child_agent, n_promoted)
+    fleet.set_status(child_agent, "done")
     return SubAgentResult(role=role, task=task, output=res.answer, agent=child_agent)
 
 
-def _promote_new_skills(child_agent: str) -> None:
+def _promote_new_skills(child_agent: str) -> int:
+    n = 0
     try:
         from . import skills
         reg = skills.get_registry(child_agent)
         for sk in reg.list(include_disabled=False):
             if sk.agent == child_agent:            # authored by this child
                 reg.promote(sk.name, to=skills.SHARED_AGENT)
+                n += 1
     except Exception:
         pass
+    return n
 
 
 def spawn_many(client, cfg: Config, broker: PermissionBroker,

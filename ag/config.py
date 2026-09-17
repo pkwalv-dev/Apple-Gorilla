@@ -118,6 +118,13 @@ class Config:
     github_allowlist: List[str] = field(default_factory=lambda: [
         "pytorch/pytorch", "huggingface/transformers", "ollama/ollama",
     ])
+    # Vetted GitHub as evolutionary options: when evolving, inject these reference
+    # files (adapted from proven repos) into the proposer's briefing so a self-edit can
+    # draw on battle-tested implementations. Each entry: {repo, path, note}. Reference
+    # data only — evolve still edits ONLY evolvable_paths and passes both gates. Repos
+    # must be on github_allowlist. Off unless refs are configured.
+    evolve_use_github: bool = False
+    evolve_github_refs: List[dict] = field(default_factory=list)
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory
