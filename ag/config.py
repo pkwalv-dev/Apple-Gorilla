@@ -106,7 +106,22 @@ class Config:
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory
-    max_memories: int = 200                    # cap on retained memories
+    max_memories: int = 200                    # cap on retained memories (legacy/back-compat)
+    # --- Layered memory system (ag/memory/) ---------------------------------
+    # Recall is by *meaning*: memories carry embeddings and recall blends semantic
+    # similarity, keyword overlap, recency, and importance. Model- and engine-agnostic.
+    memory_embed_backend: str = "auto"          # auto | ollama | hash | none
+    memory_embed_model: str = "nomic-embed-text"  # local Ollama embedding model (keyless)
+    memory_weights: dict = field(default_factory=lambda: {  # recall blend
+        "semantic": 0.55, "keyword": 0.2, "recency": 0.15, "importance": 0.1,
+    })
+    memory_recency_halflife_days: float = 30.0  # recency decay half-life
+    memory_merge_threshold: float = 0.92        # cosine >= this => near-duplicate, merged
+    memory_caps: dict = field(default_factory=lambda: {  # per-layer retention caps
+        "episodic": 2000, "semantic": 1000, "procedural": 500,
+    })
+    memory_reflect: bool = True                 # distill episodes -> facts/procedures
+    memory_reflect_every: int = 10              # run reflection every N auto-memory writes
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main

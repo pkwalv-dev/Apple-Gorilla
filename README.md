@@ -115,10 +115,20 @@ python -m ag doctor            # environment / readiness check
 Plain `run` optimizes → executes → critiques → iterates a *text* answer. Two switches
 let AG actually **compute and act**, so it is useful even with the internet off:
 
-- **Persistent memory** (`use_memory`, on by default). AG recalls durable facts into
-  context each run, so sessions aren't cold-started. Manage it with `ag memory add/recall/
-  list/clear`; the reasoning loop can also `remember`/`recall` mid-task. Stored under
-  `state/memory/` (git-ignored, capped at `max_memories`).
+- **Layered memory that learns** (`use_memory`, on by default). AG's memory is a
+  four-layer system, not a flat note list: **episodic** (what happened each run),
+  **semantic** (durable facts distilled from experience), and **procedural** (reusable
+  strategies that worked). Recall is by **meaning** — each memory carries an embedding
+  (local, keyless `nomic-embed-text` via Ollama; a stdlib hashing fallback when Ollama
+  is absent) and recall blends semantic similarity, keyword overlap, recency, and
+  importance, then expands along **graph links** between related memories. A
+  **reflection loop** periodically distills recent episodes into new facts and
+  procedures — this is what turns remembering into learning. Memory is **namespaced per
+  agent** with lineage inheritance (a spawned AG inherits its parent's + a shared tier
+  and can `promote` discoveries upward), and everything sits behind a `MemoryStore`
+  interface so the engine can grow from JSONL to a vector/graph DB with no changes to
+  AG. Manage it with `ag memory add/recall/list/clear/stats/reflect`; stored under
+  `state/memory/<agent>/` (git-ignored, per-layer caps in `config.json → memory_caps`).
 - **Local tools + reasoning loop** (`--tools`, or `allow_local_tools`). AG runs a bounded
   reason → act → observe loop (`max_tool_steps`) and can call: `calc` (exact arithmetic,
   fixing the small-model math weakness), `read_file`/`list_dir` (gated `filesystem_read`),
@@ -382,6 +392,12 @@ that require an explicit grant *and* `allow_external_tools: true`. AG has broad
 ag/
   config.py        paths + Config (config.json)
   model.py         Claude client + offline dry-run stub
+  memory/          layered memory system (episodic/semantic/procedural)
+    types.py       Memory record + layer taxonomy
+    embed.py       meaning-based embeddings (Ollama + stdlib fallback) [interface]
+    store.py       MemoryStore interface + JSONL engine (per-agent, per-layer)
+    manager.py     hybrid recall, graph links, namespaces/lineage
+    reflect.py     the learning loop: episodes -> facts + procedures
   prompts.py       meta-prompts   [evolvable]
   profile.py       loads your principles
   pipeline.py      optimize -> execute -> critique -> iterate

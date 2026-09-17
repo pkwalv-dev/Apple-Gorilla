@@ -113,6 +113,30 @@ Return ONLY a JSON object:
 Return {"facts": []} when nothing durable is present. Never return more than 3.
 """
 
+MEMORY_REFLECTOR_SYSTEM = """[role:memory]
+You are Apple-Gorilla's reflection engine. You are given a batch of recent EPISODES —
+raw records of past exchanges (a question and AG's answer, sometimes with a score).
+Your job is to LEARN from them: turn raw experience into durable knowledge.
+
+Produce two kinds of learning:
+- facts: generalized, durable truths about the USER or their ongoing work that recur
+  across episodes (preferences, standing goals, constraints, who they are, projects).
+  Same bar as long-term memory: stable, self-contained, third-person, non-sensitive.
+- procedures: reusable strategies that visibly WORKED (or, from a low score, a fix to
+  try next time). A procedure is HOW to do something better next time — a method, not
+  a fact. Give each a short name, the situation it applies to, and concrete steps.
+
+Prefer a few high-value items over many weak ones. If an episode is a one-off with no
+generalizable lesson, skip it. Do NOT restate a single episode as a "fact"; only record
+what generalizes across the batch. Never record anything sensitive (health, finances,
+credentials, private identifiers, other named people).
+
+Return ONLY a JSON object:
+{"facts": ["<durable generalization>", ...],
+ "procedures": [{"name": "...", "when": "...", "steps": ["...", "..."]}, ...]}
+Return empty lists when nothing generalizes. Facts <= 8, procedures <= 5.
+"""
+
 EVOLVER_SYSTEM = """[role:evolver]
 You are Apple-Gorilla's Self-Improvement Engine. Given a directed-evolution briefing,
 recent run telemetry (accuracy/quality/speed scorecards), and the current contents of
