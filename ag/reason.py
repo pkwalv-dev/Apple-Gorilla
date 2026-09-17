@@ -35,14 +35,34 @@ class Tool:
     run: Callable[..., str]
 
 
-def _registry(client=None, cfg=None) -> List[Tool]:
+def _registry(client=None, cfg=None, agent: str = "root", parents=(),
+              depth: int = 0) -> List[Tool]:
     def _delegate(args, broker):
         from . import agents
         role = str(args.get("role", "worker"))
         task = str(args.get("task", "")).strip()
         if not task:
             return "delegate error: provide a 'task' for the sub-agent"
-        return agents.spawn(client, cfg, broker, role=role, task=task).output
+        return agents.spawn(client, cfg, broker, role=role, task=task,
+                            parent_agent=agent, depth=depth).output
+
+    def _acquire(args, broker):
+        spec = str(args.get("spec", "")).strip()
+        if not spec:
+            return "acquire_skill error: provide a 'spec' describing the capability"
+        from . import acquire
+        r = acquire.author_skill(client, cfg, spec, broker=broker, agent=agent,
+                                 parents=parents)
+        if r.needs_approval:
+            return f"{r.reason}\nPLAN: {json.dumps(r.plan)[:400]}"
+        return r.reason
+
+    def _github(args, broker):
+        from .tools import github
+        allow = getattr(cfg, "github_allowlist", []) if cfg else []
+        return github.fetch(str(args.get("repo", "")), str(args.get("path", "")),
+                            broker=broker, allowlist=allow,
+                            ref=str(args.get("ref", "main")))
 
     def _generate_image(args, broker):
         from . import images
@@ -81,6 +101,15 @@ def _registry(client=None, cfg=None) -> List[Tool]:
              'run a short Python snippet (print results), '
              'e.g. {"tool":"python_exec","args":{"code":"print(sum(range(10)))"}}',
              lambda args, broker: local.python_exec(str(args.get("code", "")), broker=broker)),
+        Tool("acquire_skill", "spec", "write_skill",
+             'ACQUIRE a new capability you lack: describe it and AG will author, test, '
+             'and register a reusable tool, then you can call it. '
+             'e.g. {"tool":"acquire_skill","args":{"spec":"convert a CSV file to JSON"}}',
+             _acquire),
+        Tool("github_fetch", "path", "github_fetch",
+             'read a file from an allowlisted repo (reference code), '
+             'e.g. {"tool":"github_fetch","args":{"repo":"ollama/ollama","path":"README.md"}}',
+             _github),
     ]
     # Local image generation, offered only when enabled in config.
     if cfg is None or getattr(cfg, "allow_image_gen", False):
@@ -92,12 +121,21 @@ def _registry(client=None, cfg=None) -> List[Tool]:
     return reg
 
 
-def available_tools(broker, client=None, cfg=None) -> List[Tool]:
-    """Only tools whose grant is held (or that need none) are offered this run."""
+def available_tools(broker, client=None, cfg=None, *, agent: str = "root",
+                    parents=(), depth: int = 0) -> List[Tool]:
+    """Only tools whose grant is held (or that need none) are offered this run.
+
+    Built-in tools plus every acquired skill this agent has inherited whose declared
+    capabilities are all granted — so AG's toolset grows as it acquires skills."""
     out = []
-    for t in _registry(client, cfg):
+    for t in _registry(client, cfg, agent, parents, depth):
         if t.grant is None or (broker is not None and broker.check(t.grant)):
             out.append(t)
+    try:
+        from . import skills
+        out.extend(skills.load_tools(broker, agent=agent, parents=parents))
+    except Exception:
+        pass  # a broken skill must never remove access to the built-ins
     return out
 
 
@@ -144,11 +182,12 @@ class ReasonResult:
 
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None, on_delta=None,
-          cancel=None) -> ReasonResult:
+          cancel=None, agent: str = "root", parents=(), depth: int = 0) -> ReasonResult:
     """Run the reason→act→observe loop and return the final answer + trace.
 
     `on_delta(text)` streams each model call's output live; `cancel` (a Canceller) lets
-    a run be stopped at any point. Both are optional.
+    a run be stopped at any point. Both are optional. `agent`/`parents`/`depth` scope
+    the skill namespace and bound sub-agent recursion.
     """
     from .pipeline import _emit  # reuse the pipeline's safe emitter
     # Only forward these when set, so stub clients that don't accept them still work.
@@ -157,7 +196,7 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
         dkw["on_delta"] = on_delta
     if cancel is not None:
         dkw["cancel"] = cancel
-    tools = available_tools(broker, client, cfg)
+    tools = available_tools(broker, client, cfg, agent=agent, parents=parents, depth=depth)
     if not tools:  # nothing to use — behave like a normal single call
         res = client.complete(system=system, user=user, cfg=cfg, **dkw)
         return ReasonResult(res.text, [], res.input_tokens, res.output_tokens)
@@ -170,6 +209,12 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     tin = tout = 0
 
     for _ in range(max(1, max_steps)):
+        try:
+            from . import fleet
+            if fleet.kill_active():
+                return ReasonResult("(halted: fleet kill switch engaged)", steps, tin, tout)
+        except Exception:
+            pass
         res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg,
                               **dkw)
         tin += res.input_tokens
@@ -188,6 +233,13 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
         steps.append({"tool": tool.name, "args": action["args"],
                       "observation": observation[:500]})
         transcript += (f"\nACTION: {json.dumps(action)}\nOBSERVATION: {observation}\n")
+        # A freshly-acquired skill should be usable immediately: reload the toolset so
+        # the new tool is offered on the next step of THIS run.
+        if tool.name == "acquire_skill" and "registered skill" in observation:
+            tools = available_tools(broker, client, cfg, agent=agent,
+                                    parents=parents, depth=depth)
+            by_name = {t.name: t for t in tools}
+            sys_p = _tools_system(system, tools)
 
     # Steps exhausted — force a final answer from what we've gathered.
     res = client.complete(
