@@ -107,7 +107,17 @@ table.hist td.rat{color:#8b949e;font-style:italic}
           <option value="on">on</option>
         </select>
       </label>
-      <label class="ctl"><input type="checkbox" id="web" checked> use internet</label>
+      <label class="ctl" title="Grant outbound internet for this run: AG may search the web and fetch pages, injecting them as untrusted reference data. Off = no network access, pure reasoning + local tools only."><input type="checkbox" id="web" checked> internet</label>
+      <label class="ctl" title="Enable the reason→act→observe loop: AG can call tools (exact-math calc, read local files, recall/save memory, delegate to a sub-agent) before answering. Off = a single model call with no tool use."><input type="checkbox" id="tools" checked onchange="syncTools()"> tools</label>
+      <label class="ctl" title="DANGEROUS: let the python_exec tool run real Python in a subprocess on this machine. Requires 'tools'. Off by default — only enable for prompts you trust."><input type="checkbox" id="codeexec" onchange="saveCtl()"> run code</label>
+      <label class="ctl" title="Self-extend: if AG lacks a capability this prompt needs, it may AUTHOR a new tested skill (and install its Python deps / fetch allowlisted code), then use it. Requires 'tools'. New skills persist and are reused."><input type="checkbox" id="acquire" onchange="syncTools()"> self-extend</label>
+      <label class="ctl" id="autonwrap" title="How self-extend proceeds. ask = plan and wait for your approval before installing/running anything (surfaced in the live trace). auto = complete end-to-end within this run's grants.">acquire
+        <select id="autonomy" class="ctl-select" onchange="saveCtl()">
+          <option value="ask">ask first</option>
+          <option value="auto">auto</option>
+        </select>
+      </label>
+      <label class="ctl" title="Recall durable facts from long-term memory into context, and distill new durable facts after the answer. Off = this run neither reads nor writes long-term memory."><input type="checkbox" id="memory" checked onchange="saveCtl()"> memory</label>
     </span>
   </div>
 </div>
@@ -120,6 +130,7 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <span class="chip" id="chip-profile">Profile</span>
   <span class="chip" id="chip-memory">Memory <b class="cc" id="cc-memory"></b></span>
   <span class="chip" id="chip-web">Web <b class="cc" id="cc-web"></b></span>
+  <span class="chip" id="chip-skills" title="Lights up when AG uses tools or acquires a new skill this run">Skills <b class="cc" id="cc-skills"></b></span>
 </div>
 <div class="panel chatwrap">
   <div class="chat-toolbar">
@@ -283,11 +294,12 @@ function setStage(ai,ev){
 function stopActivity(ai){ if(ai&&ai._timer){clearInterval(ai._timer); ai._timer=null;} }
 
 /* ---- context-in-use indicator ---------------------------------------- */
-let curCtx={history:0,profile:false,memory:[],saved:[],web:0};
+let curCtx={history:0,profile:false,memory:[],saved:[],web:0,skills:0};
 function resetContext(){
-  curCtx={history:0,profile:false,memory:[],saved:[],web:0};
-  ['history','profile','memory','web'].forEach(n=>$('chip-'+n).classList.remove('active'));
+  curCtx={history:0,profile:false,memory:[],saved:[],web:0,skills:0};
+  ['history','profile','memory','web','skills'].forEach(n=>$('chip-'+n).classList.remove('active'));
   $('cc-history').textContent=''; $('cc-memory').textContent=''; $('cc-web').textContent='';
+  $('cc-skills').textContent='';
 }
 function applyContext(ev,ai){
   if(ev.stage==='conversation'){
@@ -320,6 +332,11 @@ function applyContext(ev,ai){
   if(ev.stage==='web'){
     let n=(ev.data&&ev.data.count); if(n==null){ const m=/(\\d+)\\s+result/.exec(ev.msg||''); n=m?+m[1]:null; }
     if(n!=null){ curCtx.web=n; $('chip-web').classList.add('active'); $('cc-web').textContent=n||''; }
+  }
+  // 'reason' = a tool was used; 'acquire' = a skill was authored/registered this run.
+  if(ev.stage==='reason' || ev.stage==='acquire'){
+    curCtx.skills++; $('chip-skills').classList.add('active');
+    $('cc-skills').textContent=curCtx.skills;
   }
 }
 
@@ -356,6 +373,9 @@ async function go(){
       signal:ctrl.signal,
       body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
         model:($('model')?$('model').value:''),mode:($('mode')?$('mode').value:''),
+        tools:$('tools').checked,code_exec:$('codeexec').checked,
+        acquire:$('acquire').checked,autonomy:$('autonomy').value,
+        memory:$('memory').checked,
         verbose:verbose,run_id:runId})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
@@ -642,6 +662,32 @@ async function loadTools(){
 function saveThink(){ try{ localStorage.setItem('ag_think',$('think').value); }catch(e){} }
 function restoreThink(){ try{ const v=localStorage.getItem('ag_think');
   if(v&&$('think')) $('think').value=v; }catch(e){} }
+/* ---- tools / self-extend / memory toggles ----------------------------- */
+function saveCtl(){ try{
+  localStorage.setItem('ag_tools',$('tools').checked?'1':'0');
+  localStorage.setItem('ag_codeexec',$('codeexec').checked?'1':'0');
+  localStorage.setItem('ag_acquire',$('acquire').checked?'1':'0');
+  localStorage.setItem('ag_autonomy',$('autonomy').value);
+  localStorage.setItem('ag_memory',$('memory').checked?'1':'0');
+}catch(e){} }
+function syncTools(){
+  // 'run code' and 'self-extend' both require the tool loop; disable them when tools
+  // is off so the controls can never claim an effect they won't have.
+  const on=$('tools').checked;
+  $('codeexec').disabled=!on; $('acquire').disabled=!on;
+  if(!on){ $('codeexec').checked=false; $('acquire').checked=false; }
+  $('autonomy').disabled=!(on&&$('acquire').checked);
+  $('autonwrap').style.opacity=$('autonomy').disabled?'.5':'1';
+  saveCtl();
+}
+function restoreCtl(){ try{
+  const g=(k,d)=>{ const v=localStorage.getItem(k); return v==null?d:v; };
+  if($('tools')) $('tools').checked = g('ag_tools','1')==='1';
+  if($('codeexec')) $('codeexec').checked = g('ag_codeexec','0')==='1';
+  if($('acquire')) $('acquire').checked = g('ag_acquire','0')==='1';
+  if($('autonomy')) $('autonomy').value = g('ag_autonomy','ask');
+  if($('memory')) $('memory').checked = g('ag_memory','1')==='1';
+}catch(e){} syncTools(); }
 function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
 function saveMode(){ try{ localStorage.setItem('ag_mode',$('mode').value); }catch(e){} }
 function restoreMode(){ try{ const v=localStorage.getItem('ag_mode');
@@ -732,7 +778,7 @@ async function genImage(){
   if(btn) btn.disabled=false;
 }
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
-restoreThink(); restoreMode(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+restoreThink(); restoreMode(); restoreCtl(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
 </script></body></html>"""
 
 def _render_page() -> str:
@@ -778,6 +824,15 @@ def _build_broker(cfg: Config, *, web=None):
         broker.grant("spawn_agent")       # delegate a subtask to a sub-agent
         if getattr(cfg, "allow_code_exec", False):
             broker.grant("code_exec")     # arbitrary Python — opt-in only
+        # Self-extension: author/test/register a new skill, install its deps, fetch
+        # allowlisted code. The acquisition_autonomy gate ("ask") still stops before
+        # install/test unless the run opts into "auto".
+        if getattr(cfg, "allow_acquire", False):
+            broker.grant("write_skill")
+            broker.grant("install_package")
+            broker.grant("github_fetch")
+            if getattr(cfg, "acquisition_autonomy", "ask") == "auto":
+                broker.grant("acquire_auto")
     return broker
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1023,7 +1078,18 @@ class _Handler(BaseHTTPRequestHandler):
         mode = str(payload.get("mode", "")).lower().strip()
         verbose = bool(payload.get("verbose", False))
         run_id = str(payload.get("run_id", ""))[:64]
-        self._stream_run(prompt, want_web, history, think, model, mode, verbose, run_id)
+        # Per-run capability toggles from the chat controls (default to the config's
+        # standing values when a key is absent, so the API stays backward-compatible).
+        tools = payload.get("tools", None)
+        code_exec = bool(payload.get("code_exec", False))
+        acquire = bool(payload.get("acquire", False))
+        autonomy = str(payload.get("autonomy", "ask")).lower()
+        if autonomy not in ("ask", "auto"):
+            autonomy = "ask"
+        memory = payload.get("memory", None)
+        self._stream_run(prompt, want_web, history, think, model, mode, verbose, run_id,
+                         tools=tools, code_exec=code_exec, acquire=acquire,
+                         autonomy=autonomy, memory=memory)
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -1257,7 +1323,8 @@ class _Handler(BaseHTTPRequestHandler):
         return {}
 
     def _stream_run(self, prompt: str, want_web, history=None, think="auto", model="",
-                    mode="", verbose=False, run_id=""):
+                    mode="", verbose=False, run_id="", *, tools=None, code_exec=False,
+                    acquire=False, autonomy="ask", memory=None):
         """Run the pipeline, streaming each stage event as one NDJSON line.
 
         The model's output is always streamed internally via `on_delta`: when
@@ -1272,6 +1339,20 @@ class _Handler(BaseHTTPRequestHandler):
         # Per-request overrides, without mutating the shared handler config.
         overrides = {"think": think}
         overrides.update(self._parse_model_choice(model))
+        # Chat-control toggles map to real config flags for this run only. Each is
+        # honored by the same machinery the CLI uses, so the GUI reflects reality:
+        #  tools    -> the reason→act loop (calc/file/memory/delegate tools)
+        #  run code -> the python_exec tool (only meaningful with tools on)
+        #  self-extend + autonomy -> acquire_skill (author/install/test a new skill)
+        #  memory   -> recall + auto-capture of durable facts
+        if tools is not None:
+            overrides["allow_local_tools"] = bool(tools)
+        overrides["allow_code_exec"] = bool(code_exec) and (tools is None or bool(tools))
+        overrides["allow_acquire"] = bool(acquire) and (tools is None or bool(tools))
+        overrides["acquisition_autonomy"] = autonomy
+        if memory is not None:
+            overrides["use_memory"] = bool(memory)
+            overrides["auto_memory"] = bool(memory)
         cfg = dataclasses.replace(self.cfg, **overrides)
         # Pipeline shape: explicit request mode wins, else the config default.
         fast = (mode == "fast") if mode in ("fast", "full") else None
