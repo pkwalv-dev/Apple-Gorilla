@@ -38,6 +38,15 @@ def _make_broker(cfg, *, web: bool, tools: bool):
         # calc/recall/remember need no grant; these enable file + code tools.
         broker.grant("filesystem_read")
         broker.grant("code_exec")
+        # Directed acquisition: authoring/fetch are safe by default because the
+        # acquisition_autonomy gate stops before install/test in "ask" mode; the
+        # install itself is still separately gated and logged.
+        if getattr(cfg, "allow_acquire", True):
+            broker.grant("write_skill")
+            broker.grant("github_fetch")
+            broker.grant("install_package")
+            if getattr(cfg, "acquisition_autonomy", "ask") == "auto":
+                broker.grant("acquire_auto")
     return broker
 
 
@@ -419,6 +428,50 @@ def cmd_memory(args) -> int:
     return 0
 
 
+def cmd_skills(args) -> int:
+    from . import skills
+    reg = skills.get_registry("root")
+    if args.action == "list":
+        items = reg.list(include_disabled=True)
+        print(f"{len(items)} skill(s):")
+        for s in items:
+            flag = "" if s.enabled else " (disabled)"
+            caps = f" [caps: {', '.join(s.capabilities)}]" if s.capabilities else ""
+            print(f"  {s.name}{flag} — {s.description}{caps}")
+    elif args.action in ("disable", "enable"):
+        ok = reg.set_enabled(args.name or "", args.action == "enable")
+        print("done" if ok else f"skill not found: {args.name}")
+    elif args.action == "remove":
+        print("removed" if reg.remove(args.name or "") else f"skill not found: {args.name}")
+    return 0
+
+
+def cmd_acquire(args) -> int:
+    """Author + gate + register a skill on demand. Running this command is the user's
+    explicit approval for the install/test the acquisition performs."""
+    cfg = Config.load()
+    from .model import make_client
+    from .permissions import PermissionBroker
+    from . import acquire
+    client = make_client(cfg, backend=getattr(args, "backend", None))
+    broker = PermissionBroker(allow_external_tools=True)
+    broker.grant("write_skill")
+    broker.grant("install_package")
+    broker.grant("github_fetch")
+    broker.grant("code_exec")
+
+    def trace(ev):
+        if ev.get("stage") == "acquire" or ev.get("level") == "error":
+            print(f"[{ev.get('stage')}] {ev.get('message', '')}", file=sys.stderr)
+
+    res = acquire.author_skill(client, cfg, args.spec or "", broker=broker,
+                               approve=True, emit=trace)
+    print(res.reason)
+    if res.test_output and not res.acquired:
+        print(res.test_output, file=sys.stderr)
+    return 0 if res.acquired else 1
+
+
 def cmd_update(args) -> int:
     from . import update
     cfg = Config.load()
@@ -564,6 +617,15 @@ def build_parser() -> argparse.ArgumentParser:
     mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
     mem.add_argument("-k", type=int, default=5, help="recall: max items")
     mem.set_defaults(func=cmd_memory)
+
+    sk = sub.add_parser("skills", help="acquired skills (list/enable/disable/remove)")
+    sk.add_argument("action", choices=["list", "enable", "disable", "remove"])
+    sk.add_argument("name", nargs="?", default="", help="skill name (for enable/disable/remove)")
+    sk.set_defaults(func=cmd_skills)
+
+    acq = sub.add_parser("acquire", help="author + test + register a new skill on demand")
+    acq.add_argument("spec", help="the capability to acquire, in plain language")
+    acq.set_defaults(func=cmd_acquire)
 
     up = sub.add_parser("update",
                         help="check/apply an Ollama model update (on demand, no polling)")
