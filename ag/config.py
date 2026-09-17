@@ -103,6 +103,21 @@ class Config:
     # the one local tool that can change the machine, so it is never granted by default.
     allow_code_exec: bool = False
     max_tool_steps: int = 4                    # reason->act->observe loop bound
+    # --- Directed capability acquisition (ag/acquire.py, ag/skills/) ---------
+    # When AG lacks a capability a prompt needs, it can AUTHOR a new skill (a tested
+    # tool), install its Python deps, or pull vetted code — then use it. Acquired
+    # skills persist in a registry and are inherited by sub-agents.
+    allow_acquire: bool = True                  # enable self-extension via skills
+    acquisition_autonomy: str = "ask"           # ask (confirm install/run) | auto
+    skill_test_gate: bool = True                # a new skill must pass its own test
+    skill_full_suite_gate: bool = False         # also run AG's full suite (slow, safest)
+    max_acquire_per_run: int = 3                # cap skills acquired in one run
+    max_subagent_depth: int = 2                 # bound recursive sub-agent spawning
+    # Vetted code sources: PyPI is allowed for installs; GitHub fetches are limited to
+    # these "owner/repo" prefixes (raw file reads only). You control this list.
+    github_allowlist: List[str] = field(default_factory=lambda: [
+        "pytorch/pytorch", "huggingface/transformers", "ollama/ollama",
+    ])
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory

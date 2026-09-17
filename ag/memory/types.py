@@ -19,9 +19,12 @@ tied to a specific LLM or storage engine.
 """
 from __future__ import annotations
 
+import itertools
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+_COUNTER = itertools.count()
 
 
 class MemoryKind:
@@ -39,8 +42,11 @@ class MemoryKind:
 
 
 def new_id() -> str:
-    """A sortable, unique id: timestamp + millisecond tiebreaker."""
-    return time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    """A sortable, unique id: timestamp + a process-wide counter tiebreaker.
+
+    The counter (not just milliseconds) guarantees uniqueness even when many memories
+    are created within the same millisecond in a tight loop."""
+    return time.strftime("%Y%m%d-%H%M%S") + f"-{next(_COUNTER) % 100000:05d}"
 
 
 def now_iso() -> str:
