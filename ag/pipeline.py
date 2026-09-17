@@ -1,7 +1,9 @@
-"""The execution pipeline: optimize -> execute -> critique -> iterate.
+"""The execution pipeline: execute a request with context, tools, and memory.
 
-This is the per-request loop. It takes a raw prompt and returns a refined answer
-plus telemetry that the evolve loop later learns from.
+This is the per-request loop. It takes a raw prompt and returns the answer plus
+telemetry. Quality now comes from the trained model and its memory — not from a
+per-run self-review pass — so the pipeline is a single, fast execute path (context +
+tools + memory + web), scored on measured speed.
 """
 from __future__ import annotations
 
@@ -18,29 +20,16 @@ from .profile import load_principles, load_user_context
 
 
 @dataclass
-class Critique:
-    score: float
-    verdict: str
-    issues: List[str] = field(default_factory=list)
-    fixes: List[str] = field(default_factory=list)
-    notes: str = ""
-    accuracy: float = 0.0     # 0..10; falls back to `score` if critic omits it
-    quality: float = 0.0      # 0..10; falls back to `score` if critic omits it
-
-
-@dataclass
 class RunRecord:
     raw_prompt: str
     engineered_prompt: str
     answer: str
-    iterations: int
-    critiques: List[dict]
     elapsed_s: float
     dry_run: bool
     input_tokens: int = 0
     output_tokens: int = 0
     run_id: str = ""
-    scorecard: dict = field(default_factory=dict)  # accuracy/quality/speed/overall
+    scorecard: dict = field(default_factory=dict)  # speed (measured); accuracy/quality unscored
 
 
 def _emit(emit, stage: str, msg: str, level: str = "info", **data) -> None:
@@ -171,50 +160,6 @@ def optimize(client, cfg: Config, raw_prompt: str,
     return sys_p or prompts.EXECUTOR_SYSTEM_DEFAULT, user_p, res.text
 
 
-def critique(client, cfg: Config, raw_prompt: str, answer: str) -> Critique:
-    principles = load_principles()
-    user = (
-        f"# User's original request\n{raw_prompt}\n\n"
-        f"# Intelligence principles to judge against\n{principles}\n\n"
-        f"# Candidate answer\n{answer}\n"
-    )
-    res = client.complete(system=prompts.CRITIC_SYSTEM, user=user, cfg=cfg,
-                          max_tokens=cfg.meta_output_tokens)
-    data = extract_json(res.text) or {}
-    score = _as_float(data.get("score", 0.0))
-    # Sub-scores are newer; older critics (and the dry-run stub) only emit `score`,
-    # so fall back to it to stay backward compatible.
-    accuracy = _as_float(data.get("accuracy", score))
-    quality = _as_float(data.get("quality", score))
-    return Critique(
-        score=score,
-        verdict=str(data.get("verdict", "revise")),
-        issues=list(data.get("issues", [])),
-        fixes=list(data.get("fixes", [])),
-        notes=str(data.get("notes", "")),
-        accuracy=accuracy,
-        quality=quality,
-    )
-
-
-def _as_float(x, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return default
-
-
-def revise(client, cfg: Config, engineered_system: str, answer: str,
-           crit: Critique) -> ModelResult:
-    user = (
-        f"# Current answer\n{answer}\n\n"
-        f"# Reviewer issues\n- " + "\n- ".join(crit.issues or ["(none)"]) +
-        f"\n\n# Required fixes\n- " + "\n- ".join(crit.fixes or ["(none)"]) +
-        "\n\nReturn the improved answer only."
-    )
-    return client.complete(system=prompts.REVISER_SYSTEM, user=user, cfg=cfg)
-
-
 def gather_web_context(query: str, broker, *, max_results: int = 3,
                        max_chars: int = 1500, emit=None) -> str:
     """Search + fetch top results into a labeled, untrusted reference block.
@@ -240,17 +185,15 @@ def gather_web_context(query: str, broker, *, max_results: int = 3,
 
 def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         web: bool = False, broker=None, emit=None, history=None,
-        fast: Optional[bool] = None, on_delta=None, cancel=None) -> RunRecord:
-    """Pipeline for a single request.
+        on_delta=None, cancel=None) -> RunRecord:
+    """Pipeline for a single request: execute with context, tools, and memory.
 
-    `emit` (optional) receives structured stage events for a live view (the web
-    app's realtime log). It is a pure observer and defaults to None for the CLI.
-    `history` (optional) is prior conversation turns ({"role","text"}) that give AG
-    working memory: it resolves follow-ups and stays coherent across the chat.
-    `fast` (optional) forces the pipeline shape; None uses cfg.pipeline_mode. In fast
-    mode AG makes ONE model call — it skips prompt-engineering and the self-critique/
-    revise loop — for a quick, iterable reply. Context (web/profile/memory/history)
-    still applies. Full mode engineers the prompt then critiques and revises.
+    One model path (no per-run self-review): AG answers directly, layering on
+    conversation history, the user profile, web sources, and recalled memory, and —
+    when local tools are enabled — running the reason→act→observe loop so it can
+    compute and act. Quality comes from the trained model + memory, not a critic pass;
+    the run is scored on measured speed. `emit` (optional) streams stage events to a
+    live view; `history` (optional) is prior turns that give AG working memory.
     """
     ensure_dirs()
     t0 = time.time()
@@ -273,27 +216,11 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
             if verbose:
                 print(f"[web] skipped: {e}")
 
-    if fast is None:
-        fast = getattr(cfg, "pipeline_mode", "full") == "fast"
-
     user_ctx = load_user_context()
-    if fast:
-        # One-call path: no prompt-engineering. Use the default executor system and
-        # the user's raw prompt; context is still layered onto exec_sys below.
-        _emit(emit, "optimize", "fast mode — answering directly (no prompt-engineering)",
-              level="info", uses_profile=bool(user_ctx))
-        eng_sys, eng_user = prompts.EXECUTOR_SYSTEM_DEFAULT, raw_prompt
-    else:
-        _emit(emit, "optimize", "engineering the prompt"
-              + (" (with your profile)" if user_ctx else "")
-              + (" (in conversation context)" if convo else ""), level="tool",
-              uses_profile=bool(user_ctx))
-        eng_sys, eng_user, _ = optimize(client, cfg, raw_prompt, user_context=user_ctx,
-                                        conversation=convo)
-        _emit(emit, "optimize", "engineered prompt ready", level="info")
-        if verbose:
-            print(f"[optimize] engineered prompt ready "
-                  f"(user context: {'yes' if user_ctx else 'none'})")
+    # Single execute path: the default executor system + the raw prompt, with all
+    # context layered onto exec_sys below. (Prompt-engineering stays available to the
+    # benchmark/evolve via optimize(); interactive runs answer directly.)
+    eng_sys, eng_user = prompts.EXECUTOR_SYSTEM_DEFAULT, raw_prompt
 
     exec_sys = eng_sys
     if convo:
@@ -351,73 +278,20 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         total_in += exec_res.input_tokens
         total_out += exec_res.output_tokens
         dry_run = getattr(exec_res, "dry_run", False)
-    _emit(emit, "execute", f"draft ready ({total_out} tokens)", level="info")
-
-    critiques: List[dict] = []
-    iterations = 0
-    last_crit: Optional[Critique] = None
-    if fast:
-        # Fast mode stops here: no self-review pass. The scorecard reports the
-        # measured speed axis; accuracy/quality are left unscored (not fabricated).
-        _emit(emit, "critique", "fast mode — self-review skipped", level="info")
-    for i in range(0 if fast else cfg.max_iterations):
-        _emit(emit, "critique", f"reviewing (pass {i + 1})", level="tool")
-        crit = critique(client, cfg, raw_prompt, answer)
-        critiques.append(asdict(crit))
-        last_crit = crit
-        # Gate on the answer-quality blend (accuracy+quality), not speed — iterating
-        # for correctness should never be discouraged by the clock.
-        answer_q = scoring.build_scorecard(
-            accuracy=crit.accuracy, quality=crit.quality, elapsed_s=0.0,
-            output_tokens=0, budget_s=cfg.speed_budget_s,
-            weights=cfg.score_weights,
-        ).answer_score
-        _emit(emit, "critique",
-              f"accuracy={crit.accuracy} quality={crit.quality} "
-              f"verdict={crit.verdict}", level="result",
-              accuracy=crit.accuracy, quality=crit.quality, verdict=crit.verdict,
-              issues=crit.issues)
-        if verbose:
-            print(f"[critique {i+1}] acc={crit.accuracy} qual={crit.quality} "
-                  f"answer={answer_q} verdict={crit.verdict}")
-        if crit.verdict == "pass" or answer_q >= cfg.critic_pass_threshold:
-            break
-        _emit(emit, "revise", f"revising per {len(crit.fixes)} fix(es)", level="tool")
-        rev = revise(client, cfg, eng_sys, answer, crit)
-        answer = rev.text
-        total_in += rev.input_tokens
-        total_out += rev.output_tokens
-        iterations += 1
+    _emit(emit, "execute", f"answer ready ({total_out} tokens)", level="info")
 
     elapsed = round(time.time() - t0, 3)
-    # Final scorecard blends the judged axes with the *measured* speed axis.
-    if last_crit is not None:
-        card = scoring.build_scorecard(
-            accuracy=last_crit.accuracy, quality=last_crit.quality,
-            elapsed_s=elapsed, output_tokens=total_out,
-            budget_s=cfg.speed_budget_s, weights=cfg.score_weights,
-        )
-    else:
-        # No critic judgement this run (fast mode): measure speed, leave the judged
-        # axes unscored rather than reporting a fabricated 0.
-        card = scoring.measured_only(elapsed_s=elapsed, output_tokens=total_out,
-                                     budget_s=cfg.speed_budget_s)
-    if card.overall is None:
-        _emit(emit, "score",
-              f"speed={card.speed} · accuracy/quality not scored in fast mode "
-              f"({elapsed}s)", level="result", scorecard=card.as_dict())
-    else:
-        _emit(emit, "score",
-              f"overall={card.overall} (acc={card.accuracy} qual={card.quality} "
-              f"speed={card.speed}) in {elapsed}s", level="result",
-              scorecard=card.as_dict())
+    # Speed is the one measured axis (a model can't judge its own latency); accuracy
+    # and quality are left unscored rather than fabricated by a self-critic.
+    card = scoring.measured_only(elapsed_s=elapsed, output_tokens=total_out,
+                                 budget_s=cfg.speed_budget_s)
+    _emit(emit, "score", f"speed={card.speed} in {elapsed}s", level="result",
+          scorecard=card.as_dict())
 
     rec = RunRecord(
         raw_prompt=raw_prompt,
         engineered_prompt=f"SYSTEM:\n{eng_sys}\n\nUSER:\n{eng_user}",
         answer=answer,
-        iterations=iterations,
-        critiques=critiques,
         elapsed_s=elapsed,
         dry_run=dry_run,
         input_tokens=total_in,

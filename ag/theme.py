@@ -135,8 +135,7 @@ h2{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:.7r
 .ev.token{border-color:var(--faint);color:var(--muted)}
 
 /* --- scorecards ------------------------------------------------------ */
-#cards{display:none;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
-@media(max-width:560px){#cards{grid-template-columns:repeat(2,1fr)}}
+#cards{display:none;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);
   padding:13px 15px;box-shadow:var(--shadow);position:relative;overflow:hidden}
 .card .n{font-family:var(--mono);font-size:1.7rem;font-weight:700;letter-spacing:-.02em;

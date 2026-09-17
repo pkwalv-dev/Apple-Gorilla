@@ -105,22 +105,14 @@ def test_format_history_bounds_and_labels():
 
 
 def test_pipeline_threads_conversation_history():
-    # Prior turns must reach BOTH the optimizer user prompt and the executor system,
-    # so AG can resolve follow-ups — the working-memory fix.
+    # Prior turns must reach the executor system so AG can resolve follow-ups — the
+    # working-memory fix. (The single execute path has no separate optimizer call.)
     from ag import pipeline
     from ag.config import Config
-    seen = {"opt_user": "", "exec_sys": ""}
+    seen = {"exec_sys": ""}
 
     class Spy:
         def complete(self, *, system, user, cfg, max_tokens=None):
-            if "optimizer" in system.lower():
-                seen["opt_user"] = user
-                return type("R", (), {"text": "SYSTEM:\n(none)\n\nUSER:\ngo",
-                                      "input_tokens": 0, "output_tokens": 0,
-                                      "dry_run": True})()
-            if "critic" in system.lower():
-                return type("R", (), {"text": '{"score":9,"verdict":"pass"}',
-                                      "input_tokens": 0, "output_tokens": 0})()
             seen["exec_sys"] = system
             return type("R", (), {"text": "answer", "input_tokens": 0,
                                   "output_tokens": 0, "dry_run": True})()
@@ -128,9 +120,7 @@ def test_pipeline_threads_conversation_history():
     hist = [{"role": "user", "text": "My name is Sam"},
             {"role": "ai", "text": "Nice to meet you Sam"}]
     cfg = Config(); cfg.auto_memory = False
-    # Full mode threads history through the optimizer as well as the executor.
-    pipeline.run(Spy(), cfg, "what's my name?", web=False, history=hist, fast=False)
-    assert "Sam" in seen["opt_user"], "history missing from optimizer prompt"
+    pipeline.run(Spy(), cfg, "what's my name?", web=False, history=hist)
     assert "Sam" in seen["exec_sys"], "history missing from executor system"
 
 
