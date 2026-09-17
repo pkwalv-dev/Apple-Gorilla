@@ -437,7 +437,7 @@ def cmd_skills(args) -> int:
         for s in items:
             flag = "" if s.enabled else " (disabled)"
             caps = f" [caps: {', '.join(s.capabilities)}]" if s.capabilities else ""
-            print(f"  {s.name}{flag} — {s.description}{caps}")
+            print(f"  {s.name}{flag} - {s.description}{caps}")
     elif args.action in ("disable", "enable"):
         ok = reg.set_enabled(args.name or "", args.action == "enable")
         print("done" if ok else f"skill not found: {args.name}")
