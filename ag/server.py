@@ -81,6 +81,19 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <!-- Claude sign-in (populated from /auth); lets `auto` use Claude instead of local -->
 <div id="signin" class="whereami" title="Sign in so AG's auto backend uses Claude" hidden></div>
 
+<!-- ================= tab command bar ================= -->
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-pane="chat" onclick="switchTab('chat')">&#9656; Chat</button>
+  <button class="tab" data-pane="fleet" onclick="switchTab('fleet')">&#9670; Fleet <span class="tct" id="tc-fleet"></span></button>
+  <button class="tab" data-pane="skills" onclick="switchTab('skills')">&#10022; Skills <span class="tct" id="tc-skills"></span></button>
+  <button class="tab" data-pane="evolve" onclick="switchTab('evolve')">&#8635; Evolve</button>
+  <button class="tab" data-pane="bundle" onclick="switchTab('bundle')">&#10697; Bundle</button>
+  <button class="tab" data-pane="images" onclick="switchTab('images')">&#9638; Images</button>
+</nav>
+
+<!-- ================= CHAT ================= -->
+<div class="tabpane active" id="pane-chat">
+
 <div class="panel">
   <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
   <div class="controls">
@@ -138,46 +151,6 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     <button class="linkbtn spacer" onclick="clearChat()">Clear conversation</button>
   </div>
   <div id="chat"></div>
-
-<table id="tools" class="panel"></table>
-
-<div class="panel" id="imagepanel">
-  <span class="grouplabel">Image generation — local Stable Diffusion <span class="cmd-note" id="imgnote"></span></span>
-  <textarea id="imgprompt" class="directive" rows="2"
-    placeholder="Describe an image to generate. Needs a local Stable Diffusion server (Automatic1111/Forge) running with --api; prompts never leave your machine."></textarea>
-  <div class="controls">
-    <button class="cmd" id="imgbtn" onclick="genImage()">Generate image</button>
-    <button class="cmd" id="imgstartbtn" onclick="startImageServer()" hidden>Start server</button>
-  </div>
-  <div id="imgout"></div>
-</div>
-
-<div class="panel" id="improve">
-  <div class="btngroup cmd-group">
-    <span class="grouplabel">Commands — run &amp; modify AG</span>
-    <textarea id="directive" class="directive" rows="2"
-      placeholder="Optional — tell Evolve what to improve in plain text (e.g. "make answers more concise", "sharpen the web-search prompt"). This steers the next Evolve; safety &amp; fitness gates still apply."></textarea>
-    <div class="controls">
-      <button class="cmd" onclick="doBench()">Benchmark</button>
-      <button class="cmd evolve" onclick="doEvolve()">Evolve</button>
-      <label class="toggle">proposer
-        <select id="proposer">
-          <option value="">deploy backend</option>
-          <option value="anthropic">Claude (anthropic)</option>
-          <option value="ollama">Ollama (local)</option>
-        </select>
-      </label>
-    </div>
-  </div>
-  <div class="btngroup view-group">
-    <span class="grouplabel">Views — read-only, change nothing</span>
-    <div class="controls">
-      <button class="view" onclick="loadTools()">Tools &amp; friction</button>
-      <button class="view" onclick="loadHistory()">History</button>
-      <button class="view" onclick="loadDoctor()">Status</button>
-    </div>
-  </div>
-  <div id="improveout"></div>
 </div>
 
 <div id="cards">
@@ -193,6 +166,107 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 
 <h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
 <div class="panel" style="padding:8px"><div id="log"></div></div>
+</div><!-- /pane-chat -->
+
+<!-- ================= FLEET ================= -->
+<div class="tabpane" id="pane-fleet">
+  <div class="panel">
+    <p class="lede"><b>Agent swarm.</b> Every sub-agent AG spawns is registered here —
+      named for the role it spawned as, with its parent, depth and how many skills it
+      acquired. The <b>kill switch</b> halts all spawning and stops running loops.</p>
+    <div class="fleet-bar">
+      <button class="view" onclick="loadFleet()">Refresh</button>
+      <button class="danger" onclick="fleetKill()">Engage kill switch</button>
+      <button class="view" onclick="fleetRevive()">Clear kill switch</button>
+      <span class="killbadge spacer" id="killbadge">kill: —</span>
+    </div>
+    <table class="dtable" id="fleettbl" style="display:none">
+      <thead><tr><th>agent</th><th>role</th><th>parent</th><th>depth</th>
+        <th>status</th><th class="n">skills</th><th></th></tr></thead>
+      <tbody id="fleetbody"></tbody>
+    </table>
+    <div id="fleetempty" class="emptyrow">No sub-agents spawned yet. Delegation happens
+      inside a run (the <code>delegate</code> tool) when tools are enabled.</div>
+  </div>
+</div>
+
+<!-- ================= SKILLS ================= -->
+<div class="tabpane" id="pane-skills">
+  <div class="panel">
+    <p class="lede"><b>Acquired skills.</b> Capabilities AG authored, tested, and
+      registered — reused and inherited by sub-agents. Author one directly here, or turn
+      on <b>self-extend</b> in Chat and just ask.</p>
+    <textarea id="skspec" class="directive" rows="2"
+      placeholder="Describe a capability to acquire, e.g. &quot;convert a CSV file to JSON&quot;. AG will author it, test it in isolation, and register it if the test passes."></textarea>
+    <div class="controls" style="margin-top:0">
+      <button class="cmd" id="skbtn" onclick="acquireSkill()">Acquire skill</button>
+      <button class="view spacer" onclick="loadSkills()">Refresh list</button>
+    </div>
+    <div id="skacqout"></div>
+    <div id="skillsout"></div>
+  </div>
+</div>
+
+<!-- ================= EVOLVE ================= -->
+<div class="tabpane" id="pane-evolve">
+  <div class="panel" id="improve">
+    <div class="btngroup cmd-group">
+      <span class="grouplabel">Commands — run &amp; modify AG</span>
+      <textarea id="directive" class="directive" rows="2"
+        placeholder="Optional — tell Evolve what to improve in plain text (e.g. "make answers more concise", "sharpen the web-search prompt"). This steers the next Evolve; safety &amp; fitness gates still apply."></textarea>
+      <div class="controls">
+        <button class="cmd" onclick="doBench()">Benchmark</button>
+        <button class="cmd evolve" onclick="doEvolve()">Evolve</button>
+        <label class="toggle">proposer
+          <select id="proposer">
+            <option value="">deploy backend</option>
+            <option value="anthropic">Claude (anthropic)</option>
+            <option value="ollama">Ollama (local)</option>
+          </select>
+        </label>
+      </div>
+      <label class="ctl" style="margin-top:10px" title="Inject vetted reference code from your github_allowlist (config.evolve_github_refs) into the proposer's briefing so a self-edit can adapt proven implementations. Reference data only — evolve still edits only evolvable files and passes both gates."><input type="checkbox" id="evogithub"> use vetted GitHub references</label>
+    </div>
+    <div class="btngroup view-group">
+      <span class="grouplabel">Views — read-only, change nothing</span>
+      <div class="controls">
+        <button class="view" onclick="loadTools()">Tools &amp; friction</button>
+        <button class="view" onclick="loadHistory()">History</button>
+        <button class="view" onclick="loadDoctor()">Status</button>
+      </div>
+    </div>
+    <table id="tools" class="panel"></table>
+    <div id="improveout"></div>
+  </div>
+</div>
+
+<!-- ================= BUNDLE ================= -->
+<div class="tabpane" id="pane-bundle">
+  <div class="panel">
+    <p class="lede"><b>Portable bundle.</b> Pack AG and its learned state (profile,
+      memory, skills, archive, config) into one archive for any Python 3.10+ host — the
+      memory and skills travel with it. The check audits the portability constraints.</p>
+    <div class="controls" style="margin-top:0">
+      <button class="view" onclick="bundleCheck()">Check portability</button>
+      <button class="cmd" onclick="bundleExport()">Export bundle</button>
+    </div>
+    <div id="bundleout"></div>
+  </div>
+</div>
+
+<!-- ================= IMAGES ================= -->
+<div class="tabpane" id="pane-images">
+  <div class="panel" id="imagepanel">
+    <span class="grouplabel">Image generation — local Stable Diffusion <span class="cmd-note" id="imgnote"></span></span>
+    <textarea id="imgprompt" class="directive" rows="2"
+      placeholder="Describe an image to generate. Needs a local Stable Diffusion server (Automatic1111/Forge) running with --api; prompts never leave your machine."></textarea>
+    <div class="controls">
+      <button class="cmd" id="imgbtn" onclick="genImage()">Generate image</button>
+      <button class="cmd" id="imgstartbtn" onclick="startImageServer()" hidden>Start server</button>
+    </div>
+    <div id="imgout"></div>
+  </div>
+</div>
 
 </div>
 </div>
@@ -547,7 +621,7 @@ async function doEvolve(){
   es.innerHTML='<span class="dot spin"></span><b>Proposing changes…</b> '
     +(directive?'toward your request':'analysing AG');
   renderWhere();
-  try{ await streamPost('/evolve/propose',{proposer:$('proposer').value,directive:directive}, ev=>{
+  try{ await streamPost('/evolve/propose',{proposer:$('proposer').value,directive:directive,github:$('evogithub')?$('evogithub').checked:false}, ev=>{
     if(ev.stage==='done'){ renderProposal(ev.data||{});
       $('status').textContent='proposed'; renderEvoStatus(); renderWhere(); return; }
     if(ev.stage==='evolve'||ev.stage==='bench'){
@@ -778,7 +852,120 @@ async function genImage(){
   if(btn) btn.disabled=false;
 }
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
-restoreThink(); restoreMode(); restoreCtl(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+/* ---- tabs ------------------------------------------------------------- */
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.pane===name));
+  document.querySelectorAll('.tabpane').forEach(p=>p.classList.toggle('active',p.id==='pane-'+name));
+  try{ localStorage.setItem('ag_tab',name); }catch(e){}
+  if(name==='fleet') loadFleet();
+  if(name==='skills') loadSkills();
+}
+function restoreTab(){ let t='chat'; try{ t=localStorage.getItem('ag_tab')||'chat'; }catch(e){}
+  if(!document.getElementById('pane-'+t)) t='chat'; switchTab(t); }
+
+/* ---- fleet ------------------------------------------------------------ */
+async function loadFleet(){
+  try{
+    const d=await (await fetch('/fleet')).json();
+    const kb=$('killbadge');
+    kb.textContent='kill: '+(d.kill_active?'ENGAGED':'off');
+    kb.classList.toggle('on',!!d.kill_active);
+    const agents=d.agents||[];
+    $('tc-fleet').textContent=agents.length?('['+agents.length+']'):'';
+    const tbl=$('fleettbl'), body=$('fleetbody'), empty=$('fleetempty');
+    if(!agents.length){ tbl.style.display='none'; empty.style.display='block'; return; }
+    empty.style.display='none'; tbl.style.display='table';
+    body.innerHTML=agents.map(a=>'<tr><td>'+escapeHtml(a.agent)+'</td><td>'+escapeHtml(a.role)
+      +'</td><td>'+escapeHtml(a.parent)+'</td><td class="n">'+a.depth
+      +'</td><td><span class="pill '+escapeHtml(a.status)+'">'+escapeHtml(a.status)+'</span></td>'
+      +'<td class="n">'+a.skills_acquired+'</td><td>'
+      +(a.status==='disabled'
+        ?'<button class="linkbtn" onclick="fleetAct(\\''+escapeHtml(a.agent)+'\\',\\'enable\\')">enable</button>'
+        :'<button class="linkbtn" onclick="fleetAct(\\''+escapeHtml(a.agent)+'\\',\\'disable\\')">disable</button>')
+      +'</td></tr>').join('');
+  }catch(e){ $('fleetempty').textContent='could not load fleet: '+e; }
+}
+async function fleetAct(agent,action){
+  try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action,agent:agent})}); }catch(e){}
+  loadFleet();
+}
+async function fleetKill(){
+  if(!confirm('Engage the kill switch? This halts ALL sub-agent spawning and stops running loops.')) return;
+  try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'kill'})}); }catch(e){}
+  loadFleet();
+}
+async function fleetRevive(){
+  try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'revive'})}); }catch(e){}
+  loadFleet();
+}
+
+/* ---- skills ----------------------------------------------------------- */
+async function loadSkills(){
+  try{
+    const d=await (await fetch('/skills')).json();
+    const sk=d.skills||[];
+    $('tc-skills').textContent=sk.length?('['+sk.length+']'):'';
+    const out=$('skillsout');
+    if(!sk.length){ out.innerHTML='<div class="emptyrow">No skills acquired yet. '
+      +'Author one above, or enable self-extend in Chat and ask for a capability.</div>'; return; }
+    out.innerHTML=sk.map(s=>'<div class="skitem"><span class="sknm">'+escapeHtml(s.name)+'</span>'
+      +'<span class="skds">'+escapeHtml(s.description)
+      +(s.capabilities&&s.capabilities.length?' <span class="skcap">['+escapeHtml(s.capabilities.join(', '))+']</span>':'')
+      +'</span><span class="pill '+(s.enabled?'ok':'disabled')+'">'+(s.enabled?'enabled':'disabled')+'</span>'
+      +'<button class="linkbtn" onclick="skillAct(\\''+escapeHtml(s.name)+'\\',\\''+(s.enabled?'disable':'enable')+'\\')">'
+      +(s.enabled?'disable':'enable')+'</button>'
+      +'<button class="linkbtn" onclick="skillAct(\\''+escapeHtml(s.name)+'\\',\\'remove\\')">remove</button></div>').join('');
+  }catch(e){ $('skillsout').innerHTML='<div class="emptyrow">could not load skills: '+escapeHtml(''+e)+'</div>'; }
+}
+async function skillAct(name,action){
+  if(action==='remove' && !confirm('Remove skill "'+name+'"? This deletes it from the registry.')) return;
+  try{ await fetch('/skills/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action,name:name})}); }catch(e){}
+  loadSkills();
+}
+async function acquireSkill(){
+  const spec=$('skspec').value.trim(); if(!spec) return;
+  const btn=$('skbtn'); btn.disabled=true;
+  $('skacqout').innerHTML='<div class="result">authoring &amp; testing a skill for: '
+    +escapeHtml(spec)+' … (this calls the model and may take a moment)</div>';
+  try{
+    const d=await (await fetch('/skills/acquire',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({spec:spec})})).json();
+    $('skacqout').innerHTML='<div class="result '+(d.acquired?'ok':'bad')+'">'
+      +escapeHtml(d.reason||(d.acquired?'acquired':'not acquired'))+'</div>';
+    if(d.acquired){ $('skspec').value=''; loadSkills(); }
+  }catch(e){ $('skacqout').innerHTML='<div class="result bad">acquire failed: '+escapeHtml(''+e)+'</div>'; }
+  btn.disabled=false;
+}
+
+/* ---- bundle ----------------------------------------------------------- */
+async function bundleCheck(){
+  $('bundleout').innerHTML='<div class="result">running portability audit…</div>';
+  try{
+    const d=await (await fetch('/bundle/check')).json();
+    const rows=(d.checks||[]).map(c=>'<div class="bcheck '+(c.ok?'ok':'bad')+'"><span class="led"></span>'
+      +'<div><div>'+escapeHtml(c.name)+'</div>'+(c.detail?'<div class="bd">'+escapeHtml(c.detail)+'</div>':'')+'</div></div>').join('');
+    $('bundleout').innerHTML=rows+'<div class="result '+(d.portable?'ok':'bad')+'">'
+      +(d.portable?'Portable — all constraints satisfied.':'NOT fully portable — see failures above.')+'</div>';
+  }catch(e){ $('bundleout').innerHTML='<div class="result bad">check failed: '+escapeHtml(''+e)+'</div>'; }
+}
+async function bundleExport(){
+  $('bundleout').innerHTML='<div class="result">packing bundle…</div>';
+  try{
+    const d=await (await fetch('/bundle/export',{method:'POST'})).json();
+    $('bundleout').innerHTML='<div class="result ok">Bundle written on the AG host:<br><code>'
+      +escapeHtml(d.path||'')+'</code>'+(d.bytes?(' &middot; '+Math.round(d.bytes/1024)+' KB'):'')+'</div>';
+  }catch(e){ $('bundleout').innerHTML='<div class="result bad">export failed: '+escapeHtml(''+e)+'</div>'; }
+}
+function saveEvoGithub(){ try{ localStorage.setItem('ag_evogithub',$('evogithub').checked?'1':'0'); }catch(e){} }
+function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
+  if($('evogithub')) $('evogithub').checked=(v==='1'); }catch(e){}
+  if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
+
+restoreThink(); restoreMode(); restoreCtl(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
 </script></body></html>"""
 
 def _render_page() -> str:
@@ -900,6 +1087,26 @@ class _Handler(BaseHTTPRequestHandler):
                 "reachable": images.sd_reachable(cfg) if getattr(
                     cfg, "allow_image_gen", False) else False,
                 "host": cfg.sd_host}), "application/json")
+        elif self.path == "/fleet":
+            from . import fleet
+            self._send(200, json.dumps({
+                "kill_active": fleet.kill_active(),
+                "agents": [a.as_dict() for a in fleet.list_agents()]}),
+                "application/json")
+        elif self.path == "/skills":
+            from . import skills
+            items = skills.get_registry("root").list(include_disabled=True)
+            self._send(200, json.dumps({"skills": [{
+                "name": s.name, "description": s.description,
+                "capabilities": s.capabilities, "enabled": s.enabled,
+                "agent": s.agent, "source": s.source} for s in items]}),
+                "application/json")
+        elif self.path == "/bundle/check":
+            from . import bundle
+            checks = bundle.check()
+            self._send(200, json.dumps({
+                "portable": all(c.ok for c in checks),
+                "checks": [c.as_dict() for c in checks]}), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -935,7 +1142,77 @@ class _Handler(BaseHTTPRequestHandler):
             "can_evolve_while_running": True,
         }
 
+    def _handle_control(self, path: str, payload: dict):
+        """Fleet / skills / bundle control-plane endpoints (non-streaming JSON)."""
+        try:
+            if path == "/fleet/act":
+                from . import fleet
+                action = str(payload.get("action", ""))
+                agent = str(payload.get("agent", ""))
+                if action == "kill":
+                    fleet.engage_kill(); msg = "kill switch engaged"
+                elif action == "revive":
+                    fleet.clear_kill(); msg = "kill switch cleared"
+                elif action == "clear":
+                    msg = f"cleared {fleet.clear()} record(s)"
+                elif action in ("disable", "enable"):
+                    ok = fleet.set_status(agent, "disabled" if action == "disable" else "active")
+                    msg = "ok" if ok else "agent not found"
+                else:
+                    msg = "unknown action"
+                self._send(200, json.dumps({"ok": True, "msg": msg}), "application/json")
+                return
+            if path == "/skills/act":
+                from . import skills
+                reg = skills.get_registry("root")
+                action = str(payload.get("action", ""))
+                name = str(payload.get("name", ""))
+                if action in ("disable", "enable"):
+                    ok = reg.set_enabled(name, action == "enable")
+                elif action == "remove":
+                    ok = reg.remove(name)
+                else:
+                    ok = False
+                self._send(200, json.dumps({"ok": bool(ok)}), "application/json")
+                return
+            if path == "/skills/acquire":
+                from . import acquire
+                from .permissions import PermissionBroker
+                spec = str(payload.get("spec", "")).strip()
+                if not spec:
+                    self._send(200, json.dumps({"acquired": False,
+                               "reason": "empty spec"}), "application/json")
+                    return
+                broker = PermissionBroker(allow_external_tools=True)
+                for cap in ("write_skill", "install_package", "github_fetch", "code_exec"):
+                    broker.grant(cap)
+                client = make_client(self.cfg)
+                res = acquire.author_skill(client, self.cfg, spec, broker=broker, approve=True)
+                self._send(200, json.dumps(res.as_dict() | {"reason": res.reason}),
+                           "application/json")
+                return
+            if path == "/bundle/export":
+                from . import bundle
+                dest = bundle.export()
+                self._send(200, json.dumps({
+                    "path": str(dest),
+                    "bytes": dest.stat().st_size if dest.exists() else 0}),
+                    "application/json")
+                return
+        except Exception as e:
+            self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
+            return
+        self._send(404, "not found", "text/plain")
+
     def do_POST(self):
+        if self.path in ("/fleet/act", "/skills/act", "/skills/acquire", "/bundle/export"):
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            except Exception:
+                payload = {}
+            self._handle_control(self.path, payload)
+            return
         if self.path == "/image/start":
             from . import images
             cfg = self.cfg
@@ -1207,9 +1484,13 @@ class _Handler(BaseHTTPRequestHandler):
         this propose→select→apply flow. The full patches are cached server-side so the
         browser only sends back the ids it selected.
         """
+        import dataclasses
         from . import evolve as evolve_mod
         write = self._ndjson_writer()
         cfg = self.cfg
+        # Honor the GUI's "use vetted GitHub references" toggle for this propose only.
+        if (payload or {}).get("github"):
+            cfg = dataclasses.replace(cfg, evolve_use_github=True)
         if not self._evolve_lock.acquire(blocking=False):
             write({"stage": "done", "level": "info",
                    "msg": "an evolve cycle is already running — try again shortly",
