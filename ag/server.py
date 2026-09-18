@@ -248,6 +248,17 @@ table.hist td.rat{color:#8b949e;font-style:italic}
       <button class="help" data-help="The local model AG will fine-tune. Options are flagged for your GPU: 'fits' = comfortable, 'tight' = works with the memory-savers, 'won't fit' = inference-only. A LoRA adapter is bound to its base — it only works on this exact model.">?</button>
     </div>
     <div class="controls" style="margin-top:6px">
+      <label class="ctl">epochs
+        <input id="loraepochs" class="ctl-select" type="number" min="0.5" max="10" step="0.5"
+               style="width:70px" onchange="loraSetOpts()">
+      </label>
+      <button class="help" data-help="How many passes over the dataset. More epochs learn the data harder (lower loss) but risk memorizing/overfitting on a small set. 1 is often too few; 3 is a solid default here.">?</button>
+      <label class="toggle" style="margin-left:10px">
+        <input type="checkbox" id="loraunsloth" onchange="loraSetOpts()"> use Unsloth
+      </label>
+      <button class="help" data-help="Unsloth trains ~2x faster in ~half the VRAM (needs a working C compiler). Off = the transformers+peft fallback, which is slower but needs no compiler. Turned off automatically if Unsloth isn't installed.">?</button>
+    </div>
+    <div class="controls" style="margin-top:6px">
       <button class="view" onclick="loadLora()">Refresh</button>
       <button class="cmd" onclick="loraBuild()">Build dataset</button>
       <button class="help" data-help="Assembles the training set from AG's own memory (high-scoring past runs + learned procedures) plus a Claude-generated teacher set. The teacher step calls the model, so it costs a few calls.">?</button>
@@ -799,8 +810,9 @@ async function loadAuth(){
     const a=await fetch('/auth').then(r=>r.json());
     el.hidden=false;
     if(a.signed_in){
-      el.innerHTML='Signed in to Claude ('+escapeHtml(a.method)+') — auto uses <b>'
-        +escapeHtml(a.model)+'</b>. <button class="linkbtn" onclick="logoutClaude()">sign out</button>';
+      el.innerHTML='Signed in to Claude ('+escapeHtml(a.method)+') — available as <b>'
+        +escapeHtml(a.model)+'</b>, used only when you pick it in the model menu (spends API tokens). '
+        +'AG answers locally by default. <button class="linkbtn" onclick="logoutClaude()">sign out</button>';
     } else {
       el.innerHTML='Not signed in to Claude — running locally. '
         +'<a href="'+escapeHtml(a.console_url)+'" target="_blank" rel="noopener">Get an API key</a>, '
@@ -910,6 +922,9 @@ async function loadLora(){
     if(sel){ sel.innerHTML=(d.bases||[]).map(b=>'<option value="'+escapeHtml(b.id)+'"'
       +(b.id===d.base?' selected':'')+'>'+escapeHtml(b.id)+' · '+b.params_b+'B · '+b.fit
       +'</option>').join(''); }
+    const ep=$('loraepochs'); if(ep && d.epochs!=null) ep.value=d.epochs;
+    const us=$('loraunsloth');
+    if(us){ us.checked=!!d.unsloth_pref; us.disabled=!(f.unsloth); }
     $('lorastatus').className='kv';
     $('lorastatus').innerHTML=
       'GPU <b>'+escapeHtml(f.gpu||'?')+'</b> · VRAM <b>'+(f.vram_gb==null?'?':f.vram_gb+' GB')
@@ -937,6 +952,13 @@ async function loraSetBase(){
   const base=$('lorabase').value;
   try{ await fetch('/lora/set-base',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({base:base})}); }catch(e){}
+  loadLora();
+}
+async function loraSetOpts(){
+  const epochs=parseFloat($('loraepochs').value);
+  const unsloth=$('loraunsloth').checked;
+  try{ await fetch('/lora/set-opts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({epochs:epochs,unsloth:unsloth})}); }catch(e){}
   loadLora();
 }
 async function loraMerge(adapter){
@@ -1224,6 +1246,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "feasibility": feas.as_dict(),
                 "base": self.cfg.lora_base_model,
+                "epochs": self.cfg.lora_epochs,
+                "unsloth_pref": bool(getattr(self.cfg, "lora_use_unsloth", True)),
                 "bases": lora.available_bases(feas.vram_gb),
                 "recommended": lora.recommended_config(feas.vram_gb),
                 "merge_ready": lora.merge_feasibility(self.cfg)["ok"],
@@ -1406,6 +1430,22 @@ class _Handler(BaseHTTPRequestHandler):
                 cfg.save()
                 _Handler.cfg = cfg
                 self._send(200, json.dumps({"ok": True, "base": base}), "application/json")
+                return
+            if path == "/lora/set-opts":
+                cfg = Config.load()
+                if "epochs" in payload:
+                    try:
+                        ep = float(payload.get("epochs"))
+                    except (TypeError, ValueError):
+                        ep = cfg.lora_epochs
+                    cfg.lora_epochs = max(0.5, min(10.0, ep))
+                if "unsloth" in payload:
+                    cfg.lora_use_unsloth = bool(payload.get("unsloth"))
+                cfg.save()
+                _Handler.cfg = cfg
+                self._send(200, json.dumps({"ok": True, "epochs": cfg.lora_epochs,
+                           "unsloth": bool(getattr(cfg, "lora_use_unsloth", True))}),
+                           "application/json")
                 return
             if path == "/lora/merge":
                 adapter = str(payload.get("adapter", "")).strip()
@@ -1973,11 +2013,13 @@ def _models_data(cfg: Config) -> dict:
     from .model import _has_anthropic_creds, has_oauth_profile
     models = _list_ollama_models(cfg)
     cloud = bool(_has_anthropic_creds() or has_oauth_profile())
-    options = []
+    # Local models first so the offline default is the obvious top choice; the cloud
+    # Claude option is listed last and labelled with its cost, since picking it is the
+    # user's explicit opt-in to spend API tokens.
+    options = [{"value": f"ollama:{m}", "label": f"{m} · local"} for m in models]
     if cloud:
         options.append({"value": f"anthropic:{cfg.model}",
-                        "label": f"{cfg.model} · Claude cloud"})
-    options += [{"value": f"ollama:{m}", "label": f"{m} · local"} for m in models]
+                        "label": f"{cfg.model} · Claude cloud (uses API tokens)"})
 
     if cfg.backend == "anthropic" or (cfg.backend == "auto" and cloud):
         current = f"anthropic:{cfg.model}"
