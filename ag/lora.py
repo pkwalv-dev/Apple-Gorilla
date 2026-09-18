@@ -188,12 +188,30 @@ def _ensure() -> None:
     ADAPTERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Identity/self-description questions must NOT train from memory: AG's identity is set
+# authoritatively by the system prompt (prompts.EXECUTOR_SYSTEM_DEFAULT). Past episodes
+# captured stale/incorrect self-descriptions ("a protocol layer, no persistent memory,
+# no file access"); training on them teaches the model to deny its own capabilities and
+# fights the system prompt. So we drop identity Q/A from the memory-derived training set.
+_IDENTITY_Q_MARKERS = (
+    "your name", "who are you", "what are you", "about yourself", "what is apple-gorilla",
+    "who is apple-gorilla", "what do you know about yourself", "gotten smarter",
+    "gotten any smarter", "are you sentient", "are you conscious", "describe yourself",
+)
+
+
+def _is_identity_question(q: str) -> bool:
+    ql = q.lower()
+    return any(mk in ql for mk in _IDENTITY_Q_MARKERS)
+
+
 def _pairs_from_memory(cfg: Config) -> List[dict]:
     """Turn AG's own memory into instruction/output pairs.
 
     Episodic memories are stored as "Q: ...\\nA: ..." — recover those as supervised
     pairs. Procedural memories become "how should you handle X" style guidance. Only
-    reasonably-scored / durable items are used, so we train on what went well."""
+    reasonably-scored / durable items are used, so we train on what went well.
+    Identity/self-description exchanges are excluded (see _IDENTITY_Q_MARKERS)."""
     pairs: List[dict] = []
     try:
         from . import memory
@@ -205,7 +223,7 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
             mt = re.search(r"Q:\s*(.*?)\s*A:\s*(.*)", m.text, re.DOTALL)
             if mt:
                 q, a = mt.group(1).strip(), mt.group(2).strip()
-                if q and a:
+                if q and a and not _is_identity_question(q):
                     pairs.append({"instruction": q, "output": a, "source": "memory"})
         for m in mgr.store.all("root", [memory.MemoryKind.PROCEDURAL]):
             if m.text.strip():
