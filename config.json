@@ -2,7 +2,7 @@
   "backend": "auto",
   "offline_backend": "ollama",
   "model": "claude-opus-5",
-  "ollama_model": "qwen3:30b-a3b",
+  "ollama_model": "qwen3:8b",
   "ollama_host": "http://127.0.0.1:11434",
   "ollama_keep_alive": "30m",
   "ollama_options": {
