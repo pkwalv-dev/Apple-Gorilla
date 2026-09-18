@@ -20,7 +20,6 @@ def test_config_roundtrip(tmp_path):
 def test_prompts_importable_and_tagged():
     # The dry-run router depends on these role tags existing.
     assert "[role:optimizer]" in prompts.OPTIMIZER_SYSTEM
-    assert "[role:critic]" in prompts.CRITIC_SYSTEM
     assert "[role:evolver]" in prompts.EVOLVER_SYSTEM
 
 
@@ -33,48 +32,30 @@ def test_extract_json_variants():
 def test_pipeline_dry_run_produces_answer():
     cfg = Config()
     client = make_client(dry_run=True)
-    # Exercise the FULL pipeline (optimize + critique) explicitly; the default is now
-    # the single-call fast path (covered by test_fast_mode_is_single_call_...).
-    rec = run_pipeline(client, cfg, "Explain why the sky is blue.", fast=False)
+    rec = run_pipeline(client, cfg, "Explain why the sky is blue.")
     assert rec.answer
     assert rec.dry_run is True
-    assert rec.iterations >= 0
-    # dry-run critic auto-passes, so no revision loops.
-    assert rec.critiques and rec.critiques[0]["verdict"] == "pass"
 
 
-def test_fast_mode_is_single_call_and_skips_review():
-    # Fast mode must make exactly ONE model call (no optimize, no critique/revise) so
-    # AG stays quick to iterate with. Full mode makes several.
+def test_run_is_single_call_no_self_review():
+    # The self-review loop is removed: a run makes exactly ONE model call (no
+    # optimize, no critique/revise). Quality now comes from the model + memory.
     from ag.model import ModelResult
 
     class _Counter:
         def __init__(self): self.n = 0
         def complete(self, **kw):
             self.n += 1
-            return ModelResult(text='{"accuracy":9,"quality":9,"score":9,'
-                                    '"verdict":"pass"}\nAnswer.')
+            return ModelResult(text="Answer.")
 
-    fast_cfg = Config(); fast_cfg.pipeline_mode = "fast"
     fc = _Counter()
-    rec = run_pipeline(fc, fast_cfg, "hi", fast=True)
-    assert fc.n == 1                 # exactly one model call
-    assert rec.iterations == 0       # no revise loop
-    assert rec.critiques == []       # no self-review
-    assert rec.answer                # non-empty answer
+    rec = run_pipeline(fc, Config(), "hi")
+    assert fc.n == 1                 # exactly one model call — no review passes
+    assert rec.answer
     # Honest scorecard: speed is measured; unjudged axes are None, not a fake 0.
     assert rec.scorecard["speed"] is not None
     assert rec.scorecard["accuracy"] is None
     assert rec.scorecard["overall"] is None
-
-    full_cfg = Config(); full_cfg.pipeline_mode = "full"
-    fu = _Counter()
-    run_pipeline(fu, full_cfg, "hi", fast=False)
-    assert fu.n >= 3                 # optimize + execute + at least one critique
-
-
-def test_pipeline_mode_default_is_fast():
-    assert Config().pipeline_mode == "fast"
 
 
 def test_source_and_profile_writes_force_utf8():

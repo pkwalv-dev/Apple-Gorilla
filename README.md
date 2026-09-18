@@ -1,9 +1,11 @@
 # Apple-Gorilla (AG)
 
-A self-improving prompt executor built on the Claude API. You give it a raw prompt;
-it engineers that prompt for the model, executes it, reviews and iterates on the
-output (fact-check / vibe-check / formatting), and — separately and safely — evolves
-its own tunable source over time.
+A self-improving executor built on the Claude API (or a local model). You give it a
+prompt; it answers with your profile, conversation, web, tools, and long-term memory
+in context, **learns** from what it does (layered memory + reflection), can **acquire
+new capabilities** on demand, and — separately and safely — **evolves its own tunable
+source** and can **LoRA-fine-tune a local model** over time. Quality comes from the
+trained model and its memory, not a per-run self-review pass.
 
 > **Design stance.** The brief asked AG to "rewrite its source code after every
 > output." Unbounded, unsupervised self-modification is how a system bricks itself,
@@ -22,12 +24,12 @@ its own tunable source over time.
 
 | Stage | Module | Job |
 |-------|--------|-----|
-| **Optimize** | `ag/pipeline.py` → `optimize` | Rewrites your raw prompt into an efficient, unambiguous prompt for the model **without changing intent**. |
-| **Execute** | `ag/model.py` | Calls Claude (adaptive thinking + effort) or an offline stub. |
-| **Critique** | `pipeline.py` → `critique` | Scores the answer on correctness, fidelity, "vibe", and formatting, judged against *your* principles. |
-| **Iterate** | `pipeline.py` → `revise` | Applies the reviewer's fixes and re-checks, up to `max_iterations`. |
+| **Execute** | `ag/pipeline.py`, `ag/model.py` | Answers directly with context (profile, conversation, web, memory) and — with tools on — the reason→act loop. Calls Claude (adaptive thinking + effort) or a local model. One model path, no per-run self-review; scored on **measured speed**. |
+| **Remember** | `ag/memory/` | Layered memory (episodic → semantic → procedural) with meaning-based recall; a reflection loop distills experience into durable knowledge. |
+| **Acquire** | `ag/acquire.py`, `ag/skills/` | Authors, tests, and registers a new skill when a prompt needs a capability AG lacks — then reuses it. |
 | **Benchmark** | `ag/bench.py` | Scores AG on a held-out suite of objectively-checkable tasks — its **fitness function**. No model grades itself; every check is programmatic. |
-| **Evolve** | `ag/evolve.py` | Proposes small patches to AG's evolvable files, snapshots, **tests + re-benchmarks**, and adopts a change *only if it doesn't regress fitness* — else rolls back. Records the measured delta to an evolution archive. |
+| **Evolve** | `ag/evolve.py` | Proposes small patches to AG's evolvable files, snapshots, **tests + re-benchmarks**, and adopts a change *only if it doesn't regress fitness* — else rolls back. |
+| **Fine-tune** | `ag/lora.py` | Optional QLoRA of a **local** model on a dataset distilled from memory + a teacher set — the one place that changes model *weights*. |
 
 ## "You as a standard for intelligence" — principles, not mimicry
 
@@ -404,6 +406,47 @@ to a shared registry the lineage inherits). It is gated throughout:
 - **Honest scope:** "any capability" means anything expressible as authorized code on
   this machine; it does not train model weights, act on other machines, or bypass a gate.
 
+## LoRA fine-tuning — the one place that changes weights
+
+Everything else improves AG's *scaffolding* around a fixed brain. LoRA is the one
+subsystem that improves the **brain itself** — but only a **local** model (you have no
+weight access to Claude). It QLoRA-fine-tunes a small base on a dataset **distilled
+from AG's own memory plus a Claude teacher set**, and saves an adapter under
+`state/lora/adapters/`.
+
+**AG detects your VRAM and offers bases sized to it** (`ag lora options` / the GUI
+selector flags each as fits / tight / won't-fit). On an 8GB card the default is
+**Qwen3-8B** (≈ Qwen2.5-14B quality, trains tight); a 3-4B is the comfortable choice.
+Training uses **Unsloth** when installed (~half the VRAM, ~1.6× faster — what makes an
+8B fit on 8GB) and **falls back to transformers+peft** when it isn't. The 8GB path
+auto-applies gradient checkpointing, a paged 8-bit optimizer, bf16, and a short
+sequence length.
+
+```bash
+python -m ag lora status        # GPU/VRAM/CUDA + Unsloth + deps + dataset + can-train?
+python -m ag lora options       # trainable bases, each flagged for YOUR VRAM
+python -m ag lora build-data    # merge memory + teacher pairs into the training set
+python -m ag lora train         # QLoRA run (needs a GPU + the extras below)
+python -m ag lora merge <id>    # merge adapter -> GGUF -> register as an Ollama model
+```
+
+**Closing the loop:** since AG answers via Ollama (GGUF), `lora merge` merges the
+adapter into its base, converts to GGUF (needs llama.cpp's `convert_hf_to_gguf.py`),
+and `ollama create`s it as a **selectable backend** — so a fine-tune actually improves
+what AG runs.
+
+Deliberately **optional and out of the portable core**: the heavy deps
+(`torch`/`transformers`/`peft`/`datasets`/`bitsandbytes`, plus optional `unsloth`) live
+in **`requirements-lora.txt`** and import lazily only at train time, so the base tool
+stays pure-Python and `ag bundle --check` still passes. `ag lora status` (and the GUI
+**LoRA** tab) preflight the host and refuse cleanly if a GPU/extras are missing.
+
+> **Honest scope.** A LoRA adapter is bound to its exact base model — it is not applied
+> to "any model AG uses". Weight-tuning is capped by VRAM (~8B dense on 8GB; your 32GB
+> RAM + CPU speed data prep and let the optimizer spill, but don't raise the trainable
+> ceiling — they *do* help you *run* bigger models). It is not, and will not, fine-tune
+> Claude, and can't train the 30B-A3B MoE on 8GB.
+
 ## Autonomy, Chrome, and tools — permission-gated
 
 `ag/permissions.py` is a **default-deny** broker. Browser/Chrome control, network,
@@ -434,6 +477,9 @@ ag/
   critic/reviser   (in pipeline.py)
   acquire.py       directed capability acquisition (author->test->register a skill)
   skills/          the skill registry — acquired capabilities (per-agent, inherited)
+  fleet.py         agent-swarm registry + master kill switch
+  bundle.py        portable bundle export + portability-constraints audit
+  lora.py          optional QLoRA fine-tuning of a local model [extras only]
   tools/pkg.py     gated dependency installer (pinned, logged)
   tools/github.py  vetted-GitHub fetch (allowlist, read-only)
   bench.py         objective benchmark = AG's fitness function [evolvable tasks]

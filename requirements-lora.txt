@@ -1,0 +1,13 @@
+# Optional extras for LoRA/QLoRA fine-tuning (ag/lora.py). NOT needed for the base
+# tool — the core stays pure-Python and portable. Install only on a machine with an
+# NVIDIA GPU where you intend to train:  pip install -r requirements-lora.txt
+#
+# Install a CUDA-matched torch build first if the default wheel doesn't match your
+# driver (see https://pytorch.org/get-started/locally/). bitsandbytes provides the
+# 4-bit (QLoRA) kernels and is CUDA/Windows-sensitive; use WSL2 if 4-bit won't load.
+torch>=2.2
+transformers>=4.44
+peft>=0.12
+datasets>=2.20
+accelerate>=0.33
+bitsandbytes>=0.43

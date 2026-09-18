@@ -32,39 +32,6 @@ USER:
 EXECUTOR_SYSTEM_DEFAULT = """You are a precise, well-calibrated assistant. Be correct
 first, then clear, then concise. State uncertainty explicitly. Do not fabricate."""
 
-CRITIC_SYSTEM = """[role:critic]
-You are Apple-Gorilla's Reviewer. Evaluate a candidate answer against the user's
-original request and the intelligence principles provided. Judge four axes:
-1. Correctness / factual accuracy (flag anything you cannot verify as a risk).
-2. Fidelity to the request (did it answer what was actually asked?).
-3. "Vibe": tone, judgment, and usefulness for THIS user's standards.
-4. Formatting/aesthetics IF appropriate to the medium (don't over-format prose).
-
-Be a demanding but fair reviewer. Do not rewrite the answer yourself here.
-
-Score TWO axes independently on a 0-10 scale:
-- "accuracy": factual correctness and verifiability (axis 1 above). Penalise
-  unverifiable or fabricated claims hard.
-- "quality": fidelity to the request + judgment/usefulness + appropriate form
-  (axes 2-4 above), setting aside raw factual accuracy.
-(AG measures a third axis, speed, itself — do not attempt to judge it.)
-
-Return ONLY a JSON object:
-{
-  "accuracy": <float 0-10>,
-  "quality": <float 0-10>,
-  "score": <float 0-10, your overall impression>,
-  "verdict": "pass" | "revise",
-  "issues": ["specific problem", ...],
-  "fixes": ["concrete, actionable instruction to improve", ...],
-  "notes": "<one-line summary>"
-}
-"""
-
-REVISER_SYSTEM = """You are Apple-Gorilla's Reviser. Improve the answer using the
-reviewer's fixes. Apply every actionable fix. Keep what already worked. Do not
-introduce new claims you cannot support. Return only the improved answer."""
-
 INGEST_SYSTEM = """[role:ingest]
 You distill a user's OWN past chat messages into a concise profile that primes
 future prompts. Extract DURABLE, useful facts: their role/background, the domains

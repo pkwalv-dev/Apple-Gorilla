@@ -10,11 +10,8 @@
   },
   "ollama_autostart": true,
   "effort": "high",
-  "pipeline_mode": "fast",
   "max_output_tokens": 32000,
   "meta_output_tokens": 16000,
-  "max_iterations": 2,
-  "critic_pass_threshold": 8.0,
   "speed_budget_s": 30.0,
   "score_weights": {
     "accuracy": 0.5,
