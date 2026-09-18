@@ -72,6 +72,68 @@ def parse_ddg_lite(page: str, max_results: int = 5) -> List[SearchResult]:
     return results
 
 
+# --------------------------------------------------------------------------- #
+# Relevance: distill a query, rerank results, extract the on-topic passage.
+# Pure lexical (stdlib) — no model call, no deps — so it stays portable and cheap.
+# --------------------------------------------------------------------------- #
+_STOPWORDS = frozenset(
+    "a an and are as at be but by can could do does for from had has have how i if in "
+    "into is it its me my no not of on or our so than that the their them then there "
+    "these they this to us was we were what when where which who why will with would you "
+    "your please tell give show find get about latest current news".split()
+)
+
+
+def _tokens(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def extract_query(prompt: str, max_terms: int = 8) -> str:
+    """Distill a focused search query from a natural-language prompt: keep salient,
+    non-stopword terms in order, deduped. Falls back to the raw prompt head."""
+    out, seen = [], set()
+    for t in _tokens(prompt):
+        if len(t) < 2 or t in _STOPWORDS or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= max_terms:
+            break
+    return " ".join(out) or prompt.strip()[:120]
+
+
+def relevance(query: str, text: str) -> float:
+    """0..1 lexical relevance: fraction of distinct query terms present in text,
+    plus a small density bonus. Cheap proxy for 'is this on-topic'."""
+    q = {t for t in _tokens(query) if len(t) >= 2 and t not in _STOPWORDS}
+    if not q:
+        return 0.0
+    toks = _tokens(text)
+    if not toks:
+        return 0.0
+    tset = set(toks)
+    covered = sum(1 for t in q if t in tset) / len(q)
+    hits = sum(1 for t in toks if t in q)
+    density = min(hits / len(toks) * 20, 0.3)
+    return round(min(covered + density, 1.0), 4)
+
+
+def best_passages(text: str, query: str, *, window: int = 600, top: int = 3,
+                  max_chars: int = 1800) -> str:
+    """Return the most query-relevant slices of a page in reading order, joined and
+    capped at max_chars — instead of blindly taking the first N chars."""
+    text = text.strip()
+    if len(text) <= window:
+        return text[:max_chars]
+    step = max(window // 2, 1)
+    windows = [(i, text[i:i + window]) for i in range(0, len(text), step)
+               if text[i:i + window].strip()]
+    scored = sorted(windows, key=lambda w: relevance(query, w[1]), reverse=True)
+    picked = sorted(scored[:top], key=lambda w: w[0])  # restore reading order
+    joined = " … ".join(c for _, c in picked).strip()
+    return (joined or text)[:max_chars]
+
+
 def web_search(query: str, *, broker: PermissionBroker,
                max_results: int = 5) -> List[SearchResult]:
     broker.require("network")
