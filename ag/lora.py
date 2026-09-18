@@ -47,8 +47,6 @@ BASES = [
      "note": "comfortable on 8GB; ~Qwen2.5-7B quality; fast LoRA cycles"},
     {"id": "Qwen/Qwen3-8B", "params_b": 8.0, "min_vram": 7.5,
      "note": "best quality that still trains on 8GB (~Qwen2.5-14B); tight — Unsloth recommended"},
-    {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "params_b": 7.6, "min_vram": 7.5,
-     "note": "code/tool specialist; strongest for coding-heavy use"},
     {"id": "meta-llama/Llama-3.1-8B-Instruct", "params_b": 8.0, "min_vram": 7.5,
      "note": "solid general 8B; broadest tooling; gated on HF (needs access)"},
     {"id": "Qwen/Qwen3-14B", "params_b": 14.0, "min_vram": 12.0,
