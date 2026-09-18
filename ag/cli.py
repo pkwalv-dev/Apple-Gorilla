@@ -527,6 +527,20 @@ def cmd_lora(args) -> int:
         print(f"{len(ads)} adapter(s):")
         for a in ads:
             print(f"  {a['id']} - base={a.get('base','?')} examples={a.get('examples','?')}")
+    elif args.action == "options":
+        for b in lora.available_bases():
+            print(f"  [{b['fit']:>9}] {b['id']} ({b['params_b']}B) - {b['note']}")
+        rec = lora.recommended_config()
+        print(f"recommended for this GPU: base={rec['base']} seq={rec['max_seq']}")
+    elif args.action == "merge":
+        if not args.target:
+            print("usage: ag lora merge <adapter_id>  (see `ag lora list`)"); return 1
+        def trace(ev):
+            if ev.get("stage") == "lora" or ev.get("level") == "error":
+                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+        res = lora.merge_to_gguf(cfg, args.target, emit=trace)
+        print(res.reason)
+        return 0 if res.ok else 1
     return 0
 
 
@@ -704,8 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     fl.add_argument("name", nargs="?", default="", help="agent name (for enable/disable)")
     fl.set_defaults(func=cmd_fleet)
 
-    lo = sub.add_parser("lora", help="LoRA fine-tune a local model (status/build-data/train/list)")
-    lo.add_argument("action", choices=["status", "build-data", "train", "list"])
+    lo = sub.add_parser("lora", help="LoRA fine-tune a local model "
+                        "(status/options/build-data/train/list/merge)")
+    lo.add_argument("action", choices=["status", "options", "build-data", "train",
+                                       "list", "merge"])
+    lo.add_argument("target", nargs="?", default="", help="adapter id (for merge)")
     lo.set_defaults(func=cmd_lora)
 
     bn = sub.add_parser("bundle", help="export a portable bundle, or --check portability")

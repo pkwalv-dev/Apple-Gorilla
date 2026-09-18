@@ -25,13 +25,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from .config import STATE_DIR, Config
+from .config import ROOT, STATE_DIR, Config
 
 LORA_DIR = STATE_DIR / "lora"
 DATASET_FILE = LORA_DIR / "dataset.jsonl"
 ADAPTERS_DIR = LORA_DIR / "adapters"
 
 _HEAVY_DEPS = ("torch", "transformers", "peft", "datasets", "bitsandbytes")
+
+# Curated QLoRA-trainable bases, smallest first. `params_b` is billions of params;
+# `min_vram` is the rough VRAM (GB) to QLoRA-train it in 4-bit with the hardened config
+# (gradient checkpointing + paged optimizer, seq ~512-1024). `note` is shown in the UI.
+BASES = [
+    {"id": "Qwen/Qwen3-1.7B", "params_b": 1.7, "min_vram": 4.0,
+     "note": "tiny & fast; easiest to train, lowest quality"},
+    {"id": "Qwen/Qwen3-4B", "params_b": 4.0, "min_vram": 6.0,
+     "note": "comfortable on 8GB; ~Qwen2.5-7B quality; fast LoRA cycles"},
+    {"id": "Qwen/Qwen3-8B", "params_b": 8.0, "min_vram": 7.5,
+     "note": "best quality that still trains on 8GB (~Qwen2.5-14B); tight — Unsloth recommended"},
+    {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "params_b": 7.6, "min_vram": 7.5,
+     "note": "code/tool specialist; strongest for coding-heavy use"},
+    {"id": "meta-llama/Llama-3.1-8B-Instruct", "params_b": 8.0, "min_vram": 7.5,
+     "note": "solid general 8B; broadest tooling; gated on HF (needs access)"},
+    {"id": "Qwen/Qwen3-14B", "params_b": 14.0, "min_vram": 12.0,
+     "note": "inference-grade; won't QLoRA-train on 8GB"},
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -43,12 +61,14 @@ class Feasibility:
     gpu: str = ""
     vram_gb: Optional[float] = None
     cuda: bool = False
+    unsloth: bool = False
     missing_deps: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"ok": self.ok, "gpu": self.gpu, "vram_gb": self.vram_gb,
-                "cuda": self.cuda, "missing_deps": self.missing_deps, "notes": self.notes}
+                "cuda": self.cuda, "unsloth": self.unsloth,
+                "missing_deps": self.missing_deps, "notes": self.notes}
 
 
 def _vram_gb() -> Optional[float]:
@@ -72,6 +92,49 @@ def _missing_deps() -> List[str]:
     return [d for d in _HEAVY_DEPS if importlib.util.find_spec(d) is None]
 
 
+def _has_unsloth() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("unsloth") is not None
+
+
+def available_bases(vram_gb: Optional[float] = None) -> List[dict]:
+    """The trainable-base catalog, each annotated with how it fits THIS GPU's VRAM."""
+    if vram_gb is None:
+        vram_gb = _vram_gb()
+    out = []
+    for b in BASES:
+        fit = "unknown"
+        if vram_gb is not None:
+            if vram_gb >= b["min_vram"] + 2:
+                fit = "fits"
+            elif vram_gb >= b["min_vram"]:
+                fit = "tight"
+            else:
+                fit = "won't fit"
+        out.append({**b, "fit": fit})
+    return out
+
+
+def recommended_config(vram_gb: Optional[float] = None) -> dict:
+    """VRAM-sized training knobs: base suggestion + seq length + memory savers."""
+    if vram_gb is None:
+        vram_gb = _vram_gb()
+    v = vram_gb or 0
+    if v >= 16:
+        base, seq = "Qwen/Qwen3-8B", 2048
+    elif v >= 10:
+        base, seq = "Qwen/Qwen3-8B", 1024
+    elif v >= 7:
+        base, seq = "Qwen/Qwen3-8B", 512      # 8GB: tight, needs the savers below
+    elif v >= 5:
+        base, seq = "Qwen/Qwen3-4B", 768
+    else:
+        base, seq = "Qwen/Qwen3-1.7B", 512
+    return {"base": base, "max_seq": seq, "grad_checkpointing": True,
+            "optimizer": "paged_adamw_8bit", "load_in_4bit": True,
+            "prefer_unsloth": True}
+
+
 def feasibility(cfg: Optional[Config] = None) -> Feasibility:
     """Report whether a LoRA run can happen on this host, and what's missing."""
     from . import host
@@ -85,18 +148,25 @@ def feasibility(cfg: Optional[Config] = None) -> Feasibility:
             cuda = bool(torch.cuda.is_available())
         except Exception:
             cuda = False
+    unsloth = _has_unsloth()
     notes: List[str] = []
     if missing:
         notes.append("install the training extras: pip install -r requirements-lora.txt")
+    if not unsloth and not missing:
+        notes.append("Unsloth not installed — training will fall back to transformers+peft "
+                     "(more VRAM, slower). pip install unsloth for the 8GB-friendly path")
     if vram is None:
         notes.append("no NVIDIA GPU detected — QLoRA needs CUDA; training is CPU-infeasible")
-    elif vram < 7.5:
-        notes.append(f"{vram} GB VRAM is tight for a 7-8B QLoRA; keep lora_max_seq low "
-                     "(<=1024), batch 1, and expect a slow run — or set a 3B base")
+    elif vram < 7:
+        notes.append(f"{vram} GB VRAM: use a <=4B base (an 8B won't fit for training)")
+    elif vram < 10:
+        notes.append(f"{vram} GB VRAM: an 8B trains but is tight — Unsloth + gradient "
+                     "checkpointing + seq 512 recommended (auto-applied)")
     if "bitsandbytes" not in missing and vram is not None:
-        notes.append("bitsandbytes on Windows can be finicky; if 4-bit fails, use WSL2")
+        notes.append("bitsandbytes/Unsloth on native Windows can be finicky; if 4-bit "
+                     "fails to load, run under WSL2")
     ok = (not missing) and cuda and (vram is not None)
-    return Feasibility(ok=ok, gpu=gpu, vram_gb=vram, cuda=cuda,
+    return Feasibility(ok=ok, gpu=gpu, vram_gb=vram, cuda=cuda, unsloth=unsloth,
                        missing_deps=missing, notes=notes)
 
 
@@ -270,59 +340,217 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
                            reason=f"dataset too small ({n}); build more first "
                                   f"(need >= {cfg.lora_min_examples})")
     _ensure()
-    _emit(emit, "lora", f"loading base {cfg.lora_base_model} in "
-          f"{'4-bit' if cfg.lora_4bit else 'full'} precision", level="tool")
+    # Auto-size the sequence length down on tight VRAM (an 8GB card can't hold seq 1024
+    # activations for an 8B); never exceed the configured cap.
+    rec = recommended_config(feas.vram_gb)
+    max_seq = min(int(cfg.lora_max_seq), int(rec["max_seq"]))
+    use_unsloth = bool(getattr(cfg, "lora_use_unsloth", True)) and _has_unsloth()
+    out_dir = ADAPTERS_DIR / time.strftime("%Y%m%d-%H%M%S")
+    _emit(emit, "lora", f"loading {cfg.lora_base_model} (4-bit, seq {max_seq}) via "
+          f"{'Unsloth' if use_unsloth else 'transformers+peft'}", level="tool")
     try:
         import torch
+        bf16 = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
         from datasets import load_dataset
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                                  BitsAndBytesConfig, DataCollatorForLanguageModeling,
-                                  Trainer, TrainingArguments)
-
-        tok = AutoTokenizer.from_pretrained(cfg.lora_base_model, use_fast=True)
-        if tok.pad_token is None:
-            tok.pad_token = tok.eos_token
-        quant = None
-        if cfg.lora_4bit:
-            quant = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.lora_base_model, quantization_config=quant, device_map="auto",
-            torch_dtype=torch.float16)
-        model = prepare_model_for_kbit_training(model)
-        lconf = LoraConfig(
-            r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
-            bias="none", task_type="CAUSAL_LM",
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
-        model = get_peft_model(model, lconf)
-
         ds = load_dataset("json", data_files=str(DATASET_FILE), split="train")
-        ds = ds.map(lambda r: _format_example(tok, r["instruction"], r["output"],
-                                              cfg.lora_max_seq),
+
+        if use_unsloth:
+            # Unsloth: same LoRA/QLoRA result, ~half the VRAM and faster — the path that
+            # makes an 8B fit on 8GB. Falls through to transformers+peft if it errors.
+            try:
+                from unsloth import FastLanguageModel
+                model, tok = FastLanguageModel.from_pretrained(
+                    model_name=cfg.lora_base_model, max_seq_length=max_seq,
+                    load_in_4bit=bool(cfg.lora_4bit), dtype=None)
+                model = FastLanguageModel.get_peft_model(
+                    model, r=cfg.lora_r, lora_alpha=cfg.lora_alpha,
+                    lora_dropout=cfg.lora_dropout, bias="none",
+                    use_gradient_checkpointing="unsloth",
+                    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                    "gate_proj", "up_proj", "down_proj"])
+            except Exception as ue:
+                _emit(emit, "lora", f"Unsloth path failed ({ue}); falling back to "
+                      "transformers+peft", level="info")
+                use_unsloth = False
+
+        if not use_unsloth:
+            from peft import (LoraConfig, get_peft_model,
+                              prepare_model_for_kbit_training)
+            from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                                      BitsAndBytesConfig)
+            tok = AutoTokenizer.from_pretrained(cfg.lora_base_model, use_fast=True)
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token
+            quant = None
+            if cfg.lora_4bit:
+                quant = BitsAndBytesConfig(
+                    load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=(torch.bfloat16 if bf16 else torch.float16),
+                    bnb_4bit_use_double_quant=True)
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.lora_base_model, quantization_config=quant, device_map="auto",
+                torch_dtype=(torch.bfloat16 if bf16 else torch.float16))
+            model = prepare_model_for_kbit_training(
+                model, use_gradient_checkpointing=bool(cfg.lora_grad_checkpointing))
+            model = get_peft_model(model, LoraConfig(
+                r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
+                bias="none", task_type="CAUSAL_LM",
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]))
+
+        from transformers import (DataCollatorForLanguageModeling, Trainer,
+                                  TrainingArguments)
+        ds = ds.map(lambda r: _format_example(tok, r["instruction"], r["output"], max_seq),
                     remove_columns=ds.column_names)
-        out_dir = ADAPTERS_DIR / time.strftime("%Y%m%d-%H%M%S")
         args = TrainingArguments(
             output_dir=str(out_dir / "_trainer"),
             per_device_train_batch_size=cfg.lora_batch_size,
             gradient_accumulation_steps=cfg.lora_grad_accum,
             num_train_epochs=cfg.lora_epochs, learning_rate=cfg.lora_lr,
-            fp16=True, logging_steps=5, save_strategy="no", report_to=[])
-        trainer = Trainer(
-            model=model, args=args, train_dataset=ds,
-            data_collator=DataCollatorForLanguageModeling(tok, mlm=False))
-        _emit(emit, "lora", f"training on {n} examples "
-              f"({cfg.lora_epochs} epoch(s))", level="tool")
+            gradient_checkpointing=bool(cfg.lora_grad_checkpointing),
+            optim=str(getattr(cfg, "lora_optimizer", "paged_adamw_8bit")),
+            bf16=bf16, fp16=not bf16, logging_steps=5, save_strategy="no", report_to=[])
+        trainer = Trainer(model=model, args=args, train_dataset=ds,
+                          data_collator=DataCollatorForLanguageModeling(tok, mlm=False))
+        _emit(emit, "lora", f"training on {n} examples ({cfg.lora_epochs} epoch(s))",
+              level="tool")
         trainer.train()
         out_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(out_dir))
         tok.save_pretrained(str(out_dir))
         (out_dir / "ag_meta.json").write_text(json.dumps({
             "base": cfg.lora_base_model, "examples": n, "r": cfg.lora_r,
+            "max_seq": max_seq, "unsloth": use_unsloth,
             "created": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2), encoding="utf-8")
         _emit(emit, "lora", f"adapter saved to {out_dir}", level="result")
         return TrainResult(True, adapter_path=str(out_dir), examples=n,
                            reason="training complete")
     except Exception as e:  # pragma: no cover - depends on GPU/deps at runtime
         return TrainResult(False, reason=f"training failed: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# Close the loop: merge adapter -> GGUF -> a selectable Ollama model
+# --------------------------------------------------------------------------- #
+@dataclass
+class MergeResult:
+    ok: bool
+    ollama_model: str = ""
+    gguf_path: str = ""
+    reason: str = ""
+
+
+def _find_gguf_converter(cfg: Config) -> Optional[str]:
+    """Locate llama.cpp's convert_hf_to_gguf.py — from config, PATH, or common spots."""
+    import shutil
+    cand = getattr(cfg, "gguf_convert_script", "") or ""
+    if cand and Path(cand).exists():
+        return cand
+    for name in ("convert_hf_to_gguf.py", "convert-hf-to-gguf.py"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for base in (Path.home() / "llama.cpp", Path.home() / "code" / "llama.cpp",
+                 ROOT.parent / "llama.cpp"):
+        p = base / "convert_hf_to_gguf.py"
+        if p.exists():
+            return str(p)
+    return None
+
+
+def merge_feasibility(cfg: Config) -> dict:
+    """What's needed to close the loop (merge -> GGUF -> Ollama), and what's missing."""
+    import shutil
+    missing = [d for d in ("torch", "transformers", "peft") if _missing(d)]
+    conv = _find_gguf_converter(cfg)
+    ollama = bool(shutil.which("ollama"))
+    ok = (not missing) and bool(conv) and ollama
+    notes = []
+    if missing:
+        notes.append("needs the training extras (torch/transformers/peft)")
+    if not conv:
+        notes.append("llama.cpp convert_hf_to_gguf.py not found — clone github.com/"
+                     "ggerganov/llama.cpp and set config.gguf_convert_script")
+    if not ollama:
+        notes.append("ollama not on PATH")
+    return {"ok": ok, "converter": conv or "", "ollama": ollama,
+            "missing_deps": missing, "notes": notes}
+
+
+def _missing(mod: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(mod) is None
+
+
+def merge_to_gguf(cfg: Config, adapter_id: str, *, emit=None) -> MergeResult:
+    """Merge a trained adapter into its base, convert to GGUF, and register it with
+    Ollama as a new selectable model. Best-effort; returns a clear reason on failure."""
+    from .pipeline import _emit
+    feas = merge_feasibility(cfg)
+    if not feas["ok"]:
+        return MergeResult(False, reason="; ".join(feas["notes"]) or "not ready")
+    adir = ADAPTERS_DIR / adapter_id
+    if not adir.exists():
+        return MergeResult(False, reason=f"adapter not found: {adapter_id}")
+    try:
+        import shutil
+        import torch
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        base = cfg.lora_base_model
+        try:
+            meta = json.loads((adir / "ag_meta.json").read_text(encoding="utf-8"))
+            base = meta.get("base", base)
+        except Exception:
+            pass
+        _emit(emit, "lora", f"merging adapter into {base}", level="tool")
+        model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.float16,
+                                                     device_map="cpu")
+        model = PeftModel.from_pretrained(model, str(adir))
+        model = model.merge_and_unload()
+        merged = adir / "merged"
+        merged.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(str(merged))
+        AutoTokenizer.from_pretrained(base).save_pretrained(str(merged))
+
+        conv = _find_gguf_converter(cfg)
+        gguf = adir / f"model.{cfg.lora_gguf_quant}.gguf"
+        _emit(emit, "lora", "converting merged model to GGUF", level="tool")
+        import sys as _sys
+        r = subprocess.run([_sys.executable, conv, str(merged), "--outfile", str(gguf),
+                            "--outtype", cfg.lora_gguf_quant],
+                           capture_output=True, text=True, timeout=3600)
+        if r.returncode != 0 or not gguf.exists():
+            # Some converter versions don't quantize; fall back to f16 then quantize.
+            gguf_f16 = adir / "model.f16.gguf"
+            r2 = subprocess.run([_sys.executable, conv, str(merged), "--outfile",
+                                 str(gguf_f16), "--outtype", "f16"],
+                                capture_output=True, text=True, timeout=3600)
+            if r2.returncode != 0 or not gguf_f16.exists():
+                return MergeResult(False, reason=f"GGUF conversion failed: "
+                                   f"{(r.stderr or r2.stderr)[-300:]}")
+            q = shutil.which("llama-quantize") or shutil.which("quantize")
+            if q:
+                subprocess.run([q, str(gguf_f16), str(gguf), cfg.lora_gguf_quant],
+                               capture_output=True, text=True, timeout=1800)
+            gguf = gguf if gguf.exists() else gguf_f16
+
+        name = f"ag-{_slug_model(base)}-{adapter_id}"
+        modelfile = adir / "Modelfile"
+        modelfile.write_text(f"FROM {gguf.name}\n", encoding="utf-8")
+        _emit(emit, "lora", f"registering Ollama model {name}", level="tool")
+        rc = subprocess.run(["ollama", "create", name, "-f", str(modelfile)],
+                            capture_output=True, text=True, timeout=1800, cwd=str(adir))
+        if rc.returncode != 0:
+            return MergeResult(False, gguf_path=str(gguf),
+                               reason=f"ollama create failed: {rc.stderr[-300:]}")
+        _emit(emit, "lora", f"Ollama model ready: {name} "
+              f"(select it as your backend)", level="result")
+        return MergeResult(True, ollama_model=name, gguf_path=str(gguf),
+                           reason=f"registered Ollama model '{name}'")
+    except Exception as e:  # pragma: no cover - env-dependent
+        return MergeResult(False, reason=f"merge failed: {e}")
+
+
+def _slug_model(hf_id: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", hf_id.split("/")[-1].lower()).strip("-")

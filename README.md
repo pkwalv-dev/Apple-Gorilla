@@ -410,27 +410,42 @@ to a shared registry the lineage inherits). It is gated throughout:
 
 Everything else improves AG's *scaffolding* around a fixed brain. LoRA is the one
 subsystem that improves the **brain itself** — but only a **local** model (you have no
-weight access to Claude). It QLoRA-fine-tunes a small base (default a 7-8B in 4-bit,
-sized for an 8GB GPU) on a dataset **distilled from AG's own memory plus a Claude
-teacher set**, and saves a LoRA adapter under `state/lora/adapters/`.
+weight access to Claude). It QLoRA-fine-tunes a small base on a dataset **distilled
+from AG's own memory plus a Claude teacher set**, and saves an adapter under
+`state/lora/adapters/`.
+
+**AG detects your VRAM and offers bases sized to it** (`ag lora options` / the GUI
+selector flags each as fits / tight / won't-fit). On an 8GB card the default is
+**Qwen3-8B** (≈ Qwen2.5-14B quality, trains tight); a 3-4B is the comfortable choice.
+Training uses **Unsloth** when installed (~half the VRAM, ~1.6× faster — what makes an
+8B fit on 8GB) and **falls back to transformers+peft** when it isn't. The 8GB path
+auto-applies gradient checkpointing, a paged 8-bit optimizer, bf16, and a short
+sequence length.
 
 ```bash
-python -m ag lora status        # GPU/VRAM/CUDA + deps + dataset size + can-train?
+python -m ag lora status        # GPU/VRAM/CUDA + Unsloth + deps + dataset + can-train?
+python -m ag lora options       # trainable bases, each flagged for YOUR VRAM
 python -m ag lora build-data    # merge memory + teacher pairs into the training set
 python -m ag lora train         # QLoRA run (needs a GPU + the extras below)
-python -m ag lora list          # adapters trained so far
+python -m ag lora merge <id>    # merge adapter -> GGUF -> register as an Ollama model
 ```
 
-Deliberately **optional and out of the portable core**: the heavy deps
-(`torch`/`transformers`/`peft`/`datasets`/`bitsandbytes`) live in
-**`requirements-lora.txt`** and are imported lazily only at train time, so the base
-tool stays pure-Python and `ag bundle --check` still passes. `ag lora status` (and the
-GUI **LoRA** tab) preflight the host and refuse cleanly if a GPU or the extras are
-missing — it never trains on CPU or on too little data.
+**Closing the loop:** since AG answers via Ollama (GGUF), `lora merge` merges the
+adapter into its base, converts to GGUF (needs llama.cpp's `convert_hf_to_gguf.py`),
+and `ollama create`s it as a **selectable backend** — so a fine-tune actually improves
+what AG runs.
 
-> **Honest scope.** Scaffolding evolution is asymptotic to the base model's ceiling;
-> LoRA raises that ceiling, but only for the small local model you train, and only as
-> far as your data and VRAM allow. It is not, and will not, fine-tune Claude.
+Deliberately **optional and out of the portable core**: the heavy deps
+(`torch`/`transformers`/`peft`/`datasets`/`bitsandbytes`, plus optional `unsloth`) live
+in **`requirements-lora.txt`** and import lazily only at train time, so the base tool
+stays pure-Python and `ag bundle --check` still passes. `ag lora status` (and the GUI
+**LoRA** tab) preflight the host and refuse cleanly if a GPU/extras are missing.
+
+> **Honest scope.** A LoRA adapter is bound to its exact base model — it is not applied
+> to "any model AG uses". Weight-tuning is capped by VRAM (~8B dense on 8GB; your 32GB
+> RAM + CPU speed data prep and let the optimizer spill, but don't raise the trainable
+> ceiling — they *do* help you *run* bigger models). It is not, and will not, fine-tune
+> Claude, and can't train the 30B-A3B MoE on 8GB.
 
 ## Autonomy, Chrome, and tools — permission-gated
 
