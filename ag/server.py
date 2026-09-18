@@ -108,17 +108,21 @@ table.hist td.rat{color:#8b949e;font-style:italic}
           <option value="">loading…</option>
         </select>
       </label>
-      <label class="ctl" title="Extended thinking — like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to its default.">thinking
+      <label class="ctl">thinking
         <select id="think" class="ctl-select" onchange="saveThink()">
           <option value="auto">auto</option>
           <option value="off">off · fast</option>
           <option value="on">on</option>
         </select>
       </label>
-      <label class="ctl" title="Grant outbound internet for this run: AG may search the web and fetch pages, injecting them as untrusted reference data. Off = no network access, pure reasoning + local tools only."><input type="checkbox" id="web" checked> internet</label>
-      <label class="ctl" title="Enable the reason→act→observe loop: AG can call tools (exact-math calc, read local files, recall/save memory, delegate to a sub-agent) before answering. Off = a single model call with no tool use."><input type="checkbox" id="tools" checked onchange="syncTools()"> tools</label>
-      <label class="ctl" title="DANGEROUS: let the python_exec tool run real Python in a subprocess on this machine. Requires 'tools'. Off by default — only enable for prompts you trust."><input type="checkbox" id="codeexec" onchange="saveCtl()"> run code</label>
-      <label class="ctl" title="Self-extend: if AG lacks a capability this prompt needs, it may AUTHOR a new tested skill (and install its Python deps / fetch allowlisted code), then use it. Requires 'tools'. New skills persist and are reused."><input type="checkbox" id="acquire" onchange="syncTools()"> self-extend</label>
+      <button class="help" data-help="Extended thinking, like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to decide. Only affects thinking-capable models (Claude, Qwen3); ignored by others.">?</button>
+      <label class="ctl"><input type="checkbox" id="web" checked> internet</label>
+      <label class="ctl"><input type="checkbox" id="tools" checked onchange="syncTools()"> tools</label>
+      <button class="help" data-help="Turns on AG's reason→act→observe loop: it can call tools (exact-math calc, read local files, recall/save memory, delegate to a sub-agent) before answering. Off = a single model call with no tool use.">?</button>
+      <label class="ctl"><input type="checkbox" id="codeexec" onchange="saveCtl()"> run code</label>
+      <button class="help" data-help="DANGEROUS: lets the python_exec tool run real Python in a subprocess on this machine. Requires 'tools'. Off by default — only enable for prompts you trust.">?</button>
+      <label class="ctl"><input type="checkbox" id="acquire" onchange="syncTools()"> self-extend</label>
+      <button class="help" data-help="If AG lacks a capability this prompt needs, it authors a new tested skill (and may install Python deps / fetch allowlisted code), then uses it. Requires 'tools'. New skills persist and are reused, and are inherited by sub-agents.">?</button>
       <label class="ctl" id="autonwrap" title="How self-extend proceeds. ask = plan and wait for your approval before installing/running anything (surfaced in the live trace). auto = complete end-to-end within this run's grants.">acquire
         <select id="autonomy" class="ctl-select" onchange="saveCtl()">
           <option value="ask">ask first</option>
@@ -238,9 +242,17 @@ table.hist td.rat{color:#8b949e;font-style:italic}
       the training extras (<code>requirements-lora.txt</code>); heavy and explicit.</p>
     <div id="lorastatus" class="emptyrow">loading status…</div>
     <div class="controls" style="margin-top:6px">
+      <label class="ctl">base model
+        <select id="lorabase" class="ctl-select" onchange="loraSetBase()"><option>…</option></select>
+      </label>
+      <button class="help" data-help="The local model AG will fine-tune. Options are flagged for your GPU: 'fits' = comfortable, 'tight' = works with the memory-savers, 'won't fit' = inference-only. A LoRA adapter is bound to its base — it only works on this exact model.">?</button>
+    </div>
+    <div class="controls" style="margin-top:6px">
       <button class="view" onclick="loadLora()">Refresh</button>
       <button class="cmd" onclick="loraBuild()">Build dataset</button>
+      <button class="help" data-help="Assembles the training set from AG's own memory (high-scoring past runs + learned procedures) plus a Claude-generated teacher set. The teacher step calls the model, so it costs a few calls.">?</button>
       <button class="cmd" id="loratrain" onclick="loraTrain()">Train adapter</button>
+      <button class="help" data-help="Runs one QLoRA fine-tune on the built dataset (needs a CUDA GPU + the training extras; uses Unsloth when installed). Heavy and long; runs in the background.">?</button>
     </div>
     <div id="loraout"></div>
   </div>
@@ -851,6 +863,30 @@ async function genImage(){
   if(btn) btn.disabled=false;
 }
 // restore the transcript and status (where it runs + evolve) as soon as the page loads
+/* ---- help popovers (click to open; works on touch) ------------------- */
+let HELP_POP=null;
+function closeHelp(){ if(HELP_POP){ HELP_POP.remove(); HELP_POP=null; } }
+document.addEventListener('click', function(e){
+  const btn=e.target.closest && e.target.closest('.help');
+  if(btn){
+    e.preventDefault(); e.stopPropagation();
+    const txt=btn.getAttribute('data-help')||'';
+    if(HELP_POP && HELP_POP._for===btn){ closeHelp(); return; }
+    closeHelp();
+    const p=document.createElement('div'); p.className='help-pop'; p._for=btn;
+    p.innerHTML='<span class="hx" onclick="closeHelp()">\\u2715</span>'+escapeHtml(txt);
+    document.body.appendChild(p);
+    const r=btn.getBoundingClientRect();
+    let left=Math.min(r.left, window.innerWidth-p.offsetWidth-12);
+    let top=r.bottom+6;
+    if(top+p.offsetHeight>window.innerHeight-8) top=Math.max(8,r.top-p.offsetHeight-6);
+    p.style.left=Math.max(8,left)+'px'; p.style.top=top+'px';
+    HELP_POP=p; return;
+  }
+  if(HELP_POP && !e.target.closest('.help-pop')) closeHelp();
+});
+window.addEventListener('resize', closeHelp);
+
 /* ---- tabs ------------------------------------------------------------- */
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.pane===name));
@@ -862,29 +898,56 @@ function switchTab(name){
 }
 /* ---- lora ------------------------------------------------------------- */
 let LORA_POLL=null;
+let LORA_MERGE_READY=false;
 async function loadLora(){
   try{
     const d=await (await fetch('/lora/status')).json();
     const f=d.feasibility||{};
     const tr=d.training||{};
+    LORA_MERGE_READY=!!d.merge_ready;
+    // base selector, annotated with fit for this GPU
+    const sel=$('lorabase');
+    if(sel){ sel.innerHTML=(d.bases||[]).map(b=>'<option value="'+escapeHtml(b.id)+'"'
+      +(b.id===d.base?' selected':'')+'>'+escapeHtml(b.id)+' · '+b.params_b+'B · '+b.fit
+      +'</option>').join(''); }
     $('lorastatus').className='kv';
     $('lorastatus').innerHTML=
       'GPU <b>'+escapeHtml(f.gpu||'?')+'</b> · VRAM <b>'+(f.vram_gb==null?'?':f.vram_gb+' GB')
-      +'</b> · CUDA <b>'+(f.cuda?'yes':'no')+'</b><br>base <b>'+escapeHtml(d.base||'?')
-      +'</b> · dataset <b>'+(d.dataset_size||0)+'</b> example(s) · adapters <b>'+(d.adapters||[]).length+'</b>'
+      +'</b> · CUDA <b>'+(f.cuda?'yes':'no')+'</b> · Unsloth <b>'+(f.unsloth?'yes':'no')
+      +'</b><br>dataset <b>'+(d.dataset_size||0)+'</b> example(s) · adapters <b>'
+      +(d.adapters||[]).length+'</b> · merge→Ollama <b>'+(d.merge_ready?'ready':'not set up')+'</b>'
       +'<br>trainable now: <b>'+(f.ok?'YES':'no')+'</b>'
       +(f.missing_deps&&f.missing_deps.length?' · missing: '+escapeHtml(f.missing_deps.join(', ')):'')
       +((f.notes||[]).map(n=>'<br>&nbsp;• '+escapeHtml(n)).join(''))
-      +(tr.running?'<br><b>training in progress…</b>':(tr.last?'<br>last: '+escapeHtml(tr.last):''));
+      +(tr.running?'<br><b>LoRA job in progress…</b>':(tr.last?'<br>last: '+escapeHtml(tr.last):''));
     $('loratrain').disabled=!!tr.running;
     const ad=(d.adapters||[]);
     $('loraout').innerHTML = ad.length
       ? ad.map(a=>'<div class="skitem"><span class="sknm">'+escapeHtml(a.id)+'</span>'
-          +'<span class="skds">base '+escapeHtml(a.base||'?')+' · '+(a.examples||'?')+' examples</span></div>').join('')
+          +'<span class="skds">base '+escapeHtml(a.base||'?')+' · '+(a.examples||'?')+' examples'
+          +(a.unsloth?' · unsloth':'')+'</span>'
+          +(LORA_MERGE_READY?'<button class="linkbtn" onclick="loraMerge(\\''+escapeHtml(a.id)
+             +'\\')">merge → Ollama</button>':'')+'</div>').join('')
       : '<div class="emptyrow">No adapters yet. Build a dataset, then train.</div>';
     if(tr.running && !LORA_POLL){ LORA_POLL=setInterval(loadLora,4000); }
     if(!tr.running && LORA_POLL){ clearInterval(LORA_POLL); LORA_POLL=null; }
   }catch(e){ $('lorastatus').textContent='could not load LoRA status: '+e; }
+}
+async function loraSetBase(){
+  const base=$('lorabase').value;
+  try{ await fetch('/lora/set-base',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({base:base})}); }catch(e){}
+  loadLora();
+}
+async function loraMerge(adapter){
+  if(!confirm('Merge "'+adapter+'" into its base, convert to GGUF, and register it with Ollama? This is heavy and long.')) return;
+  try{
+    const d=await (await fetch('/lora/merge',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({adapter:adapter})})).json();
+    if(!d.started){ $('loraout').innerHTML='<div class="result bad">'+escapeHtml(d.reason||'could not start')+'</div>'; }
+    else{ $('loraout').innerHTML='<div class="result">merge started — runs in the background; status updates above.</div>'; }
+    loadLora();
+  }catch(e){ $('loraout').innerHTML='<div class="result bad">merge failed to start: '+escapeHtml(''+e)+'</div>'; }
 }
 async function loraBuild(){
   $('loraout').innerHTML='<div class="result">building dataset (memory + teacher — the teacher set calls the model)…</div>';
@@ -1157,9 +1220,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "checks": [c.as_dict() for c in checks]}), "application/json")
         elif self.path == "/lora/status":
             from . import lora
+            feas = lora.feasibility(self.cfg)
             self._send(200, json.dumps({
-                "feasibility": lora.feasibility(self.cfg).as_dict(),
+                "feasibility": feas.as_dict(),
                 "base": self.cfg.lora_base_model,
+                "bases": lora.available_bases(feas.vram_gb),
+                "recommended": lora.recommended_config(feas.vram_gb),
+                "merge_ready": lora.merge_feasibility(self.cfg)["ok"],
                 "dataset_size": lora.dataset_size(),
                 "adapters": lora.list_adapters(),
                 "training": dict(_Handler._lora_train)}), "application/json")
@@ -1224,6 +1291,36 @@ class _Handler(BaseHTTPRequestHandler):
                 res = lora.train(cfg)
                 _Handler._lora_train = {"running": False, "last": res.reason}
             except Exception as e:  # pragma: no cover - defensive
+                _Handler._lora_train = {"running": False, "last": f"error: {e}"}
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._send(200, json.dumps({"started": True}), "application/json")
+
+    def _start_lora_merge(self, adapter: str):
+        """Merge an adapter -> GGUF -> Ollama in a background thread (long-running)."""
+        from . import lora
+        if not adapter:
+            self._send(200, json.dumps({"started": False, "reason": "no adapter given"}),
+                       "application/json")
+            return
+        with _Handler._lora_lock:
+            if _Handler._lora_train.get("running"):
+                self._send(200, json.dumps({"started": False,
+                           "reason": "a LoRA job is already in progress"}), "application/json")
+                return
+            mf = lora.merge_feasibility(self.cfg)
+            if not mf["ok"]:
+                self._send(200, json.dumps({"started": False,
+                           "reason": "; ".join(mf["notes"])}), "application/json")
+                return
+            _Handler._lora_train = {"running": True, "last": ""}
+        cfg = self.cfg
+
+        def _worker():
+            try:
+                res = lora.merge_to_gguf(cfg, adapter)
+                _Handler._lora_train = {"running": False, "last": res.reason}
+            except Exception as e:  # pragma: no cover
                 _Handler._lora_train = {"running": False, "last": f"error: {e}"}
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -1296,6 +1393,24 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/lora/train":
                 self._start_lora_train()
                 return
+            if path == "/lora/set-base":
+                from . import lora
+                base = str(payload.get("base", "")).strip()
+                valid = {b["id"] for b in lora.available_bases()}
+                if base not in valid:
+                    self._send(200, json.dumps({"ok": False, "reason": "unknown base"}),
+                               "application/json")
+                    return
+                cfg = Config.load()
+                cfg.lora_base_model = base
+                cfg.save()
+                _Handler.cfg = cfg
+                self._send(200, json.dumps({"ok": True, "base": base}), "application/json")
+                return
+            if path == "/lora/merge":
+                adapter = str(payload.get("adapter", "")).strip()
+                self._start_lora_merge(adapter)
+                return
         except Exception as e:
             self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
             return
@@ -1303,7 +1418,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path in ("/fleet/act", "/skills/act", "/skills/acquire", "/bundle/export",
-                         "/lora/build", "/lora/train"):
+                         "/lora/build", "/lora/train", "/lora/set-base", "/lora/merge"):
             try:
                 n = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(n) or b"{}") if n else {}

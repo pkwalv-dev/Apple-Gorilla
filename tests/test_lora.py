@@ -82,3 +82,36 @@ def test_train_refuses_without_deps_or_gpu(monkeypatch, tmp_path):
 def test_list_adapters_empty(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
     assert lora.list_adapters() == []
+
+
+def test_available_bases_annotates_fit_by_vram():
+    # 8GB: an 8B is 'tight'/'fits'-ish; a 14B won't fit; a 4B fits.
+    b8 = {x["id"]: x for x in lora.available_bases(8.0)}
+    assert b8["Qwen/Qwen3-4B"]["fit"] == "fits"
+    assert b8["Qwen/Qwen3-14B"]["fit"] == "won't fit"
+    # 24GB: everything fits.
+    b24 = {x["id"]: x for x in lora.available_bases(24.0)}
+    assert b24["Qwen/Qwen3-8B"]["fit"] == "fits"
+
+
+def test_recommended_config_scales_with_vram():
+    assert lora.recommended_config(8.0)["base"] == "Qwen/Qwen3-8B"
+    assert lora.recommended_config(8.0)["max_seq"] <= 512      # tight -> short seq
+    assert lora.recommended_config(5.0)["base"] == "Qwen/Qwen3-4B"
+    assert lora.recommended_config(24.0)["max_seq"] >= 1024
+    assert lora.recommended_config(8.0)["grad_checkpointing"] is True
+
+
+def test_merge_feasibility_reports_missing(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    mf = lora.merge_feasibility(Config())
+    assert isinstance(mf["ok"], bool)
+    assert "notes" in mf
+    # Deps aren't installed in the test env, so it must not be ready and must say why.
+    assert mf["ok"] is False and mf["notes"]
+
+
+def test_merge_refuses_cleanly_without_stack(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    res = lora.merge_to_gguf(Config(), "nonexistent-adapter")
+    assert res.ok is False and res.reason

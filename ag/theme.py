@@ -335,6 +335,19 @@ table.hist td.rat{color:var(--muted);font-style:italic;font-family:var(--font)}
 .bcheck.bad .led{background:var(--danger)}
 .bcheck .bd{color:var(--muted);font-family:var(--mono);font-size:.74rem;margin-top:2px}
 
+/* --- help icons (click-to-open, mobile-friendly) --------------------- */
+.help{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+  border-radius:999px;border:1px solid var(--border);background:var(--surface-2);
+  color:var(--muted);font-family:var(--mono);font-size:.62rem;font-weight:700;line-height:1;
+  cursor:pointer;margin-left:5px;padding:0;flex:none;vertical-align:middle;user-select:none}
+.help:hover,.help:focus{color:var(--accent);border-color:var(--accent-2);outline:none}
+.help-pop{position:fixed;z-index:60;max-width:290px;background:var(--elev);
+  border:1px solid color-mix(in srgb,var(--accent) 35%,var(--border));border-radius:10px;
+  box-shadow:var(--shadow);padding:11px 13px 12px;font-size:.82rem;line-height:1.5;color:var(--text)}
+.help-pop .hx{float:right;margin:-2px -3px 0 10px;cursor:pointer;color:var(--faint);
+  font-weight:700;font-family:var(--mono)}
+.help-pop .hx:hover{color:var(--text)}
+
 /* --- skills registry ------------------------------------------------- */
 .skitem{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 12px;
   border:1px solid var(--border);border-radius:8px;margin:6px 0}
