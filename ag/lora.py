@@ -37,6 +37,10 @@ _HEAVY_DEPS = ("torch", "transformers", "peft", "datasets", "bitsandbytes")
 # `min_vram` is the rough VRAM (GB) to QLoRA-train it in 4-bit with the hardened config
 # (gradient checkpointing + paged optimizer, seq ~512-1024). `note` is shown in the UI.
 BASES = [
+    {"id": "OBLITERATUS/Qwen2.5-Coder-7B-Instruct-OBLITERATED", "params_b": 7.6,
+     "min_vram": 7.5,
+     "note": "AG default: abliterated (uncensored) coder base; strongest for coding/tool "
+             "use and won't refuse tasks. Public full weights."},
     {"id": "Qwen/Qwen3-1.7B", "params_b": 1.7, "min_vram": 4.0,
      "note": "tiny & fast; easiest to train, lowest quality"},
     {"id": "Qwen/Qwen3-4B", "params_b": 4.0, "min_vram": 6.0,
