@@ -286,9 +286,15 @@ def cmd_doctor(args) -> int:
         print(f"last improvement: {last.get('ts')} "
               f"Δ{last.get('delta')} -> {last.get('candidate_fitness')}/10")
 
-    # Effective backend for a plain `run`.
+    # Effective backend for a plain `run` — mirror make_client: auto uses Anthropic
+    # when creds exist, else the configured offline backend (default local Ollama).
     if cfg.backend == "auto":
-        eff = "anthropic" if (has_key or oauth) else "dry-run (stub answers)"
+        if has_key or oauth:
+            eff = "anthropic"
+        elif (getattr(cfg, "offline_backend", "") or "dry").lower() == "ollama":
+            eff = f"ollama ({cfg.ollama_model})"
+        else:
+            eff = "dry-run (stub answers)"
     else:
         eff = cfg.backend
     print(f"status:           ready — effective backend: {eff}")
@@ -747,6 +753,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # AG prints Unicode (Δ, ·, —, →) in its output; the legacy Windows console defaults
+    # to cp1252, which raises UnicodeEncodeError on those. Force UTF-8 so the CLI works
+    # everywhere (a no-op on platforms that are already UTF-8).
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = build_parser().parse_args(argv)
     # dry_run may be absent on some subparsers; normalize.
     if not hasattr(args, "dry_run"):
