@@ -85,6 +85,32 @@ def remember(text: str, tags: Optional[List[str]] = None, *,
                             source=source)
 
 
+_SELF_REF_MARKERS = (
+    # identity questions
+    "your name", "who are you", "what are you", "about yourself",
+    "what is apple-gorilla", "who is apple-gorilla", "know about yourself",
+    "gotten smarter", "gotten any smarter", "abliterated model", "describe yourself",
+    "your capabilities", "do you have persistent memory", "are you sentient",
+    "are you conscious",
+    # (false) self-descriptions AG must not learn or recall about itself
+    "protocol layer", "not an autonomous agent",
+    "no persistent memory", "do not have persistent memory",
+    "does not have persistent memory", "without persistent memory",
+    "no built-in file access", "do not have built-in file access",
+    "no direct file access", "without direct file access",
+    "self-iteration", "limited to text-based", "cannot fulfill this request",
+)
+
+
+def is_self_reference(text: str) -> bool:
+    """True if the text is about AG's own identity/nature/capabilities. Such content is
+    the system prompt's domain (prompts.AG_IDENTITY), not memory's: storing or recalling
+    it lets a stale/wrong self-description override the authoritative identity. So memory
+    neither captures nor recalls it."""
+    t = (text or "").lower()
+    return any(mk in t for mk in _SELF_REF_MARKERS)
+
+
 def recall(query: str, *, k: int = 5) -> List[Memory]:
     return _root().recall(query, k=k)
 

@@ -225,7 +225,11 @@ class MemoryManager:
     # --- context block (back-compat surface used by the pipeline) ----------
     def memory_context(self, query: str, *, k: int = 5,
                        kinds: Optional[Iterable[str]] = None) -> str:
+        from . import is_self_reference
         hits = self.recall(query, k=k, kinds=kinds)
+        # Never inject AG self-descriptions into the executor context — identity is set
+        # authoritatively by the system prompt; a recalled self-description would fight it.
+        hits = [m for m in hits if not is_self_reference(m.text)]
         return "\n".join(f"- {m.text}" for m in hits)
 
     # --- maintenance -------------------------------------------------------
