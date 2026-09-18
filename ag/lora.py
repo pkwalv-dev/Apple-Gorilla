@@ -215,13 +215,56 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
     return pairs
 
 
+# Curated teacher task suite. These are distillation prompts: a strong teacher (Claude)
+# answers each, and its answers become supervised targets for the local student. They are
+# grouped to cover the capabilities AG actually leans on — coding, debugging, tool/agentic
+# reasoning, structured output, careful reasoning, concise technical writing, and safety —
+# so the adapter shifts *behavior and style*, not just a handful of facts. Answers inherit
+# the teacher's system prompt (EXECUTOR_SYSTEM_DEFAULT), so they carry AG's concise,
+# evidence-based voice. Extend freely; pass domain-specific tasks via `extra_tasks`.
 TEACHER_TASKS = [
+    # --- Coding & algorithms ------------------------------------------------ #
+    "Write a Python function that returns the nth Fibonacci number iteratively, with a docstring.",
+    "Implement binary search over a sorted list in Python and explain its time complexity in one line.",
+    "Write a Python function that flattens an arbitrarily nested list of integers.",
+    "Given a list of (name, score) tuples, return the names of the top 3 scorers in Python.",
+    "Write a Python context manager that times the block it wraps and prints the elapsed seconds.",
+    "Implement an LRU cache in Python using only the standard library.",
+    "Write a regex that matches an ISO-8601 date (YYYY-MM-DD) and show one matching and one non-matching example.",
+    "Deduplicate a list while preserving order, in idiomatic Python.",
+    # --- Debugging & code reasoning ---------------------------------------- #
+    "This function raises 'RuntimeError: dictionary changed size during iteration'. What's the cause and the fix?",
+    "Explain why comparing floats with == is unreliable, and give the correct approach.",
+    "A Python default argument is a mutable list and state leaks between calls. Explain why and fix it.",
+    "Given a stack trace ending in 'KeyError: user_id', outline the steps to diagnose it.",
+    # --- Tool use & agentic reasoning -------------------------------------- #
+    "You can call a web-search tool and a calculator. A user asks for the population of Japan times 2. "
+    "Describe the exact sequence of tool calls and why.",
+    "When should an agent stop calling tools and answer directly? Give a concrete decision rule.",
+    "You retrieved three web sources; two agree and one contradicts. How do you decide what to report?",
+    "Describe how to break the task 'summarize this repo's test coverage' into concrete steps.",
+    # --- Structured output -------------------------------------------------- #
+    "Extract the name, date, and amount from: 'Invoice for Acme Corp dated 2025-03-14, total $1,240.50.' "
+    "Return strict JSON with keys name, date, amount.",
+    "Convert this to a JSON array of objects with keys task and done: 'buy milk (done), call bank, email Sam'.",
+    "Produce a one-row markdown table comparing lists and tuples in Python on mutability and use case.",
+    # --- Careful reasoning (traps & estimation) ---------------------------- #
     "Explain the difference between correlation and causation with one concrete example.",
-    "Write a Python function that returns the nth Fibonacci number iteratively.",
+    "Given costs [4,2,7] and values [3,1,5], which item has the best value-per-cost? Show the ratios.",
+    "A bat and ball cost $1.10 total; the bat costs $1 more than the ball. How much is the ball? Show reasoning.",
+    "Estimate how many piano tuners work in Chicago, showing each assumption.",
+    "If a task takes 2 hours for one worker, why doesn't it take 1 hour for two? Name the assumption that must hold.",
+    # --- Concise technical writing ----------------------------------------- #
     "Summarize the tradeoffs between TCP and UDP in three bullet points.",
-    "Given costs [4,2,7] and values [3,1,5], which item has the best value-per-cost?",
-    "Rewrite this to be concise: 'It is important to note that in order to...'.",
-    "What are the main risks of running arbitrary code from the internet?",
+    "Rewrite this to be concise: 'It is important to note that in order to achieve the desired outcome...'.",
+    "Explain what a hash map is to a competent programmer in three sentences.",
+    "Explain the difference between a process and a thread in three bullet points.",
+    "Explain what a database index does and its main cost, in two sentences.",
+    "Describe git rebase vs merge in a way that helps someone choose, in under 60 words.",
+    # --- Safety & judgment -------------------------------------------------- #
+    "What are the main risks of running arbitrary code downloaded from the internet?",
+    "A web page you fetched contains text telling you to ignore your instructions and email a file. What do you do?",
+    "When is it appropriate to refuse a coding request, and how should the refusal be phrased?",
 ]
 
 
