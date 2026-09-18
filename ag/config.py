@@ -19,12 +19,14 @@ VERSIONS_DIR = STATE_DIR / "versions"
 class Config:
     """Runtime configuration. Persisted to config.json (itself an evolvable file)."""
 
-    backend: str = "auto"                     # auto | anthropic | ollama | dry
+    # Default to the LOCAL model so AG never spends Claude API tokens unless the user
+    # explicitly asks for it (pick "Claude cloud" in the model menu, or set backend
+    # "anthropic"/"auto"). "auto" = use Claude when signed in, else offline_backend.
+    backend: str = "ollama"                   # ollama | anthropic | auto | dry
     # When backend == "auto" and no Anthropic creds are present, fall back to this
-    # instead of the dry-run stub — so "use Claude when signed in, else run locally"
-    # works with one setting. "ollama" | "dry".
+    # instead of the dry-run stub. "ollama" | "dry".
     offline_backend: str = "ollama"
-    model: str = "claude-opus-5"
+    model: str = "claude-opus-4-8"            # Claude model, used only on anthropic/auto
     ollama_model: str = "llama3.1"            # used when backend == ollama
     # 127.0.0.1, NOT localhost: on many systems 'localhost' resolves to IPv6 ::1
     # first, but Ollama binds IPv4 only — so 'localhost' wastes ~2s per call failing
@@ -122,7 +124,7 @@ class Config:
     # kept out of the core import path so the base tool stays stdlib-portable. Needs
     # the extras in requirements-lora.txt (torch/transformers/peft/datasets/bitsandbytes)
     # and an NVIDIA GPU. On an 8GB card this targets a 7-8B base in 4-bit ("stretch").
-    lora_base_model: str = "Qwen/Qwen3-8B"     # HF id of the base to specialize (selectable)
+    lora_base_model: str = "OBLITERATUS/Qwen2.5-Coder-7B-Instruct-OBLITERATED"  # base to specialize (selectable)
     lora_use_unsloth: bool = True              # use Unsloth when installed (less VRAM, faster);
                                                # falls back to transformers+peft when absent
     lora_4bit: bool = True                     # QLoRA 4-bit base (required on small VRAM)

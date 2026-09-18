@@ -1,5 +1,5 @@
 {
-  "backend": "auto",
+  "backend": "ollama",
   "offline_backend": "ollama",
   "model": "claude-opus-4-8",
   "ollama_model": "qwen2.5-coder:7b",
