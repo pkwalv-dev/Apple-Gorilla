@@ -58,16 +58,8 @@ class Config:
     # its default. Applies to thinking-capable backends (Qwen3 via Ollama, Claude via
     # the API); ignored by models that don't think.
     think: str = "auto"                       # off | auto | on
-    # Interactive pipeline shape. "fast" = ONE model call (skip prompt-engineering
-    # AND the self-critique/revise loop) — the responsive default, so AG stays usable
-    # and quick to iterate with on a local model. "full" = engineer the prompt, then
-    # self-critique and revise (several calls, higher quality, much slower). Web,
-    # profile, memory, and conversation context apply in BOTH modes.
-    pipeline_mode: str = "fast"               # fast | full
     max_output_tokens: int = 32000            # main answer generation
-    meta_output_tokens: int = 16000           # optimizer / critic / evolve calls
-    max_iterations: int = 2                   # critique->revise rounds
-    critic_pass_threshold: float = 8.0        # 0..10; at/above this we stop iterating
+    meta_output_tokens: int = 16000           # optimizer / evolve calls
     speed_budget_s: float = 30.0              # target wall-clock for a full speed score
     score_weights: dict = field(default_factory=lambda: {  # directed-evolution axes
         "accuracy": 0.5, "quality": 0.3, "speed": 0.2,
@@ -125,6 +117,31 @@ class Config:
     # must be on github_allowlist. Off unless refs are configured.
     evolve_use_github: bool = False
     evolve_github_refs: List[dict] = field(default_factory=list)
+    # --- LoRA fine-tuning (optional; ag/lora.py) ----------------------------
+    # Weight-level self-improvement of a LOCAL model via QLoRA. Heavy, opt-in, and
+    # kept out of the core import path so the base tool stays stdlib-portable. Needs
+    # the extras in requirements-lora.txt (torch/transformers/peft/datasets/bitsandbytes)
+    # and an NVIDIA GPU. On an 8GB card this targets a 7-8B base in 4-bit ("stretch").
+    lora_base_model: str = "Qwen/Qwen3-8B"     # HF id of the base to specialize (selectable)
+    lora_use_unsloth: bool = True              # use Unsloth when installed (less VRAM, faster);
+                                               # falls back to transformers+peft when absent
+    lora_4bit: bool = True                     # QLoRA 4-bit base (required on small VRAM)
+    lora_grad_checkpointing: bool = True       # recompute activations -> big VRAM saving
+    lora_optimizer: str = "paged_adamw_8bit"   # paged 8-bit: small state, spills to RAM
+    lora_r: int = 16                           # LoRA rank
+    lora_alpha: int = 32                       # LoRA alpha
+    lora_dropout: float = 0.05
+    lora_epochs: float = 1.0
+    lora_lr: float = 2e-4
+    lora_max_seq: int = 1024                   # detection lowers this on tight VRAM
+    lora_batch_size: int = 1
+    lora_grad_accum: int = 8                   # effective batch without the memory cost
+    lora_min_examples: int = 16                # refuse to train on too little data
+    lora_teacher_backend: str = "anthropic"    # backend that generates the teacher set
+    # Closing the loop: after training, merge the adapter into the base and convert to
+    # GGUF so the fine-tuned model becomes a selectable Ollama backend.
+    lora_gguf_quant: str = "q4_k_m"            # quantization for the exported GGUF
+    gguf_convert_script: str = ""              # path to llama.cpp convert_hf_to_gguf.py (auto-found if empty)
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory

@@ -2,7 +2,7 @@
 from ag import scoring
 from ag.config import Config
 from ag.model import make_client
-from ag.pipeline import run as run_pipeline, critique
+from ag.pipeline import run as run_pipeline
 
 
 def test_speed_score_full_marks_under_budget():
@@ -55,22 +55,14 @@ def test_weakest_axis_picks_lowest_average():
     assert scoring.weakest_axis([]) == "accuracy"
 
 
-def test_critique_falls_back_to_score_without_subscores():
-    # The dry-run critic emits only `score`; accuracy/quality must fall back to it.
+def test_pipeline_scorecard_is_measured_speed_only():
+    # The self-review loop is gone: a run reports MEASURED speed and leaves the
+    # judged axes unscored (None) rather than fabricating them.
     cfg = Config()
     client = make_client(dry_run=True)
-    crit = critique(client, cfg, "why is the sky blue?", "because rayleigh scattering")
-    assert crit.accuracy == crit.score
-    assert crit.quality == crit.score
-
-
-def test_pipeline_populates_scorecard():
-    cfg = Config()
-    client = make_client(dry_run=True)
-    # Full mode produces the judged+measured blend; fast mode (the default) leaves the
-    # judged axes unscored and is covered in test_smoke.
-    rec = run_pipeline(client, cfg, "Explain entropy.", fast=False)
+    rec = run_pipeline(client, cfg, "Explain entropy.")
     sc = rec.scorecard
-    assert sc and set(("accuracy", "quality", "speed", "overall")).issubset(sc)
-    assert 0.0 <= sc["overall"] <= 10.0
+    assert sc and "speed" in sc and sc["speed"] is not None
+    assert sc.get("accuracy") is None and sc.get("quality") is None
+    assert sc.get("overall") is None
     assert sc["elapsed_s"] >= 0.0

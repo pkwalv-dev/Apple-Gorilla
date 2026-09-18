@@ -11,7 +11,7 @@ def test_page_is_valid_html():
 
 def test_page_has_realtime_log_and_scorecard_ui():
     # The live log + scorecard + tools UI must be present (the whole point of the GUI).
-    for hook in ("id=\"log\"", "getReader", "/tools", "scorecard", "accuracy"):
+    for hook in ("id=\"log\"", "getReader", "/tools", "scorecard", "speed"):
         assert hook in server.PAGE, f"GUI missing {hook!r}"
 
 

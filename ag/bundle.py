@@ -36,8 +36,8 @@ _ALLOWED_THIRD_PARTY = {"anthropic"}
 _FIRST_PARTY_ROOTS = {"ag"}
 
 # What travels in a bundle (learned state included; heavy/rebuildable state excluded).
-_INCLUDE = ["ag", "profile", "config.json", "requirements.txt", "README.md",
-            "AG.bat", "AG.command", "docs"]
+_INCLUDE = ["ag", "profile", "config.json", "requirements.txt", "requirements-lora.txt",
+            "README.md", "AG.bat", "AG.command", "docs"]
 _INCLUDE_STATE = ["memory", "skills", "archive"]      # carry learning; skip runs/versions/images
 _EXCLUDE_NAMES = {"__pycache__", ".pytest_cache", ".git"}
 
@@ -87,9 +87,13 @@ def check() -> List[Check]:
     """Audit the portability constraints. Returns a list of Checks (ok/detail)."""
     checks: List[Check] = []
 
-    # 1) stdlib-only core (allow anthropic).
+    # 1) stdlib-only core (allow anthropic). lora.py is the designated OPTIONAL module
+    #    (weight-training extras in requirements-lora.txt, imported lazily) — it is not
+    #    part of the portable core, so it is exempt from this check.
     offenders = {}
     for p in _iter_core_py():
+        if p.name == "lora.py":
+            continue
         extra = _third_party_imports(p) - _ALLOWED_THIRD_PARTY
         if extra:
             offenders[str(p.relative_to(ROOT))] = sorted(extra)
