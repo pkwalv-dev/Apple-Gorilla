@@ -95,6 +95,11 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
         return []
     try:
         from . import memory
+        # Never store self-referential exchanges: AG's identity/capabilities are set by
+        # the system prompt, and a captured (often stale/wrong) self-description would be
+        # recalled later and override it. See memory.is_self_reference.
+        if memory.is_self_reference(raw_prompt) or memory.is_self_reference(answer):
+            return []
         user = (
             (f"# Earlier context\n{conversation}\n\n" if conversation else "")
             + f"# User's message\n{raw_prompt}\n\n# AG's answer\n{answer[:2000]}\n"
@@ -157,7 +162,12 @@ def optimize(client, cfg: Config, raw_prompt: str,
     sys_p, user_p = _split_engineered(res.text)
     if not user_p:  # optimizer failed to produce; fall back to raw
         sys_p, user_p = "", raw_prompt
-    return sys_p or prompts.EXECUTOR_SYSTEM_DEFAULT, user_p, res.text
+    # Identity must survive the optimizer: when it emits a task system prompt, prepend
+    # AG_IDENTITY so the executor never answers as a generic base model. When it emits
+    # none, EXECUTOR_SYSTEM_DEFAULT already carries the identity.
+    executor_system = (prompts.AG_IDENTITY + "\n\n" + sys_p) if sys_p \
+        else prompts.EXECUTOR_SYSTEM_DEFAULT
+    return executor_system, user_p, res.text
 
 
 def gather_web_context(query: str, broker, *, max_results: int = 3, candidates: int = 8,

@@ -223,7 +223,11 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
             mt = re.search(r"Q:\s*(.*?)\s*A:\s*(.*)", m.text, re.DOTALL)
             if mt:
                 q, a = mt.group(1).strip(), mt.group(2).strip()
-                if q and a and not _is_identity_question(q):
+                # Reuse the shared self-reference filter (checks question AND answer) so
+                # identity/self-description never trains from memory. See
+                # memory.is_self_reference and _IDENTITY_Q_MARKERS.
+                if q and a and not (memory.is_self_reference(q)
+                                    or memory.is_self_reference(a)):
                     pairs.append({"instruction": q, "output": a, "source": "memory"})
         for m in mgr.store.all("root", [memory.MemoryKind.PROCEDURAL]):
             if m.text.strip():
