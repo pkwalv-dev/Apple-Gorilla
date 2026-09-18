@@ -5,9 +5,19 @@
 # Install a CUDA-matched torch build first if the default wheel doesn't match your
 # driver (see https://pytorch.org/get-started/locally/). bitsandbytes provides the
 # 4-bit (QLoRA) kernels and is CUDA/Windows-sensitive; use WSL2 if 4-bit won't load.
+#
+# Verified working combo on WSL2 (Ubuntu, Python 3.12) + RTX 4060 8GB, driver 591.86:
+#   torch 2.6.0+cu124  (install via: pip install torch --index-url \
+#       https://download.pytorch.org/whl/cu124)
+#   transformers 5.5.0, peft 0.21.0, datasets, accelerate, bitsandbytes 0.50.2
+#   unsloth 2026.9.6 (optional; 2x faster / ~half VRAM)
+# NOTE: with torch 2.6, torchao MUST be pinned <=0.13 — torchao 0.18 (pulled by the
+# newest unsloth) calls torch.utils._pytree.register_constant, which only exists in
+# torch >=2.7, and its absence breaks transformers/peft import entirely.
 torch>=2.2
 transformers>=4.44
 peft>=0.12
 datasets>=2.20
 accelerate>=0.33
 bitsandbytes>=0.43
+torchao<=0.13  # only relevant on torch 2.6.x (see note above); harmless otherwise
