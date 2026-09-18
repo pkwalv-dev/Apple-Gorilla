@@ -470,15 +470,30 @@ class TrainResult:
 
 
 def _format_example(tokenizer, instruction: str, output: str, max_seq: int) -> dict:
-    """Render one pair with the base model's chat template (fallback to a plain format)."""
+    """Tokenize one pair, MASKING the prompt so training loss is computed on the answer
+    tokens only (label -100 = "ignore"). Without this the model also spends gradient
+    learning to predict the question, which dilutes answer quality."""
     try:
-        text = tokenizer.apply_chat_template(
+        full = tokenizer.apply_chat_template(
             [{"role": "user", "content": instruction},
              {"role": "assistant", "content": output}],
             tokenize=False)
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": instruction}],
+            tokenize=False, add_generation_prompt=True)
     except Exception:
-        text = f"### Instruction:\n{instruction}\n\n### Response:\n{output}"
-    return tokenizer(text, truncation=True, max_length=max_seq)
+        prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
+        full = prompt + output
+    enc = tokenizer(full, truncation=True, max_length=max_seq)
+    n_prompt = min(len(tokenizer(prompt, truncation=True, max_length=max_seq)["input_ids"]),
+                   len(enc["input_ids"]))
+    labels = list(enc["input_ids"])
+    for i in range(n_prompt):
+        labels[i] = -100
+    if all(tok_id == -100 for tok_id in labels):  # answer truncated away — avoid a NaN row
+        labels = list(enc["input_ids"])
+    enc["labels"] = labels
+    return enc
 
 
 def train(cfg: Config, *, emit=None) -> TrainResult:
@@ -556,7 +571,7 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
                 bias="none", task_type="CAUSAL_LM",
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]))
 
-        from transformers import (DataCollatorForLanguageModeling, Trainer,
+        from transformers import (DataCollatorForSeq2Seq, Trainer,
                                   TrainingArguments)
         ds = ds.map(lambda r: _format_example(tok, r["instruction"], r["output"], max_seq),
                     remove_columns=ds.column_names)
@@ -569,7 +584,8 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
             optim=str(getattr(cfg, "lora_optimizer", "paged_adamw_8bit")),
             bf16=bf16, fp16=not bf16, logging_steps=5, save_strategy="no", report_to=[])
         trainer = Trainer(model=model, args=args, train_dataset=ds,
-                          data_collator=DataCollatorForLanguageModeling(tok, mlm=False))
+                          data_collator=DataCollatorForSeq2Seq(tok, padding=True,
+                                                               label_pad_token_id=-100))
         _emit(emit, "lora", f"training on {n} examples ({cfg.lora_epochs} epoch(s))",
               level="tool")
         trainer.train()
