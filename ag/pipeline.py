@@ -160,26 +160,45 @@ def optimize(client, cfg: Config, raw_prompt: str,
     return sys_p or prompts.EXECUTOR_SYSTEM_DEFAULT, user_p, res.text
 
 
-def gather_web_context(query: str, broker, *, max_results: int = 3,
-                       max_chars: int = 1500, emit=None) -> str:
-    """Search + fetch top results into a labeled, untrusted reference block.
+def gather_web_context(query: str, broker, *, max_results: int = 3, candidates: int = 8,
+                       max_chars: int = 1800, min_relevance: float = 0.15,
+                       emit=None) -> str:
+    """Search + rerank + extract the on-topic passage from the best pages.
 
+    Instead of dumping the first N chars of DDG's top 3, this: (1) distills a focused
+    search query from the prompt, (2) searches wider and reranks candidates by relevance,
+    (3) fetches the best and extracts the most query-relevant passages, (4) drops
+    low-relevance pages. Fetched content stays UNTRUSTED reference data.
     Network is gated: `broker` must hold a 'network' grant or this raises.
     """
     from .tools import web
-    _emit(emit, "web", f"searching the web: {query[:80]}", level="web")
-    results = web.web_search(query, broker=broker, max_results=max_results)
-    _emit(emit, "web", f"{len(results)} result(s) found", level="web",
-          count=len(results))
-    blocks = []
-    for r in results[:max_results]:
+    sq = web.extract_query(query)
+    _emit(emit, "web", f"search query: {sq}", level="web")
+    results = web.web_search(sq, broker=broker, max_results=candidates)
+    ranked = sorted(results,
+                    key=lambda r: web.relevance(sq, f"{r.title} {r.snippet}"),
+                    reverse=True)
+    _emit(emit, "web", f"{len(results)} candidate(s); selecting up to {max_results}",
+          level="web", count=len(results))
+    blocks: list[str] = []
+    for r in ranked:
+        if len(blocks) >= max_results:
+            break
         try:
-            body = web.web_fetch(r.url, broker=broker, max_chars=max_chars)
-            _emit(emit, "web", f"fetched {r.url} ({len(body)} chars)", level="web")
+            raw = web.web_fetch(r.url, broker=broker, max_chars=8000)
         except Exception as e:
-            body = r.snippet
             _emit(emit, "web", f"fetch failed for {r.url}: {e}", level="error")
-        blocks.append(f"SOURCE: {r.title}\nURL: {r.url}\n{body}")
+            continue
+        rel = web.relevance(sq, raw)
+        if rel < min_relevance and blocks:
+            _emit(emit, "web", f"skipped {r.url} (low relevance {rel:.2f})", level="web")
+            continue
+        passage = web.best_passages(raw, sq, max_chars=max_chars)
+        _emit(emit, "web", f"used {r.url} (relevance {rel:.2f}, {len(passage)} chars)",
+              level="web")
+        blocks.append(f"SOURCE: {r.title}\nURL: {r.url}\nRELEVANCE: {rel:.2f}\n{passage}")
+    if not blocks:
+        _emit(emit, "web", "no sufficiently relevant sources found", level="web")
     return "\n\n".join(blocks)
 
 
