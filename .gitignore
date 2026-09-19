@@ -12,6 +12,7 @@ state/skills/
 state/images/
 state/video/
 state/fleet/
+state/sessions/
 !state/versions/.gitkeep
 !state/runs/.gitkeep
 .DS_Store

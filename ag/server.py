@@ -1992,7 +1992,10 @@ class _Handler(BaseHTTPRequestHandler):
         merged = dict(overrides or {})
         merged.update(self._parse_model_choice(model))
         cfg = dataclasses.replace(self.cfg, **merged)
-        web_eff = bool(cfg.allow_web)
+        # Ambient web is suppressed on plain conversational turns: a chat like "how's it
+        # going?" should not fire eight web searches. An explicit task still searches.
+        from .pipeline import _conversational
+        web_eff = bool(cfg.allow_web) and not _conversational(prompt)
         broker = _build_broker(cfg, web=web_eff)
         # Normalize the session id (a per-tab id from the client) so this run's working
         # memory loads and saves under one key; empty falls back to a raw transcript.

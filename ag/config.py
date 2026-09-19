@@ -32,6 +32,14 @@ class Config:
     # first, but Ollama binds IPv4 only — so 'localhost' wastes ~2s per call failing
     # over ::1 before retrying 127.0.0.1. This hits every model call; keep it numeric.
     ollama_host: str = "http://127.0.0.1:11434"
+    # Dual-model routing: the abliterated coder model is the right tool for uncensored,
+    # code, and media/tool work, but a poor conversationalist — it emits report
+    # scaffolding and refuses/clarifies instead of answering. So plain conversation is
+    # routed to a stronger local INSTRUCT model, while task/tool turns keep the
+    # abliterated one. Set chat_model="" to disable routing (single-model). The chat
+    # model must be pulled in Ollama; if it is missing, AG falls back to ollama_model.
+    chat_model: str = "qwen2.5:7b"            # instruct model for conversational turns
+    chat_routing: bool = True                 # route plain chat to chat_model, one-shot
     ollama_keep_alive: str = "30m"            # keep the model resident between calls
     ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     # When the local Ollama server isn't reachable, try to launch `ollama serve`
