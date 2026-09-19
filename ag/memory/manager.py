@@ -344,11 +344,20 @@ class MemoryManager:
     # --- recall ------------------------------------------------------------
     def recall(self, query: str, *, k: int = 5, kinds: Optional[Iterable[str]] = None,
                span_lineage: bool = True, expand: bool = True,
-               min_confidence: Optional[float] = None) -> List[Memory]:
+               min_confidence: Optional[float] = None,
+               min_relevance: Optional[float] = None) -> List[Memory]:
         """Return up to k memories most relevant to `query`, blended across signals
         (including belief) and expanded one hop along links. Anything below the
         confidence floor is withheld entirely — recalling a claim AG has no reason to
-        believe is worse than recalling nothing. Empty query -> nothing."""
+        believe is worse than recalling nothing. Empty query -> nothing.
+
+        `min_relevance` is an optional TOPICALITY gate for the auto-inject path: a
+        memory qualifies only if it shares a content word with the query or is
+        genuinely similar to it (semantic cosine >= min_relevance). Without it, a
+        high-importance, high-confidence but entirely off-topic memory (a stray
+        reflected procedure about song lyrics, say) rides recency/belief into the
+        context of an unrelated question and derails a small model. The explicit recall
+        tool leaves this off, so a deliberate search still reaches everything."""
         query = (query or "").strip()
         if not query:
             return []
@@ -365,13 +374,26 @@ class MemoryManager:
                 pool[m.id] = (self._score(m, qvec, qtok), m)
 
         ranked = sorted(pool.values(), key=lambda t: t[0], reverse=True)
-        top = [m for s, m in ranked if s > 0 and self.belief(m) >= floor][:k]
+        top = [m for s, m in ranked
+               if s > 0 and self.belief(m) >= floor
+               and (min_relevance is None
+                    or self._on_topic(m, qvec, qtok, min_relevance))][:k]
 
         if expand and top:
             self._expand_links(top, pool, k, floor)
 
         self._touch(top)
         return top
+
+    def _on_topic(self, m: Memory, qvec, qtok: set, thr: float) -> bool:
+        """Whether a memory is actually about the query, as opposed to merely ranking
+        well on recency/importance/belief. Either a shared content word or real semantic
+        similarity counts; neither means it is off-topic and must not be auto-injected."""
+        if qtok & _tokens(m.text + " " + " ".join(m.tags)):
+            return True
+        if qvec and m.embedding and cosine(qvec, m.embedding) >= thr:
+            return True
+        return False
 
     def _expand_links(self, top: List[Memory], pool: Dict[str, Tuple[float, Memory]],
                       k: int, floor: float) -> None:
@@ -432,7 +454,9 @@ class MemoryManager:
 
     # --- context block (back-compat surface used by the pipeline) ----------
     def context(self, query: str, *, k: int = 5,
-                kinds: Optional[Iterable[str]] = None) -> dict:
+                kinds: Optional[Iterable[str]] = None,
+                max_reported: Optional[int] = None,
+                min_relevance: Optional[float] = None) -> dict:
         """Recall, split by belief, for injection into the executor's system prompt.
 
         Returning known and merely-reported claims separately is the point: the
@@ -450,7 +474,7 @@ class MemoryManager:
         """
         if kinds is None:
             kinds = (MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL)
-        hits = self.recall(query, k=k, kinds=kinds)
+        hits = self.recall(query, k=k, kinds=kinds, min_relevance=min_relevance)
         # Identity is set authoritatively by the system prompt, so a recalled
         # self-description would only fight it. Operational self-knowledge — what AG's
         # own tools and skills actually do — is kept: that is the part worth having
@@ -459,6 +483,12 @@ class MemoryManager:
                 if not (m.subject == Subject.SELF and is_identity_claim(m.text))]
         known = [m for m in hits if self.belief(m) >= self.trust_threshold]
         reported = [m for m in hits if self.belief(m) < self.trust_threshold]
+        # Auto-inject discipline: an unconfirmed hypothesis is worth flagging, but a pile
+        # of them is just noise crowding a small window. Keep the strongest few (hits are
+        # already ranked) and leave the rest to the explicit recall tool.
+        if max_reported is not None and max_reported >= 0:
+            reported = reported[:max_reported]
+            hits = known + reported
         return {"known": [m.text for m in known],
                 "reported": [_reported_line(m, self.belief(m)) for m in reported],
                 "text": _render_context(known, reported, self.belief),

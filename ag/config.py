@@ -209,6 +209,13 @@ class Config:
     })
     memory_reflect: bool = True                 # distill episodes -> facts/procedures
     memory_reflect_every: int = 10              # run reflection every N auto-memory writes
+    # --- Auto-inject discipline (B1): keep the durable block from crowding the window.
+    # Only what AG can actually stand on is auto-injected; unconfirmed hypotheses are
+    # capped hard and otherwise reached on demand via the recall tool.
+    memory_inject_k: int = 4                     # max durable facts recalled into context
+    memory_inject_max_reported: int = 2          # max unconfirmed hypotheses auto-injected
+    memory_inject_min_relevance: float = 0.55    # auto-inject only topically-relevant memory
+                                                 # (shared word, or semantic cosine >= this)
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main

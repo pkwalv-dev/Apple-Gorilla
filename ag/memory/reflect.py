@@ -45,8 +45,9 @@ def consolidate(mgr: MemoryManager) -> dict:
     caps. Folding is *corroboration-aware* — two records of the same claim raise belief
     only when they came from different origins, so a duplicate that is merely the same
     source recorded twice is dropped without inflating confidence. Never raises."""
-    summary = {"merged": 0, "corroborated": 0}
+    summary = {"merged": 0, "corroborated": 0, "pruned": 0}
     try:
+        summary["pruned"] = _prune_stale(mgr)
         from .embed import cosine
         sem = mgr.store.all(mgr.agent, [MemoryKind.SEMANTIC])
         kept: List[Memory] = []
@@ -80,6 +81,42 @@ def consolidate(mgr: MemoryManager) -> dict:
     except Exception as e:  # pragma: no cover - defensive
         summary["error"] = str(e)
     return summary
+
+
+def _prune_stale(mgr: MemoryManager) -> int:
+    """Drop durable memories that are genuinely dead weight: belief has fallen BELOW the
+    recall floor (so they are never surfaced anyway), they have never once been useful
+    (use_count 0), and they are old enough that a late corroboration is unlikely.
+
+    This is what keeps the store from silently bloating with decayed volatile claims and
+    rejected/disputed facts — the noise that crowds a small context window and slows
+    recall — without touching anything AG still has grounds to believe or has ever used.
+    Episodes are left to the retention cap; this is only for the durable layers.
+    """
+    from .types import effective_confidence
+    removed = 0
+    min_age = max(1.0, 2.0 * mgr.halflife_days)
+    for kind in (MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL):
+        for m in mgr.store.all(mgr.agent, [kind]):
+            if m.use_count > 0 or m.disputed:
+                continue
+            if mgr.belief(m) >= mgr.confidence_floor:
+                continue
+            age = _age_days(m.last_used or m.created)
+            if age is not None and age < min_age:
+                continue
+            if mgr.store.delete(mgr.agent, m.id):
+                removed += 1
+    return removed
+
+
+def _age_days(ts: str):
+    import time as _t
+    try:
+        then = _t.mktime(_t.strptime(ts, "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
+    return max(0.0, (_t.time() - then) / 86400.0)
 
 
 def reflect(mgr: MemoryManager, client, cfg, *, max_episodes: int = 20,
