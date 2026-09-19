@@ -96,22 +96,9 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <!-- ================= CHAT ================= -->
 <div class="tabpane active" id="pane-chat">
 
-<div class="panel">
-  <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
-  <div class="controls">
-    <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
-    <button class="cmd" id="stopbtn" onclick="stopRun()" hidden>Stop</button>
-    <span class="cmd-note">executes a request</span>
-    <!-- Generated from ag/controls.py — one declaration drives the markup, the
-         browser's save/restore/collect, and the server's config overrides. Add a
-         capability there, not here. -->
-    <span class="ctl-right">
-__CONTROLS__
-    </span>
-  </div>
-</div>
-
-<h2>Conversation</h2>
+<!-- Scrolls independently so the input below stays pinned and never slides off-screen
+     while an answer streams. -->
+<div id="chatscroll">
 <!-- context bar: lights up to show which sources feed the CURRENT answer -->
 <div id="ctxbar" title="What AG is drawing on for the current answer — each lights up as it is used">
   <span class="ctxlbl">context in use:</span>
@@ -136,6 +123,22 @@ __CONTROLS__
 
 <h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
 <div class="panel" style="padding:8px"><div id="log"></div></div>
+</div><!-- /chatscroll -->
+
+<div class="panel" id="inputpanel">
+  <textarea id="p" placeholder="Ask Apple-Gorilla anything…  (Ctrl+Enter to send)"></textarea>
+  <div class="controls">
+    <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
+    <button class="cmd" id="stopbtn" onclick="stopRun()" hidden>Stop</button>
+    <span class="cmd-note">Ctrl+Enter to send</span>
+    <!-- Generated from ag/controls.py — one declaration drives the markup, the
+         browser's save/restore/collect, and the server's config overrides. Add a
+         capability there, not here. -->
+    <span class="ctl-right">
+__CONTROLS__
+    </span>
+  </div>
+</div>
 </div><!-- /pane-chat -->
 
 <!-- ================= FLEET ================= -->
@@ -307,9 +310,18 @@ function saveChat(){
 function clearChat(){
   if(!CHAT.length||confirm('Clear the whole conversation?')){ CHAT=[]; saveChat(); renderChat(); }
 }
+// Scroll the message region to the newest content. Only auto-follows when the reader
+// is already near the bottom (or force=true, e.g. right after they send), so scrolling
+// up to re-read an earlier turn is never yanked back down mid-stream.
+function scrollChat(force){
+  const s=$('chatscroll'); if(!s) return;
+  const nearBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 120;
+  if(force||nearBottom) s.scrollTop=s.scrollHeight;
+}
 function ctxFooter(c){
   if(!c) return '';
   const bits=[];
+  if(c.model) bits.push(escapeHtml(c.model));
   if(c.history) bits.push(''+c.history+' prior turn'+(c.history>1?'s':''));
   if(c.profile) bits.push('profile');
   if(c.memory&&c.memory.length) bits.push(''+c.memory.length+' memory fact'+(c.memory.length>1?'s':''));
@@ -336,7 +348,7 @@ function bubble(m){
 }
 function renderChat(){
   $('chat').innerHTML=CHAT.map(bubble).join('');
-  $('chat').scrollTop=$('chat').scrollHeight;
+  scrollChat(true);
 }
 function appendUser(text){
   CHAT.push({role:'user',text:text,ts:nowStr()}); renderChat(); saveChat();
@@ -352,7 +364,7 @@ function appendAssistant(){
     +'<details class="verbose" hidden><summary>reasoning &amp; live output</summary>'
     +'<pre class="vbody"></pre></details>'
     +'<div class="live-ctx"></div>';
-  $('chat').appendChild(el); $('chat').scrollTop=$('chat').scrollHeight;
+  $('chat').appendChild(el); scrollChat(true);
   return el;
 }
 
@@ -506,7 +518,7 @@ function handle(ev,ai){
     if(det){ det.hidden=false; det.open=true;
       const pre=det.querySelector('.vbody');
       if(pre){ pre.textContent+=((ev.data&&ev.data.text)||''); } }
-    $('chat').scrollTop=$('chat').scrollHeight; return;
+    scrollChat(); return;
   }
   if(ev.stage==='progress'){ return; }   // heartbeat only (keeps Stop responsive)
   if(ev.stage==='error'){   // terminal pipeline error — make it visible, don't hang
@@ -523,12 +535,12 @@ function handle(ev,ai){
     const lc=ai.querySelector('.live-ctx'); if(lc) lc.remove();
     const sc=d.scorecard||{};
     const ctx={history:curCtx.history,profile:curCtx.profile,memory:curCtx.memory,
-               web:curCtx.web,saved:curCtx.saved,
+               web:curCtx.web,saved:curCtx.saved,model:d.model_used||'',
                overall:(sc.overall!=null?sc.overall:null)};
     ai.insertAdjacentHTML('beforeend',ctxFooter(ctx));
     const entry={role:'ai',text:d.answer||'(no answer)',ctx:ctx,ts:nowStr()};
     CHAT.push(entry); ai._entry=entry; ai._committed=true; saveChat();
-    $('chat').scrollTop=$('chat').scrollHeight;
+    scrollChat();
     $('status').textContent='done · '+(d.elapsed_s||0)+'s'+(d.dry_run?' · dry-run':'');
     checkUpdate();   // one on-demand check AFTER the run — never a background poll
     return;
@@ -1113,6 +1125,12 @@ function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
   if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
 
 restoreCtls(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+// Ctrl/Cmd+Enter sends from the chat box (a plain Enter still inserts a newline, so
+// multi-line prompts are easy to write).
+(function(){ const p=$('p'); if(!p) return;
+  p.addEventListener('keydown', function(e){
+    if((e.ctrlKey||e.metaKey) && e.key==='Enter'){ e.preventDefault();
+      if(!$('runbtn').disabled) go(); } }); })();
 </script></body></html>"""
 
 _MODEL_PICKER = """      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
@@ -2037,7 +2055,8 @@ class _Handler(BaseHTTPRequestHandler):
                                on_delta=on_delta, cancel=canceller)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
-                "elapsed_s": rec.elapsed_s, "dry_run": rec.dry_run}})
+                "elapsed_s": rec.elapsed_s, "dry_run": rec.dry_run,
+                "model_used": rec.model_used}})
             # Fill long-term memory AFTER the answer is on screen, so it never delays
             # the response. Best-effort; a "saved N fact(s)" event streams if it stores.
             try:
@@ -2128,13 +2147,41 @@ def _models_data(cfg: Config) -> dict:
     backend to use and which model. Local (Ollama) models are always listed if the
     server is reachable; the cloud Claude model is offered only when creds/OAuth are
     present. `current` reflects what a run would use right now with no override."""
+    import re as _re
     from .model import _has_anthropic_creds, has_oauth_profile
     models = _list_ollama_models(cfg)
     cloud = bool(_has_anthropic_creds() or has_oauth_profile())
+
+    # Curate the list: drop what can't answer a prompt (embedding models) and raw
+    # timestamped build artifacts (e.g. ...-obliterated-20260918-215836) that just
+    # duplicate a stable alias — the "unused models" clutter. AG's two working models
+    # (the abliterated task model and the instruct chat model) are labelled and sorted
+    # to the top; everything else pulled remains selectable.
+    def _keep(name: str) -> bool:
+        low = name.lower()
+        if "embed" in low:
+            return False
+        if _re.search(r"-\d{8}-\d{6}", name):   # a dated build snapshot, not a model
+            return False
+        return True
+
+    abl, chat = cfg.ollama_model, getattr(cfg, "chat_model", "")
+
+    def _label(m: str) -> str:
+        if m == abl:
+            return f"{m} · local · uncensored (abliterated)"
+        if m == chat:
+            return f"{m} · local · chat (instruct)"
+        return f"{m} · local"
+
+    def _rank(m: str) -> int:
+        return 0 if m == abl else 1 if m == chat else 2
+
+    kept = sorted((m for m in models if _keep(m)), key=lambda m: (_rank(m), m.lower()))
     # Local models first so the offline default is the obvious top choice; the cloud
     # Claude option is listed last and labelled with its cost, since picking it is the
     # user's explicit opt-in to spend API tokens.
-    options = [{"value": f"ollama:{m}", "label": f"{m} · local"} for m in models]
+    options = [{"value": f"ollama:{m}", "label": _label(m)} for m in kept]
     if cloud:
         options.append({"value": f"anthropic:{cfg.model}",
                         "label": f"{cfg.model} · Claude cloud (uses API tokens)"})

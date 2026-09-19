@@ -240,8 +240,14 @@ button.view:hover{color:var(--text);border-style:solid;border-color:var(--accent
 .linkbtn{background:none;border:none;color:var(--muted);font-size:.76rem;font-weight:600;
   padding:4px 6px;cursor:pointer;border-radius:6px}
 .linkbtn:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
-#chat{display:flex;flex-direction:column;gap:14px;max-height:520px;overflow:auto;padding:6px}
-#chat:empty::after{content:'Conversation appears here — send a prompt above to begin.';
+/* Chat pane: a flex column that fills the viewport. The message region scrolls on its
+   own so the input stays pinned at the bottom and never slides off while a long answer
+   streams (the old bug: input sat above a growing list and scrolled out of view). */
+#pane-chat.active{display:flex;flex-direction:column;height:calc(100vh - 128px)}
+#chatscroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+#inputpanel{flex:none;margin-top:12px;position:sticky;bottom:0;z-index:5}
+#chat{display:flex;flex-direction:column;gap:14px;padding:6px}
+#chat:empty::after{content:'Conversation appears here — send a prompt below to begin.';
   color:var(--faint);font-size:.88rem;display:block;padding:22px;text-align:center}
 .msg{display:flex;flex-direction:column;gap:4px;max-width:88%}
 .msg.user{align-self:flex-end;align-items:flex-end}
