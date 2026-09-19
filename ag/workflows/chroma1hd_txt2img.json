@@ -1,0 +1,120 @@
+{
+  "_ag": {
+    "title": "Chroma1-HD \u2014 text to image",
+    "model": "lodestones/Chroma1-HD (8.9B, Apache-2.0)",
+    "note": "De-distilled FLUX.1-schnell retrained with no safety filter. Unlike FLUX it honours real CFG and negative prompts, which is why the sampler below uses cfg 4.0 rather than 1.0. fp8mixed is the 8.56GB repack; the 16.58GB bf16 also loads on an 8GB card via offloading, just slower.",
+    "files": {
+      "models/diffusion_models/Chroma1-HD-fp8mixed.safetensors": "https://huggingface.co/Comfy-Org/Chroma1-HD_repackaged (split_files/diffusion_models/)",
+      "models/text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors": "https://huggingface.co/comfyanonymous/flux_text_encoders",
+      "models/vae/ae.safetensors": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged (split_files/vae/) \u2014 the FLUX VAE, from an ungated repack"
+    }
+  },
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "Chroma1-HD-fp8mixed.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "chroma"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "__AG_PROMPT__",
+      "clip": [
+        "2",
+        0
+      ]
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "__AG_NEGATIVE__",
+      "clip": [
+        "2",
+        0
+      ]
+    }
+  },
+  "6": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": "__AG_WIDTH__",
+      "height": "__AG_HEIGHT__",
+      "batch_size": 1
+    }
+  },
+  "7": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift": 3.0
+    }
+  },
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": "__AG_SEED__",
+      "steps": "__AG_STEPS__",
+      "cfg": 4.0,
+      "sampler_name": "euler",
+      "scheduler": "beta",
+      "denoise": 1.0,
+      "model": [
+        "7",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "latent_image": [
+        "6",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "8",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "9",
+        0
+      ],
+      "filename_prefix": "ag/chroma"
+    }
+  }
+}

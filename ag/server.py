@@ -17,6 +17,7 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from .config import Config
 from .model import make_client, Canceller, Cancelled
@@ -89,52 +90,16 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <button class="tab" data-pane="evolve" onclick="switchTab('evolve')">&#8635; Evolve</button>
   <button class="tab" data-pane="lora" onclick="switchTab('lora')">&#9881; LoRA</button>
   <button class="tab" data-pane="bundle" onclick="switchTab('bundle')">&#10697; Bundle</button>
-  <button class="tab" data-pane="images" onclick="switchTab('images')">&#9638; Images</button>
+  <button class="tab" data-pane="images" onclick="switchTab('images')">&#9638; Media</button>
 </nav>
 
 <!-- ================= CHAT ================= -->
 <div class="tabpane active" id="pane-chat">
 
-<div class="panel">
-  <textarea id="p" placeholder="Ask Apple-Gorilla anything…"></textarea>
-  <div class="controls">
-    <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
-    <button class="cmd" id="stopbtn" onclick="stopRun()" hidden>Stop</button>
-    <span class="cmd-note">executes a request</span>
-    <span class="ctl-right">
-      <label class="ctl" title="Stream the model's raw output — including its reasoning (Ollama's &lt;think&gt; blocks) — live as it is generated. Stop ends the response and returns control immediately; a local model may take a moment more to wind down in the background."><input type="checkbox" id="verbose"> show reasoning</label>
-      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
-        <select id="model" class="ctl-select" onchange="saveModel()">
-          <option value="">loading…</option>
-        </select>
-      </label>
-      <label class="ctl">thinking
-        <select id="think" class="ctl-select" onchange="saveThink()">
-          <option value="auto">auto</option>
-          <option value="off">off · fast</option>
-          <option value="on">on</option>
-        </select>
-      </label>
-      <button class="help" data-help="Extended thinking, like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to decide. Only affects thinking-capable models (Claude, Qwen3); ignored by others.">?</button>
-      <label class="ctl"><input type="checkbox" id="web" checked> internet</label>
-      <label class="ctl"><input type="checkbox" id="tools" checked onchange="syncTools()"> tools</label>
-      <button class="help" data-help="Turns on AG's reason→act→observe loop: it can call tools (exact-math calc, read local files, recall/save memory, delegate to a sub-agent) before answering. Off = a single model call with no tool use.">?</button>
-      <label class="ctl"><input type="checkbox" id="codeexec" onchange="saveCtl()"> run code</label>
-      <button class="help" data-help="DANGEROUS: lets the python_exec tool run real Python in a subprocess on this machine. Requires 'tools'. Off by default — only enable for prompts you trust.">?</button>
-      <label class="ctl"><input type="checkbox" id="acquire" onchange="syncTools()"> self-extend</label>
-      <button class="help" data-help="If AG lacks a capability this prompt needs, it authors a new tested skill (and may install Python deps / fetch allowlisted code), then uses it. Requires 'tools'. New skills persist and are reused, and are inherited by sub-agents.">?</button>
-      <label class="ctl" id="autonwrap" title="How self-extend proceeds. ask = plan and wait for your approval before installing/running anything (surfaced in the live trace). auto = complete end-to-end within this run's grants.">acquire
-        <select id="autonomy" class="ctl-select" onchange="saveCtl()">
-          <option value="ask">ask first</option>
-          <option value="auto">auto</option>
-        </select>
-      </label>
-      <label class="ctl" title="Recall durable facts from long-term memory into context, and distill new durable facts after the answer. Off = this run neither reads nor writes long-term memory."><input type="checkbox" id="memory" checked onchange="saveCtl()"> memory</label>
-    </span>
-  </div>
-</div>
-
-<h2>Conversation</h2>
+<!-- Row: the message column scrolls independently, the reasoning sidebar streams the
+     model's thoughts and tool/trace in parallel, and the input below stays pinned. -->
+<div id="chatmain">
+<div id="chatscroll">
 <!-- context bar: lights up to show which sources feed the CURRENT answer -->
 <div id="ctxbar" title="What AG is drawing on for the current answer — each lights up as it is used">
   <span class="ctxlbl">context in use:</span>
@@ -156,9 +121,38 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <div class="card"><div class="n" id="spd">–</div><div class="l">speed (measured)</div>
     <div class="bar"><i id="spdb"></i></div></div>
 </div>
+</div><!-- /chatscroll -->
 
-<h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
-<div class="panel" style="padding:8px"><div id="log"></div></div>
+<aside id="reasonbar">
+  <div class="rb-head">Reasoning &amp; trace</div>
+  <pre id="reasonstream" title="the model's live reasoning (enable 'show reasoning')"></pre>
+  <div id="log"></div>
+</aside>
+</div><!-- /chatmain -->
+
+<div class="panel" id="inputpanel">
+  <textarea id="p" placeholder="Ask Apple-Gorilla anything…  (Ctrl+Enter to send)"></textarea>
+  <div class="controls">
+    <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
+    <button class="cmd" id="stopbtn" onclick="stopRun()" hidden>Stop</button>
+    <span class="cmd-note">Ctrl+Enter to send</span>
+    <!-- Generated from ag/controls.py — one declaration drives the markup, the
+         browser's save/restore/collect, and the server's config overrides. Add a
+         capability there, not here. -->
+    <span class="ctl-right">
+__CONTROLS__
+    </span>
+    <!-- Extended controls, tucked to the side. Specific model selection here OVERRIDES
+         the automatic primary/specialist routing for a run. -->
+    <details class="advanced">
+      <summary title="model override and other advanced controls">Advanced</summary>
+      <div class="adv-body">
+__MODEL_PICKER__
+        <span class="adv-note">picking a model overrides automatic routing for this run</span>
+      </div>
+    </details>
+  </div>
+</div>
 </div><!-- /pane-chat -->
 
 <!-- ================= FLEET ================= -->
@@ -248,6 +242,17 @@ table.hist td.rat{color:#8b949e;font-style:italic}
       <button class="help" data-help="The local model AG will fine-tune. Options are flagged for your GPU: 'fits' = comfortable, 'tight' = works with the memory-savers, 'won't fit' = inference-only. A LoRA adapter is bound to its base — it only works on this exact model.">?</button>
     </div>
     <div class="controls" style="margin-top:6px">
+      <label class="ctl">epochs
+        <input id="loraepochs" class="ctl-select" type="number" min="0.5" max="10" step="0.5"
+               style="width:70px" onchange="loraSetOpts()">
+      </label>
+      <button class="help" data-help="How many passes over the dataset. More epochs learn the data harder (lower loss) but risk memorizing/overfitting on a small set. 1 is often too few; 3 is a solid default here.">?</button>
+      <label class="toggle" style="margin-left:10px">
+        <input type="checkbox" id="loraunsloth" onchange="loraSetOpts()"> use Unsloth
+      </label>
+      <button class="help" data-help="Unsloth trains ~2x faster in ~half the VRAM (needs a working C compiler). Off = the transformers+peft fallback, which is slower but needs no compiler. Turned off automatically if Unsloth isn't installed.">?</button>
+    </div>
+    <div class="controls" style="margin-top:6px">
       <button class="view" onclick="loadLora()">Refresh</button>
       <button class="cmd" onclick="loraBuild()">Build dataset</button>
       <button class="help" data-help="Assembles the training set from AG's own memory (high-scoring past runs + learned procedures) plus a Claude-generated teacher set. The teacher step calls the model, so it costs a few calls.">?</button>
@@ -275,11 +280,17 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <!-- ================= IMAGES ================= -->
 <div class="tabpane" id="pane-images">
   <div class="panel" id="imagepanel">
-    <span class="grouplabel">Image generation — local Stable Diffusion <span class="cmd-note" id="imgnote"></span></span>
+    <span class="grouplabel">Media generation — on this machine's GPU <span class="cmd-note" id="imgnote"></span></span>
     <textarea id="imgprompt" class="directive" rows="2"
-      placeholder="Describe an image to generate. Needs a local Stable Diffusion server (Automatic1111/Forge) running with --api; prompts never leave your machine."></textarea>
+      placeholder="Describe an image or a clip to generate. Runs on your own GPU (ComfyUI, or an Automatic1111 server for images); the prompt never leaves your machine."></textarea>
     <div class="controls">
-      <button class="cmd" id="imgbtn" onclick="genImage()">Generate image</button>
+      <label class="ctl">make <select id="imgkind" class="ctl-select" onchange="syncMediaKind()">
+        <option value="image">an image</option><option value="video">a video clip</option>
+      </select></label>
+      <label class="ctl" id="imgsecs-wrap" hidden>seconds <select id="imgsecs" class="ctl-select">
+        <option value="2">2</option><option value="3" selected>3</option>
+        <option value="5">5</option></select></label>
+      <button class="cmd" id="imgbtn" onclick="genMedia()">Generate</button>
       <button class="cmd" id="imgstartbtn" onclick="startImageServer()" hidden>Start server</button>
     </div>
     <div id="imgout"></div>
@@ -313,9 +324,18 @@ function saveChat(){
 function clearChat(){
   if(!CHAT.length||confirm('Clear the whole conversation?')){ CHAT=[]; saveChat(); renderChat(); }
 }
+// Scroll the message region to the newest content. Only auto-follows when the reader
+// is already near the bottom (or force=true, e.g. right after they send), so scrolling
+// up to re-read an earlier turn is never yanked back down mid-stream.
+function scrollChat(force){
+  const s=$('chatscroll'); if(!s) return;
+  const nearBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 120;
+  if(force||nearBottom) s.scrollTop=s.scrollHeight;
+}
 function ctxFooter(c){
   if(!c) return '';
   const bits=[];
+  if(c.model) bits.push(escapeHtml(c.model));
   if(c.history) bits.push(''+c.history+' prior turn'+(c.history>1?'s':''));
   if(c.profile) bits.push('profile');
   if(c.memory&&c.memory.length) bits.push(''+c.memory.length+' memory fact'+(c.memory.length>1?'s':''));
@@ -333,16 +353,27 @@ function ctxFooter(c){
   }
   return h;
 }
-function bubble(m){
+// Per-answer actions: rate (teaches the routing doc), regenerate, and copy a distilled
+// prompt for Claude. prompt+model travel on the row so the handlers can attribute.
+function aiActions(prompt,model){
+  const dp=escapeHtml(prompt||''), dm=escapeHtml(model||'');
+  return '<div class="airow" data-prompt="'+dp+'" data-model="'+dm+'">'
+    +'<button class="ico" title="good answer" onclick="rate(this,&#39;rating_up&#39;)">&#128077;</button>'
+    +'<button class="ico" title="poor answer" onclick="rate(this,&#39;rating_down&#39;)">&#128078;</button>'
+    +'<button class="ico" title="regenerate this answer" onclick="regen(this)">&#8635;</button>'
+    +'<button class="ico wide" title="copy a distilled prompt to paste into Claude" onclick="toClaude(this)">Claude &#10697;</button>'
+    +'</div>';
+}
+function bubble(m,prev){
   const who=m.role==='user'?'you':'apple-gorilla';
   const t=m.ts?'<span class="ts">'+escapeHtml(m.ts)+'</span>':'';
   return '<div class="msg '+m.role+'"><div class="who">'+who+t+'</div>'
     +'<div class="body">'+escapeHtml(m.text)+'</div>'
-    +(m.role==='ai'?ctxFooter(m.ctx):'')+'</div>';
+    +(m.role==='ai'?ctxFooter(m.ctx)+aiActions(prev,(m.ctx&&m.ctx.model)||''):'')+'</div>';
 }
 function renderChat(){
-  $('chat').innerHTML=CHAT.map(bubble).join('');
-  $('chat').scrollTop=$('chat').scrollHeight;
+  $('chat').innerHTML=CHAT.map((m,i)=>bubble(m, i>0?CHAT[i-1].text:'')).join('');
+  scrollChat(true);
 }
 function appendUser(text){
   CHAT.push({role:'user',text:text,ts:nowStr()}); renderChat(); saveChat();
@@ -355,10 +386,8 @@ function appendAssistant(){
   el.innerHTML='<div class="who">apple-gorilla<span class="ts">'+nowStr()+'</span></div>'
     +'<div class="body pending"><span class="act-stage">…starting</span>'
     +'<span class="act-timer"></span></div>'
-    +'<details class="verbose" hidden><summary>reasoning &amp; live output</summary>'
-    +'<pre class="vbody"></pre></details>'
     +'<div class="live-ctx"></div>';
-  $('chat').appendChild(el); $('chat').scrollTop=$('chat').scrollHeight;
+  $('chat').appendChild(el); scrollChat(true);
   return el;
 }
 
@@ -384,6 +413,15 @@ function setStage(ai,ev){
 }
 function stopActivity(ai){ if(ai&&ai._timer){clearInterval(ai._timer); ai._timer=null;} }
 
+/* ---- per-tab working-memory session id ------------------------------- */
+const AG_SESSION=(function(){
+  try{let s=sessionStorage.getItem('ag_session');
+    if(!s){s='web-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
+      sessionStorage.setItem('ag_session',s);}
+    return s;
+  }catch(e){return 'web-'+Date.now().toString(36);}
+})();
+
 /* ---- context-in-use indicator ---------------------------------------- */
 let curCtx={history:0,profile:false,memory:[],saved:[],web:0,skills:0};
 function resetContext(){
@@ -394,9 +432,9 @@ function resetContext(){
 }
 function applyContext(ev,ai){
   if(ev.stage==='conversation'){
-    const m=/(\\d+)\\s+earlier/.exec(ev.msg||''); const n=m?+m[1]:0;
-    curCtx.history=n; $('chip-history').classList.add('active');
-    $('cc-history').textContent=n||'';
+    const m=/(\\d+)/.exec(ev.msg||''); const n=m?+m[1]:0;
+    curCtx.history=n||curCtx.history; $('chip-history').classList.add('active');
+    $('cc-history').textContent=(ev.data&&ev.data.turns)||n||'';
   }
   if(ev.stage==='optimize' && (/(profile)/i.test(ev.msg||'') || (ev.data&&ev.data.uses_profile))){
     curCtx.profile=true; $('chip-profile').classList.add('active');
@@ -451,6 +489,7 @@ async function go(){
   const p=$('p').value.trim(); if(!p)return;
   setRunning(true); $('status').textContent='running…';
   $('log').innerHTML=''; $('cards').style.display='none';
+  if($('reasonstream')) $('reasonstream').textContent='';
   ['spd'].forEach(x=>setCard(x,null));
   // prior turns become AG's working memory (the current prompt is sent separately)
   const hist=CHAT.slice(-20).map(m=>({role:m.role,text:m.text}));
@@ -460,14 +499,12 @@ async function go(){
   CURRENT_RUNID=runId;
   const verbose=$('verbose')?$('verbose').checked:false;
   try{
+    // Every declared control goes along automatically — see AG_CONTROLS.
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
       signal:ctrl.signal,
-      body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
-        model:($('model')?$('model').value:''),
-        tools:$('tools').checked,code_exec:$('codeexec').checked,
-        acquire:$('acquire').checked,autonomy:$('autonomy').value,
-        memory:$('memory').checked,
-        verbose:verbose,run_id:runId})});
+      body:JSON.stringify(Object.assign(ctlPayload(),
+        {prompt:p,history:hist,model:($('model')?$('model').value:''),
+         run_id:runId,session_id:AG_SESSION}))});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
@@ -500,12 +537,10 @@ async function go(){
   CURRENT_ABORT=null; CURRENT_RUNID=null; setRunning(false);
 }
 function handle(ev,ai){
-  if(ev.stage==='delta'){   // live streamed model output (verbose mode)
-    const det=ai.querySelector('.verbose');
-    if(det){ det.hidden=false; det.open=true;
-      const pre=det.querySelector('.vbody');
-      if(pre){ pre.textContent+=((ev.data&&ev.data.text)||''); } }
-    $('chat').scrollTop=$('chat').scrollHeight; return;
+  if(ev.stage==='delta'){   // live streamed model reasoning -> the sidebar, in parallel
+    const rs=$('reasonstream');
+    if(rs){ rs.textContent+=((ev.data&&ev.data.text)||''); rs.scrollTop=rs.scrollHeight; }
+    return;
   }
   if(ev.stage==='progress'){ return; }   // heartbeat only (keeps Stop responsive)
   if(ev.stage==='error'){   // terminal pipeline error — make it visible, don't hang
@@ -522,12 +557,13 @@ function handle(ev,ai){
     const lc=ai.querySelector('.live-ctx'); if(lc) lc.remove();
     const sc=d.scorecard||{};
     const ctx={history:curCtx.history,profile:curCtx.profile,memory:curCtx.memory,
-               web:curCtx.web,saved:curCtx.saved,
+               web:curCtx.web,saved:curCtx.saved,model:d.model_used||'',
                overall:(sc.overall!=null?sc.overall:null)};
-    ai.insertAdjacentHTML('beforeend',ctxFooter(ctx));
+    const prevPrompt=CHAT.length?CHAT[CHAT.length-1].text:'';
+    ai.insertAdjacentHTML('beforeend',ctxFooter(ctx)+aiActions(prevPrompt,ctx.model));
     const entry={role:'ai',text:d.answer||'(no answer)',ctx:ctx,ts:nowStr()};
     CHAT.push(entry); ai._entry=entry; ai._committed=true; saveChat();
-    $('chat').scrollTop=$('chat').scrollHeight;
+    scrollChat();
     $('status').textContent='done · '+(d.elapsed_s||0)+'s'+(d.dry_run?' · dry-run':'');
     checkUpdate();   // one on-demand check AFTER the run — never a background poll
     return;
@@ -747,35 +783,47 @@ async function loadTools(){
     +escapeHtml(d.highest_friction_wired||'–')+'</td></tr>';
   t.innerHTML=h; t.style.display='table';
 }
-function saveThink(){ try{ localStorage.setItem('ag_think',$('think').value); }catch(e){} }
-function restoreThink(){ try{ const v=localStorage.getItem('ag_think');
-  if(v&&$('think')) $('think').value=v; }catch(e){} }
-/* ---- tools / self-extend / memory toggles ----------------------------- */
-function saveCtl(){ try{
-  localStorage.setItem('ag_tools',$('tools').checked?'1':'0');
-  localStorage.setItem('ag_codeexec',$('codeexec').checked?'1':'0');
-  localStorage.setItem('ag_acquire',$('acquire').checked?'1':'0');
-  localStorage.setItem('ag_autonomy',$('autonomy').value);
-  localStorage.setItem('ag_memory',$('memory').checked?'1':'0');
-}catch(e){} }
-function syncTools(){
-  // 'run code' and 'self-extend' both require the tool loop; disable them when tools
-  // is off so the controls can never claim an effect they won't have.
-  const on=$('tools').checked;
-  $('codeexec').disabled=!on; $('acquire').disabled=!on;
-  if(!on){ $('codeexec').checked=false; $('acquire').checked=false; }
-  $('autonomy').disabled=!(on&&$('acquire').checked);
-  $('autonwrap').style.opacity=$('autonomy').disabled?'.5':'1';
-  saveCtl();
+/* ---- run controls ------------------------------------------------------
+   Everything below is generic: it reads the declaration shipped from
+   ag/controls.py, so a new control needs no JavaScript at all. */
+const AG_CONTROLS=__CONTROLS_JSON__;
+function ctlEl(c){ return $(c.id); }
+function ctlGet(c){ const el=ctlEl(c); if(!el) return null;
+  return c.kind==='toggle' ? el.checked : el.value; }
+function ctlSet(c,v){ const el=ctlEl(c); if(!el) return;
+  if(c.kind==='toggle') el.checked=!!v; else el.value=v; }
+/* Live = this control can actually affect the run. A control whose prerequisite is
+   off is disabled, cleared and dimmed, so the bar never offers a switch that does
+   nothing. The server enforces the same rule; the page is not the authority. */
+function ctlLive(c){
+  if(!c.requires) return true;
+  const dep=AG_CONTROLS.find(x=>x.id===c.requires); if(!dep) return true;
+  const el=ctlEl(dep); if(!el) return true;
+  return ctlLive(dep) && (dep.kind==='toggle' ? el.checked : !!el.value);
 }
-function restoreCtl(){ try{
-  const g=(k,d)=>{ const v=localStorage.getItem(k); return v==null?d:v; };
-  if($('tools')) $('tools').checked = g('ag_tools','1')==='1';
-  if($('codeexec')) $('codeexec').checked = g('ag_codeexec','0')==='1';
-  if($('acquire')) $('acquire').checked = g('ag_acquire','0')==='1';
-  if($('autonomy')) $('autonomy').value = g('ag_autonomy','ask');
-  if($('memory')) $('memory').checked = g('ag_memory','1')==='1';
-}catch(e){} syncTools(); }
+function syncCtls(){
+  for(const c of AG_CONTROLS){
+    const el=ctlEl(c); if(!el) continue;
+    const live=ctlLive(c);
+    el.disabled=!live;
+    if(!live && c.kind==='toggle') el.checked=false;
+    const wrap=$(c.id+'-wrap'); if(wrap) wrap.style.opacity=live?'1':'.45';
+  }
+  saveCtls();
+}
+function saveCtls(){ try{ for(const c of AG_CONTROLS){ const v=ctlGet(c);
+  if(v===null) continue;
+  localStorage.setItem('ag_ctl_'+c.id, c.kind==='toggle'?(v?'1':'0'):String(v));
+}}catch(e){} }
+function restoreCtls(){ try{ for(const c of AG_CONTROLS){
+  if(!ctlEl(c)) continue;
+  const raw=localStorage.getItem('ag_ctl_'+c.id);
+  if(raw==null) ctlSet(c,c.default);
+  else ctlSet(c, c.kind==='toggle' ? raw==='1' : raw);
+}}catch(e){} syncCtls(); }
+function ctlPayload(){ const out={};
+  for(const c of AG_CONTROLS){ const v=ctlGet(c); if(v!==null) out[c.id]=v; }
+  return out; }
 function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
 async function loadModels(){
   const sel=$('model'); if(!sel) return;
@@ -799,8 +847,9 @@ async function loadAuth(){
     const a=await fetch('/auth').then(r=>r.json());
     el.hidden=false;
     if(a.signed_in){
-      el.innerHTML='Signed in to Claude ('+escapeHtml(a.method)+') — auto uses <b>'
-        +escapeHtml(a.model)+'</b>. <button class="linkbtn" onclick="logoutClaude()">sign out</button>';
+      el.innerHTML='Signed in to Claude ('+escapeHtml(a.method)+') — available as <b>'
+        +escapeHtml(a.model)+'</b>, used only when you pick it in the model menu (spends API tokens). '
+        +'AG answers locally by default. <button class="linkbtn" onclick="logoutClaude()">sign out</button>';
     } else {
       el.innerHTML='Not signed in to Claude — running locally. '
         +'<a href="'+escapeHtml(a.console_url)+'" target="_blank" rel="noopener">Get an API key</a>, '
@@ -824,16 +873,19 @@ async function saveKey(){
 }
 async function logoutClaude(){
   try{ await fetch('/logout',{method:'POST'}); }catch(e){}
-  loadAuth(); loadModels(); renderWhere();
+  loadAuth(); loadModels(); renderWhere(); syncMediaKind();
 }
 /* ---- local image generation ------------------------------------------ */
 async function loadImageStatus(){
   const n=$('imgnote'), sb=$('imgstartbtn'); if(!n) return;
   try{
     const s=await fetch('/image/status').then(r=>r.json());
+    const k=$('imgkind'); if(k && !s.video){ k.value='image'; k.disabled=true; syncMediaKind(); }
     if(!s.enabled){ n.textContent='· disabled in config'; if(sb) sb.hidden=true; }
-    else if(s.reachable){ n.textContent='· ready at '+escapeHtml(s.host); if(sb) sb.hidden=true; }
-    else { n.textContent='· no server at '+escapeHtml(s.host)+' — click Start server, or launch Automatic1111/Forge with --api';
+    else if(s.reachable){ n.textContent='· ready · '+escapeHtml(s.backend)+' at '+escapeHtml(s.host); if(sb) sb.hidden=true; }
+    else { n.textContent='· no '+escapeHtml(s.backend)+' server at '+escapeHtml(s.host)
+        +' — click Start server'
+        +(s.models&&s.models.length?' (needs: '+escapeHtml(s.models.join(', '))+')':'');
       if(sb) sb.hidden=false; }
   }catch(e){}
 }
@@ -847,15 +899,28 @@ async function startImageServer(){
   if(sb) sb.disabled=false;
   loadImageStatus();
 }
-async function genImage(){
+function mediaKind(){ return $('imgkind') ? $('imgkind').value : 'image'; }
+function syncMediaKind(){
+  const w=$('imgsecs-wrap'); if(w) w.hidden = mediaKind()!=='video';
+}
+async function genMedia(){
   const p=$('imgprompt')?$('imgprompt').value.trim():''; if(!p) return;
-  const btn=$('imgbtn'), out=$('imgout');
+  const kind=mediaKind(), btn=$('imgbtn'), out=$('imgout');
   if(btn) btn.disabled=true;
-  if(out) out.innerHTML='<div class="ct-hint">generating… (if the server is not running AG will start it first — the first image can take a few minutes)</div>';
+  if(out) out.innerHTML='<div class="ct-hint">generating'
+    +(kind==='video'?' a clip — this takes minutes, not seconds':'')
+    +'… (if the server is not running AG will start it first — the first run loads a multi-GB model)</div>';
   try{
-    const r=await fetch('/image',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt:p})}).then(r=>r.json());
-    if(r.ok){ out.innerHTML='<img src="'+r.data_url+'" alt="'+escapeHtml(p)
+    const body={prompt:p};
+    if(kind==='video' && $('imgsecs')) body.seconds=parseFloat($('imgsecs').value);
+    const r=await fetch(kind==='video'?'/video':'/image',
+      {method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify(body)}).then(r=>r.json());
+    if(r.ok && kind==='video'){
+      out.innerHTML='<video controls style="max-width:100%;border-radius:10px;margin-top:8px" '
+        +'src="/media?path='+encodeURIComponent(r.path)+'"></video>'
+        +'<div class="ct-hint">'+r.seconds+'s · saved to '+escapeHtml(r.path)+'</div>'; }
+    else if(r.ok){ out.innerHTML='<img src="'+r.data_url+'" alt="'+escapeHtml(p)
       +'" style="max-width:100%;border-radius:10px;margin-top:8px">'
       +'<div class="ct-hint">saved to '+escapeHtml(r.path)+'</div>'; }
     else { out.innerHTML='<div class="result bad">'+escapeHtml(r.error||'failed')+'</div>'; }
@@ -910,6 +975,9 @@ async function loadLora(){
     if(sel){ sel.innerHTML=(d.bases||[]).map(b=>'<option value="'+escapeHtml(b.id)+'"'
       +(b.id===d.base?' selected':'')+'>'+escapeHtml(b.id)+' · '+b.params_b+'B · '+b.fit
       +'</option>').join(''); }
+    const ep=$('loraepochs'); if(ep && d.epochs!=null) ep.value=d.epochs;
+    const us=$('loraunsloth');
+    if(us){ us.checked=!!d.unsloth_pref; us.disabled=!(f.unsloth); }
     $('lorastatus').className='kv';
     $('lorastatus').innerHTML=
       'GPU <b>'+escapeHtml(f.gpu||'?')+'</b> · VRAM <b>'+(f.vram_gb==null?'?':f.vram_gb+' GB')
@@ -937,6 +1005,13 @@ async function loraSetBase(){
   const base=$('lorabase').value;
   try{ await fetch('/lora/set-base',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({base:base})}); }catch(e){}
+  loadLora();
+}
+async function loraSetOpts(){
+  const epochs=parseFloat($('loraepochs').value);
+  const unsloth=$('loraunsloth').checked;
+  try{ await fetch('/lora/set-opts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({epochs:epochs,unsloth:unsloth})}); }catch(e){}
   loadLora();
 }
 async function loraMerge(adapter){
@@ -1072,16 +1147,67 @@ function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
   if($('evogithub')) $('evogithub').checked=(v==='1'); }catch(e){}
   if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
 
-restoreThink(); restoreCtl(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+// Per-answer actions. Rating and escalation feed AG's model-routing doc; regenerate
+// re-asks. prompt+model ride on the .airow so each handler can attribute correctly.
+function _rowData(btn){ const r=btn.closest('.airow');
+  return r?{row:r,prompt:r.getAttribute('data-prompt')||'',model:r.getAttribute('data-model')||''}:null; }
+function _sendRate(prompt,model,signal){
+  fetch('/rate',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({prompt:prompt,model:model,signal:signal})}).catch(()=>{}); }
+function rate(btn,signal){ const d=_rowData(btn); if(!d) return;
+  _sendRate(d.prompt,d.model,signal);
+  // 👍 and 👎 are the first two icons; make them mutually exclusive and mark the choice.
+  const icos=d.row.querySelectorAll('.ico');
+  if(icos[0]) icos[0].classList.remove('on');
+  if(icos[1]) icos[1].classList.remove('on');
+  btn.classList.add('on'); }
+function regen(btn){ const d=_rowData(btn); if(!d||!d.prompt) return;
+  _sendRate(d.prompt,d.model,'rating_down');   // a regenerate = this wasn't good enough
+  $('p').value=d.prompt; go(); }
+function toClaude(btn){ const d=_rowData(btn); if(!d) return;
+  const msg=btn.closest('.msg'); const bodyEl=msg?msg.querySelector('.body'):null;
+  const answer=bodyEl?bodyEl.textContent:'';
+  const distilled='I asked my local AI assistant a question and want your help solving it well.\\n\\n'
+    +'=== PROBLEM ===\\n'+d.prompt+'\\n\\n'
+    +'=== LOCAL ASSISTANT ('+(d.model||'local')+') ANSWERED ===\\n'+answer+'\\n\\n'
+    +'=== WHAT I NEED ===\\nGive a correct, complete solution. If the local answer is wrong '
+    +'or incomplete, fix it and explain what it missed.';
+  const done=()=>{ const o=btn.innerHTML; btn.textContent='copied \\u2713';
+    setTimeout(()=>{btn.innerHTML=o;},1500); };
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(distilled).then(done).catch(()=>{ btn.textContent='copy failed'; });
+  } else { try{ const t=document.createElement('textarea'); t.value=distilled;
+    document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); done();
+  }catch(e){ btn.textContent='copy failed'; } }
+  _sendRate(d.prompt,d.model,'escalated');   // escalating = the local model fell short
+}
+restoreCtls(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+// Ctrl/Cmd+Enter sends from the chat box (a plain Enter still inserts a newline, so
+// multi-line prompts are easy to write).
+(function(){ const p=$('p'); if(!p) return;
+  p.addEventListener('keydown', function(e){
+    if((e.ctrlKey||e.metaKey) && e.key==='Enter'){ e.preventDefault();
+      if(!$('runbtn').disabled) go(); } }); })();
 </script></body></html>"""
 
+_MODEL_PICKER = """      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
+        <select id="model" class="ctl-select" onchange="saveModel()">
+          <option value="">loading…</option>
+        </select>
+      </label>"""
+
+
 def _render_page() -> str:
-    """Assemble the page from the evolvable theme (fonts + CSS) and the template."""
+    """Assemble the page from the evolvable theme (fonts + CSS), the declared run
+    controls, and the template."""
     from . import __version__
-    from . import theme
+    from . import controls, theme
     return (_PAGE_TEMPLATE
             .replace("__FONTS__", theme.FONT_LINK)
             .replace("__THEME__", theme.THEME_CSS)
+            .replace("__CONTROLS__", controls.render_html())
+            .replace("__MODEL_PICKER__", _MODEL_PICKER)
+            .replace("__CONTROLS_JSON__", controls.spec_json())
             .replace("__VERSION__", __version__))
 
 PAGE = _render_page()
@@ -1104,6 +1230,33 @@ def _clean_history(raw, *, max_turns: int = 40, max_len: int = 4000) -> list:
         if text:
             out.append({"role": role, "text": text[:max_len]})
     return out
+
+MEDIA_TYPES = {".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+               ".gif": "image/gif", ".webp": "image/webp", ".png": "image/png",
+               ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def media_type(path: Path) -> str:
+    return MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def media_file(want: str):
+    """Resolve a browser-supplied path to a generated file, or None.
+
+    This endpoint reads a file named by the page, so it is confined to the two
+    directories AG writes media into. A path outside them — or a symlink pointing
+    out of them, which is why this resolves before comparing — is not found.
+    """
+    from .config import STATE_DIR
+    roots = [(STATE_DIR / "video").resolve(), (STATE_DIR / "images").resolve()]
+    try:
+        target = Path(want).resolve()
+        if any(target.is_relative_to(r) for r in roots) and target.is_file():
+            return target
+    except (OSError, ValueError):
+        pass
+    return None
+
 
 def _build_broker(cfg: Config, *, web=None):
     web = cfg.allow_web if web is None else web
@@ -1162,6 +1315,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_bytes(self, code, data: bytes, ctype: str):
+        """Send raw bytes (a generated clip or image) rather than encoded text."""
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE)
@@ -1190,14 +1351,40 @@ class _Handler(BaseHTTPRequestHandler):
             st["model"] = self.cfg.model
             st["console_url"] = "https://console.anthropic.com/settings/keys"
             self._send(200, json.dumps(st), "application/json")
+        elif self.path.startswith("/media?"):
+            # Serve a generated clip back to the page. Confined to AG's own output
+            # directories: this endpoint takes a path from the browser, so anything
+            # outside them is refused rather than read.
+            import urllib.parse as _up
+            want = _up.parse_qs(self.path.split("?", 1)[1]).get("path", [""])[0]
+            target = media_file(want)
+            if target is None:
+                self._send(404, json.dumps({"error": "not found"}), "application/json")
+                return
+            self._send_bytes(200, target.read_bytes(), media_type(target))
         elif self.path == "/image/status":
-            from . import images
+            from . import comfy, images
             cfg = self.cfg
+            on = bool(getattr(cfg, "allow_image_gen", False))
+            backend = images.backend_for(cfg) if on else ""
+            up = False
+            host = cfg.sd_host
+            models = []
+            if on and backend == "comfy":
+                host = cfg.comfy_host
+                up = comfy.reachable(cfg)
+                try:
+                    models = comfy.describe(
+                        comfy.load_workflow(cfg.comfy_image_workflow))
+                except Exception:
+                    models = []
+            elif on:
+                up = images.sd_reachable(cfg)
             self._send(200, json.dumps({
-                "enabled": bool(getattr(cfg, "allow_image_gen", False)),
-                "reachable": images.sd_reachable(cfg) if getattr(
-                    cfg, "allow_image_gen", False) else False,
-                "host": cfg.sd_host}), "application/json")
+                "enabled": on, "reachable": up, "host": host, "backend": backend,
+                "models": models,
+                "video": bool(getattr(cfg, "allow_video_gen", False)),
+            }), "application/json")
         elif self.path == "/fleet":
             from . import fleet
             self._send(200, json.dumps({
@@ -1224,6 +1411,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "feasibility": feas.as_dict(),
                 "base": self.cfg.lora_base_model,
+                "epochs": self.cfg.lora_epochs,
+                "unsloth_pref": bool(getattr(self.cfg, "lora_use_unsloth", True)),
                 "bases": lora.available_bases(feas.vram_gb),
                 "recommended": lora.recommended_config(feas.vram_gb),
                 "merge_ready": lora.merge_feasibility(self.cfg)["ok"],
@@ -1407,6 +1596,22 @@ class _Handler(BaseHTTPRequestHandler):
                 _Handler.cfg = cfg
                 self._send(200, json.dumps({"ok": True, "base": base}), "application/json")
                 return
+            if path == "/lora/set-opts":
+                cfg = Config.load()
+                if "epochs" in payload:
+                    try:
+                        ep = float(payload.get("epochs"))
+                    except (TypeError, ValueError):
+                        ep = cfg.lora_epochs
+                    cfg.lora_epochs = max(0.5, min(10.0, ep))
+                if "unsloth" in payload:
+                    cfg.lora_use_unsloth = bool(payload.get("unsloth"))
+                cfg.save()
+                _Handler.cfg = cfg
+                self._send(200, json.dumps({"ok": True, "epochs": cfg.lora_epochs,
+                           "unsloth": bool(getattr(cfg, "lora_use_unsloth", True))}),
+                           "application/json")
+                return
             if path == "/lora/merge":
                 adapter = str(payload.get("adapter", "")).strip()
                 self._start_lora_merge(adapter)
@@ -1433,12 +1638,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False,
                            "error": "image generation is disabled"}), "application/json")
                 return
-            ok = images.ensure_sd_running(cfg)
-            self._send(200, json.dumps({
-                "ok": ok, "reachable": ok, "host": cfg.sd_host,
-                "error": "" if ok else "could not start a Stable Diffusion server "
-                "(none installed/found, or it did not come up). Set sd_cmd to your "
-                "launcher, or start it manually with --api."}), "application/json")
+            from . import comfy
+            if images.backend_for(cfg) == "comfy":
+                ok = comfy.ensure_running(cfg)
+                err = ("" if ok else "could not start ComfyUI (none found, or it did "
+                       "not come up). Install it, or set comfy_cmd to its launcher.")
+                host = cfg.comfy_host
+            else:
+                ok = images.ensure_sd_running(cfg)
+                err = ("" if ok else "could not start a Stable Diffusion server "
+                       "(none installed/found, or it did not come up). Set sd_cmd to "
+                       "your launcher, or start it manually with --api.")
+                host = cfg.sd_host
+            self._send(200, json.dumps({"ok": ok, "reachable": ok, "host": host,
+                                        "error": err}), "application/json")
             return
         if self.path == "/image":
             from . import images
@@ -1464,6 +1677,58 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({
                     "ok": True, "data_url": res.data_url, "path": res.path,
                     "width": res.width, "height": res.height}), "application/json")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+            return
+        if self.path == "/video":
+            from . import video
+            cfg = self.cfg
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+                prompt = str(payload.get("prompt", "")).strip()
+                if not prompt:
+                    raise ValueError("empty prompt")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+                return
+            try:
+                secs = float(payload.get("seconds") or 0) or None
+            except (TypeError, ValueError):
+                secs = None
+            try:
+                res = video.generate(prompt, cfg, seconds=secs,
+                                     negative_prompt=str(payload.get("negative", "")))
+                self._send(200, json.dumps({
+                    "ok": True, "path": res.path, "seconds": res.seconds,
+                    "width": res.width, "height": res.height}), "application/json")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+            return
+        if self.path == "/rate":
+            # An honest learning signal from the UI: 👍/👎, a regenerate, or a Claude
+            # escalation. The doc credits the model that produced the answer for the
+            # task's tags. Never fabricates a score — it only records what the user did.
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            except Exception:
+                payload = {}
+            prompt = str(payload.get("prompt", ""))[:4000]
+            model = str(payload.get("model", ""))[:100]
+            signal = str(payload.get("signal", ""))
+            if signal not in ("rating_up", "rating_down", "escalated"):
+                self._send(200, json.dumps({"ok": False, "error": "bad signal"}),
+                           "application/json")
+                return
+            try:
+                from . import routing
+                role = routing.role_for_model(self.cfg, model)
+                routing.record(self.cfg, role, routing.tags_for(prompt), signal)
+                self._send(200, json.dumps({"ok": True}), "application/json")
             except Exception as e:
                 self._send(200, json.dumps({"ok": False, "error": str(e)}),
                            "application/json")
@@ -1559,26 +1824,18 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send(200, json.dumps({"error": str(e)}), "application/json")
             return
-        want_web = payload.get("web", None)
         history = _clean_history(payload.get("history"))
-        think = str(payload.get("think", "auto")).lower()
-        if think not in ("off", "auto", "on"):
-            think = "auto"
         model = str(payload.get("model", "")).strip()[:100]
         verbose = bool(payload.get("verbose", False))
         run_id = str(payload.get("run_id", ""))[:64]
-        # Per-run capability toggles from the chat controls (default to the config's
-        # standing values when a key is absent, so the API stays backward-compatible).
-        tools = payload.get("tools", None)
-        code_exec = bool(payload.get("code_exec", False))
-        acquire = bool(payload.get("acquire", False))
-        autonomy = str(payload.get("autonomy", "ask")).lower()
-        if autonomy not in ("ask", "auto"):
-            autonomy = "ask"
-        memory = payload.get("memory", None)
-        self._stream_run(prompt, want_web, history, think, model, verbose, run_id,
-                         tools=tools, code_exec=code_exec, acquire=acquire,
-                         autonomy=autonomy, memory=memory)
+        session_id = str(payload.get("session_id", ""))[:80]
+        # Every declared run control, validated and reduced to the Config fields it
+        # changes for this run only. A key that isn't sent keeps the standing config
+        # value, so an older client or a bare `{"prompt": ...}` behaves as before.
+        from . import controls
+        self._stream_run(prompt, history, model, verbose, run_id,
+                         session_id=session_id,
+                         overrides=controls.overrides_for(payload))
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -1815,10 +2072,13 @@ class _Handler(BaseHTTPRequestHandler):
             return {"backend": "ollama", "ollama_model": model}
         return {}
 
-    def _stream_run(self, prompt: str, want_web, history=None, think="auto", model="",
-                    verbose=False, run_id="", *, tools=None, code_exec=False,
-                    acquire=False, autonomy="ask", memory=None):
+    def _stream_run(self, prompt: str, history=None, model="", verbose=False,
+                    run_id="", *, session_id="", overrides=None):
         """Run the pipeline, streaming each stage event as one NDJSON line.
+
+        `overrides` is the set of Config fields this request changes, already validated
+        by ag.controls — the same machinery the CLI uses sits underneath, so a control
+        in the GUI reflects what actually happens rather than describing it.
 
         The model's output is always streamed internally via `on_delta`: when
         `verbose` is set the chunks are forwarded to the browser as 'delta' events so
@@ -1830,25 +2090,23 @@ class _Handler(BaseHTTPRequestHandler):
         from .pipeline import capture_memory
         write = self._ndjson_writer()
         # Per-request overrides, without mutating the shared handler config.
-        overrides = {"think": think}
-        overrides.update(self._parse_model_choice(model))
-        # Chat-control toggles map to real config flags for this run only. Each is
-        # honored by the same machinery the CLI uses, so the GUI reflects reality:
-        #  tools    -> the reason→act loop (calc/file/memory/delegate tools)
-        #  run code -> the python_exec tool (only meaningful with tools on)
-        #  self-extend + autonomy -> acquire_skill (author/install/test a new skill)
-        #  memory   -> recall + auto-capture of durable facts
-        if tools is not None:
-            overrides["allow_local_tools"] = bool(tools)
-        overrides["allow_code_exec"] = bool(code_exec) and (tools is None or bool(tools))
-        overrides["allow_acquire"] = bool(acquire) and (tools is None or bool(tools))
-        overrides["acquisition_autonomy"] = autonomy
-        if memory is not None:
-            overrides["use_memory"] = bool(memory)
-            overrides["auto_memory"] = bool(memory)
-        cfg = dataclasses.replace(self.cfg, **overrides)
-        web_eff = cfg.allow_web if want_web is None else bool(want_web)
+        merged = dict(overrides or {})
+        merged.update(self._parse_model_choice(model))
+        cfg = dataclasses.replace(self.cfg, **merged)
+        # Ambient web fires only when the prompt actually needs external/current info
+        # (a research-type task), not on chat or self-contained work like coding — that
+        # was making simple requests slow. An explicit model/run still has web available.
+        from . import routing
+        web_eff = bool(cfg.allow_web) and ("research" in routing.tags_for(prompt))
         broker = _build_broker(cfg, web=web_eff)
+        # Normalize the session id (a per-tab id from the client) so this run's working
+        # memory loads and saves under one key; empty falls back to a raw transcript.
+        if session_id and getattr(cfg, "working_memory", True):
+            try:
+                from .memory import working
+                session_id = working.resolve_session(session_id)
+            except Exception:
+                pass
 
         # A Canceller lets /stop close the upstream model connection at any point (even
         # during prompt-eval), so Stop is prompt and reliable — not only once tokens flow.
@@ -1877,11 +2135,12 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,
-                               emit=write, history=history,
+                               emit=write, history=history, session_id=session_id,
                                on_delta=on_delta, cancel=canceller)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
-                "elapsed_s": rec.elapsed_s, "dry_run": rec.dry_run}})
+                "elapsed_s": rec.elapsed_s, "dry_run": rec.dry_run,
+                "model_used": rec.model_used}})
             # Fill long-term memory AFTER the answer is on screen, so it never delays
             # the response. Best-effort; a "saved N fact(s)" event streams if it stores.
             try:
@@ -1889,7 +2148,9 @@ class _Handler(BaseHTTPRequestHandler):
                 convo = format_history(history,
                                        max_turns=getattr(cfg, "max_history_turns", 12))
                 capture_memory(client, cfg, prompt, rec.answer,
-                               conversation=convo, emit=write)
+                               conversation=convo, session_id=session_id,
+                               history=history, emit=write,
+                               web_sources=rec.web_sources)
             except Exception:
                 pass
         except (BrokenPipeError, ConnectionError, _Interrupted, Cancelled):
@@ -1970,14 +2231,44 @@ def _models_data(cfg: Config) -> dict:
     backend to use and which model. Local (Ollama) models are always listed if the
     server is reachable; the cloud Claude model is offered only when creds/OAuth are
     present. `current` reflects what a run would use right now with no override."""
+    import re as _re
     from .model import _has_anthropic_creds, has_oauth_profile
     models = _list_ollama_models(cfg)
     cloud = bool(_has_anthropic_creds() or has_oauth_profile())
-    options = []
+
+    # Curate the list: drop what can't answer a prompt (embedding models) and raw
+    # timestamped build artifacts (e.g. ...-obliterated-20260918-215836) that just
+    # duplicate a stable alias — the "unused models" clutter. AG's two working models
+    # (the abliterated task model and the instruct chat model) are labelled and sorted
+    # to the top; everything else pulled remains selectable.
+    def _keep(name: str) -> bool:
+        low = name.lower()
+        if "embed" in low:
+            return False
+        if _re.search(r"-\d{8}-\d{6}", name):   # a dated build snapshot, not a model
+            return False
+        return True
+
+    primary, spec = cfg.ollama_model, getattr(cfg, "specialist_model", "")
+
+    def _label(m: str) -> str:
+        if m == primary:
+            return f"{m} · local · primary"
+        if m == spec:
+            return f"{m} · local · specialist (abliterated)"
+        return f"{m} · local"
+
+    def _rank(m: str) -> int:
+        return 0 if m == primary else 1 if m == spec else 2
+
+    kept = sorted((m for m in models if _keep(m)), key=lambda m: (_rank(m), m.lower()))
+    # Local models first so the offline default is the obvious top choice; the cloud
+    # Claude option is listed last and labelled with its cost, since picking it is the
+    # user's explicit opt-in to spend API tokens.
+    options = [{"value": f"ollama:{m}", "label": _label(m)} for m in kept]
     if cloud:
         options.append({"value": f"anthropic:{cfg.model}",
-                        "label": f"{cfg.model} · Claude cloud"})
-    options += [{"value": f"ollama:{m}", "label": f"{m} · local"} for m in models]
+                        "label": f"{cfg.model} · Claude cloud (uses API tokens)"})
 
     if cfg.backend == "anthropic" or (cfg.backend == "auto" and cloud):
         current = f"anthropic:{cfg.model}"

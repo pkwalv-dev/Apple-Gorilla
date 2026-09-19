@@ -93,6 +93,9 @@ button.danger{background:linear-gradient(180deg,#fb7185,var(--danger));color:#ff
 
 /* --- run controls ---------------------------------------------------- */
 .ctl-right{margin-left:auto;display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+/* An explicit display: wins over the hidden attribute, so say so once, globally —
+   otherwise every hideable control needs its own inline style to disappear. */
+[hidden]{display:none!important}
 .ctl{display:inline-flex;gap:7px;align-items:center;font-family:var(--mono);font-size:.76rem;
   font-weight:500;color:var(--muted);user-select:none;letter-spacing:.01em}
 .ctl input{width:15px;height:15px;accent-color:var(--accent)}
@@ -237,8 +240,42 @@ button.view:hover{color:var(--text);border-style:solid;border-color:var(--accent
 .linkbtn{background:none;border:none;color:var(--muted);font-size:.76rem;font-weight:600;
   padding:4px 6px;cursor:pointer;border-radius:6px}
 .linkbtn:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
-#chat{display:flex;flex-direction:column;gap:14px;max-height:520px;overflow:auto;padding:6px}
-#chat:empty::after{content:'Conversation appears here — send a prompt above to begin.';
+/* Chat pane: a flex column that fills the viewport. A row holds the message column and
+   the reasoning sidebar side by side; the message region scrolls on its own so the
+   input stays pinned at the bottom and never slides off while a long answer streams
+   (the old bug: input sat above a growing list and scrolled out of view). */
+#pane-chat.active{display:flex;flex-direction:column;height:calc(100vh - 128px)}
+#chatmain{flex:1 1 auto;min-height:0;display:flex;gap:12px}
+#chatscroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+#reasonbar{flex:0 0 300px;min-height:0;overflow-y:auto;display:flex;flex-direction:column;
+  gap:8px;border-left:1px solid var(--border);padding-left:10px}
+.rb-head{font-family:var(--mono);font-size:.72rem;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--muted)}
+#reasonstream{white-space:pre-wrap;font-family:var(--mono);font-size:11px;line-height:1.45;
+  background:#05080d;border:1px solid var(--border);border-radius:8px;padding:8px;margin:0;
+  max-height:48%;overflow:auto;color:var(--text)}
+#reasonstream:empty{display:none}
+#inputpanel{flex:none;margin-top:12px;position:sticky;bottom:0;z-index:5}
+/* Per-answer actions (rate / regenerate / send-to-Claude) under each AI bubble. */
+.airow{display:flex;gap:6px;margin-top:7px;align-items:center;flex-wrap:wrap}
+.ico{background:var(--surface-2);border:1px solid var(--border);border-radius:7px;
+  color:var(--muted);font-size:.9rem;line-height:1;padding:3px 8px;cursor:pointer}
+.ico:hover{color:var(--text);border-color:var(--accent)}
+.ico.on{color:var(--accent-ink);border-color:var(--accent);background:rgba(127,127,127,.14)}
+.ico.wide{font-family:var(--mono);font-size:.72rem}
+/* Advanced drawer: model override, tucked to the side of the control bar. */
+.advanced{margin-left:auto}
+.advanced>summary{cursor:pointer;color:var(--muted);font-size:.8rem;list-style:none;
+  padding:2px 6px;border:1px solid var(--border);border-radius:7px}
+.advanced>summary:hover{color:var(--text)}
+.advanced[open]>summary{color:var(--text)}
+.adv-body{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+.adv-note{color:var(--faint);font-size:.72rem}
+@media(max-width:820px){#chatmain{flex-direction:column}
+  #reasonbar{flex:none;max-height:220px;border-left:none;border-top:1px solid var(--border);
+    padding-left:0;padding-top:8px}}
+#chat{display:flex;flex-direction:column;gap:14px;padding:6px}
+#chat:empty::after{content:'Conversation appears here — send a prompt below to begin.';
   color:var(--faint);font-size:.88rem;display:block;padding:22px;text-align:center}
 .msg{display:flex;flex-direction:column;gap:4px;max-width:88%}
 .msg.user{align-self:flex-end;align-items:flex-end}

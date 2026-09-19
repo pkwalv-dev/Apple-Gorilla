@@ -167,10 +167,12 @@ Set `backend` in `config.json`, or pass `--backend` per command:
 
 | Backend | Key? | Network? | Quality | Use |
 |---------|------|----------|---------|-----|
-| `auto` (default) | uses Anthropic if `ANTHROPIC_API_KEY` set, else falls back to `dry` | — | — | sensible default |
-| `anthropic` | **yes** | yes | best | production answers via Claude |
-| `ollama` | **no** | local only | depends on local model | free, offline, keyless |
+| `ollama` (default) | **no** | local only | depends on local model | free, offline, keyless — the default so AG never spends API tokens on its own |
+| `anthropic` | **yes** | yes | best | production answers via Claude (spends API tokens) |
+| `auto` | uses Claude when signed in, else falls back to `offline_backend` (Ollama) | — | — | opt-in convenience |
 | `dry` | no | no | **stub only** (no reasoning) | testing the machinery |
+
+**Claude is opt-in.** AG defaults to the local model and spends **no** Claude API tokens unless you ask for it — set `backend` to `anthropic`/`auto`, pass `--backend anthropic`, or pick the **"Claude cloud (uses API tokens)"** entry in the web app's model menu (shown only when you're signed in). Each is an explicit choice.
 
 ```bash
 python -m ag doctor                          # shows effective backend + ollama probe
@@ -415,12 +417,15 @@ from AG's own memory plus a Claude teacher set**, and saves an adapter under
 `state/lora/adapters/`.
 
 **AG detects your VRAM and offers bases sized to it** (`ag lora options` / the GUI
-selector flags each as fits / tight / won't-fit). On an 8GB card the default is
-**Qwen3-8B** (≈ Qwen2.5-14B quality, trains tight); a 3-4B is the comfortable choice.
-Training uses **Unsloth** when installed (~half the VRAM, ~1.6× faster — what makes an
-8B fit on 8GB) and **falls back to transformers+peft** when it isn't. The 8GB path
-auto-applies gradient checkpointing, a paged 8-bit optimizer, bf16, and a short
-sequence length.
+selector flags each as fits / tight / won't-fit). The default base is
+**`OBLITERATUS/Qwen2.5-Coder-7B-Instruct-OBLITERATED`** — an abliterated (uncensored)
+coder model, strongest for coding/tool use and won't refuse tasks; a 3-4B is the
+comfortable choice on a smaller card. Training uses **Unsloth** when installed (~half the
+VRAM, ~2× faster — what makes a 7-8B fit on 8GB, and needs a working C compiler) and
+**falls back to transformers+peft** when it isn't. The 8GB path auto-applies gradient
+checkpointing, a paged 8-bit optimizer, bf16, a short sequence length, and prompt masking
+(loss on the answer tokens only). Base model, epochs, and Unsloth are editable in the GUI
+**LoRA** tab. See **[docs/LORA_WSL.md](docs/LORA_WSL.md)** for the verified WSL2/CUDA setup.
 
 ```bash
 python -m ag lora status        # GPU/VRAM/CUDA + Unsloth + deps + dataset + can-train?
@@ -499,7 +504,7 @@ tests/             the gate that every self-edit must pass
 - **Real & tested:** the full pipeline (dry-run + live), prompt optimization, the
   critique/iterate loop, snapshot/rollback, the **objective benchmark / fitness function**,
   the **test- *and* fitness-gated evolve loop** with keep-if-better selection and its
-  measured-delta archive, the permission broker, the CLI. `pytest` is green (115 tests);
+  measured-delta archive, the permission broker, the CLI. `pytest` is green (189 tests);
   rollback-on-failure *and* rollback-on-regression are both proven.
 - **Scaffolded (needs your authorization to wire up):** live Chrome/browser control,
   arbitrary network/shell tools. The gates exist; the drivers are deliberately absent.

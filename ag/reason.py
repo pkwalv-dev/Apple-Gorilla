@@ -64,6 +64,30 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
                             broker=broker, allowlist=allow,
                             ref=str(args.get("ref", "main")))
 
+    def _consult_specialist(args, broker):
+        """Delegate a subtask to the specialist model (the abliterated coder) — for code,
+        strict-format output, or a request the primary would refuse. Returns its reply."""
+        task = str(args.get("task", "")).strip()
+        if not task:
+            return "consult_specialist error: provide a 'task'"
+        spec = getattr(cfg, "specialist_model", "") if cfg else ""
+        if not spec:
+            return "consult_specialist error: no specialist model configured"
+        import dataclasses
+        from .model import make_client, ollama_has_model
+        if not ollama_has_model(cfg, spec):
+            return f"consult_specialist error: {spec} is not available locally"
+        try:
+            scfg = dataclasses.replace(cfg, ollama_model=spec)
+            sclient = make_client(scfg, backend="ollama")
+            r = sclient.complete(
+                system="You are a specialist model assisting the primary model. Do the "
+                       "task directly and completely; return only the result.",
+                user=task, cfg=scfg)
+            return (r.text or "(no output)").strip()
+        except Exception as e:
+            return f"consult_specialist error: {e}"
+
     def _generate_image(args, broker):
         from . import images
         prompt = str(args.get("prompt", "")).strip()
@@ -75,6 +99,23 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
         except Exception as e:
             return f"generate_image error: {e}"
         return f"image generated and saved to {res.path}"
+
+    def _generate_video(args, broker):
+        from . import video
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            return "generate_video error: provide a 'prompt'"
+        try:
+            secs = float(args.get("seconds") or 0) or None
+        except (TypeError, ValueError):
+            secs = None
+        try:
+            res = video.generate(prompt, cfg, seconds=secs,
+                                 negative_prompt=str(args.get("negative", "")))
+        except Exception as e:
+            return f"generate_video error: {e}"
+        return (f"video generated ({res.seconds}s, {res.width}x{res.height}) and "
+                f"saved to {res.path}")
 
     reg = [
         Tool("calc", "expr", None,
@@ -111,13 +152,30 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
              'e.g. {"tool":"github_fetch","args":{"repo":"ollama/ollama","path":"README.md"}}',
              _github),
     ]
-    # Local image generation, offered only when enabled in config.
+    # The specialist model, offered when routing is on and it's actually available.
+    if cfg is not None and getattr(cfg, "model_routing", True):
+        spec = getattr(cfg, "specialist_model", "")
+        if spec and spec != getattr(cfg, "ollama_model", ""):
+            reg.append(Tool(
+                "consult_specialist", "task", None,
+                "delegate a subtask to the specialist model (strong at code, strict "
+                "formats, and won't refuse), e.g. {\"tool\":\"consult_specialist\","
+                "\"args\":{\"task\":\"write a Python function that ...\"}}",
+                _consult_specialist))
+    # Local media generation, each offered only when enabled in config.
     if cfg is None or getattr(cfg, "allow_image_gen", False):
         reg.append(Tool(
             "generate_image", "prompt", None,
-            'create an image from a text prompt via the local Stable Diffusion server, '
+            "create an image from a text prompt on this machine's GPU, "
             'e.g. {"tool":"generate_image","args":{"prompt":"a red bicycle at sunset"}}',
             _generate_image))
+    if cfg is None or getattr(cfg, "allow_video_gen", False):
+        reg.append(Tool(
+            "generate_video", "prompt", None,
+            "create a short video clip from a text prompt on this machine's GPU "
+            '(slow — minutes, not seconds), e.g. {"tool":"generate_video","args":'
+            '{"prompt":"a red bicycle rolling down a hill at sunset","seconds":3}}',
+            _generate_video))
     return reg
 
 
@@ -180,6 +238,19 @@ class ReasonResult:
     output_tokens: int = 0
 
 
+def _is_not_an_answer(text: str, names) -> bool:
+    """True when the model's "final answer" is plainly not one.
+
+    Small models sometimes end a turn with nothing, or with a bare tool name — a tool
+    call whose JSON never got written. Returned as-is that becomes the user's answer,
+    and the observations the loop just gathered are thrown away. Kept deliberately
+    narrow: only empty output and a naked tool name qualify, so a legitimately terse
+    answer ("10063", "Paris") is never second-guessed.
+    """
+    t = (text or "").strip().strip("`\"'.,:  \n\t")
+    return not t or t in names
+
+
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None, on_delta=None,
           cancel=None, agent: str = "root", parents=(), depth: int = 0) -> ReasonResult:
@@ -221,6 +292,19 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
         tout += res.output_tokens
         action = _parse_action(res.text, tools)
         if not action:
+            if steps and _is_not_an_answer(res.text, by_name):
+                # It gathered what it needed and then said nothing usable. Ask once
+                # more from the same transcript rather than handing that on.
+                _emit(emit, "reason", "no usable answer — asking once more",
+                      level="tool")
+                retry = client.complete(
+                    system=system,
+                    user=transcript + "\nUsing the observations above, give your "
+                                      "final answer as plain text.", cfg=cfg, **dkw)
+                tin += retry.input_tokens
+                tout += retry.output_tokens
+                if not _is_not_an_answer(retry.text, by_name):
+                    return ReasonResult(retry.text.strip(), steps, tin, tout)
             return ReasonResult(res.text.strip(), steps, tin, tout)  # final answer
         tool = by_name[action["tool"]]
         _emit(emit, "reason", f"tool: {tool.name}({_short(action['args'])})",

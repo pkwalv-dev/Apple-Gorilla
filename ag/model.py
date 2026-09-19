@@ -584,6 +584,41 @@ def oauth_token_status() -> str:
     return "valid" if exp_s > _time.time() else "expired"
 
 
+_OLLAMA_TAGS_CACHE: dict = {}
+
+
+def ollama_has_model(cfg: Config, name: str, *, timeout: float = 1.5) -> bool:
+    """Whether `name` is pulled locally, so routing can fall back gracefully instead of
+    erroring mid-run on a model the user hasn't downloaded. Cached per host+name for the
+    process; a missing model is not re-probed on every turn."""
+    name = (name or "").strip()
+    if not name:
+        return False
+    host = cfg.ollama_host.rstrip("/")
+    key = (host, name)
+    if key in _OLLAMA_TAGS_CACHE:
+        return _OLLAMA_TAGS_CACHE[key]
+    import json as _json
+    import urllib.request
+    ok = False
+    try:
+        with urllib.request.urlopen(host + "/api/tags", timeout=timeout) as r:
+            tags = [m.get("name", "") for m in
+                    _json.loads(r.read().decode("utf-8")).get("models", [])]
+        # Exact match, tolerating an implicit ":latest". A bare repo name (no tag) also
+        # matches any pulled tag of that repo. NOT a loose prefix match: "qwen2.5:7b"
+        # must not be reported as "qwen2.5:7b-instruct", or the call errors at run time.
+        if ":" in name:
+            ok = name in tags or (name + ":latest") in tags
+        else:
+            ok = any(t == name or t.split(":")[0] == name for t in tags)
+    except Exception:
+        ok = False
+    if ok:                       # only cache a positive; a transient probe failure
+        _OLLAMA_TAGS_CACHE[key] = True   # shouldn't disable routing for the whole run
+    return ok
+
+
 def make_client(cfg: Optional[Config] = None, *, backend: Optional[str] = None,
                 dry_run: bool = False):
     """Select a backend.

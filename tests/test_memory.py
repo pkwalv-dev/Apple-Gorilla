@@ -51,6 +51,100 @@ def test_layers_are_separate(tmp_path):
     assert hits and hits[0].kind == MemoryKind.PROCEDURAL
 
 
+def test_context_does_not_auto_inject_episodes(tmp_path):
+    """An episode is one past conversation's transcript. The current conversation is
+    threaded into the prompt as history, so an episode surfacing in context() only ever
+    comes from a DIFFERENT conversation — the cross-conversation bleed that had AG
+    volunteering a stale, hallucinated 'rush b' answer in unrelated chats."""
+    m = mgr(tmp_path)
+    m.record_episode("rush b",
+                     "The latest Rush tour dates include Houston and Pittsburgh...",
+                     score=5.0)
+    m.remember("User prefers metric units.", kind=MemoryKind.SEMANTIC)
+
+    ctx = m.context("rush")
+    blob = ctx["text"].lower()
+    assert "rush" not in blob and "houston" not in blob     # the episode stays out
+    assert not any(h.kind == MemoryKind.EPISODIC for h in ctx["hits"])
+
+    # But the episode is still stored, and still explicitly recallable — not nerfed.
+    assert len(m.store.all("root", [MemoryKind.EPISODIC])) == 1
+    assert m.recall("rush", kinds=[MemoryKind.EPISODIC])
+    # A caller that explicitly asks for episodes in context() still gets them.
+    assert any(h.kind == MemoryKind.EPISODIC
+               for h in m.context("rush", kinds=[MemoryKind.EPISODIC])["hits"])
+
+
+# --- auto-inject discipline (B1) --------------------------------------------
+def test_context_caps_unconfirmed_hypotheses(tmp_path):
+    """The auto-inject channel should carry only a few of the strongest hypotheses, not
+    a pile of low-belief noise crowding a small context window."""
+    m = mgr(tmp_path)
+    from ag.memory import Origin
+    for i in range(5):                       # all enter as sub-trust inferences
+        m.remember(f"user might like widget flavor {i} very much indeed",
+                   origin=Origin.INFERENCE)
+    ctx = m.context("widget flavor", k=5, max_reported=2)
+    assert len(ctx["reported"]) <= 2
+    # hits are trimmed to match, so the rendered block never exceeds the cap.
+    assert len(ctx["hits"]) == len(ctx["known"]) + len(ctx["reported"])
+
+
+# --- relevance gate (B2): off-topic memory must not auto-inject -------------
+def test_context_withholds_off_topic_memory(tmp_path):
+    """A high-value but topically-unrelated memory (the poisoned 'fetch lyrics' kind)
+    must not ride recency/belief into an unrelated question's context, while an on-topic
+    memory for that same question still surfaces."""
+    m = mgr(tmp_path)
+    m.remember("For song lyrics, fetch them from YouTube when a file path is unknown.",
+               kind=MemoryKind.PROCEDURAL, importance=0.9)
+    m.remember("The user's project is codenamed Falcon.", importance=0.9)
+
+    ctx = m.context("what is my project's codename?", min_relevance=0.55)
+    blob = ctx["text"].lower()
+    assert "falcon" in blob            # the on-topic fact is injected
+    assert "lyrics" not in blob        # the off-topic procedure is withheld
+
+    # The explicit recall tool leaves the gate off — a deliberate search still finds it.
+    assert any("lyrics" in h.text.lower() for h in m.recall("how do I fetch lyrics"))
+
+
+# --- stale pruning (B2) -----------------------------------------------------
+def test_prune_drops_dead_durable_memory_but_keeps_the_living(tmp_path):
+    from ag.memory.reflect import _prune_stale
+    from ag.memory.types import Memory
+    m = mgr(tmp_path)
+    # Dead: below the recall floor, never used, and old — genuine bloat.
+    dead = Memory(id="dead", text="a decayed claim nobody ever used",
+                  kind=MemoryKind.SEMANTIC, agent="root",
+                  confidence=0.1, use_count=0, created="2000-01-01T00:00:00")
+    # Living-by-belief and living-by-use both survive.
+    believed = Memory(id="believed", text="a well founded fact", kind=MemoryKind.SEMANTIC,
+                      agent="root", confidence=0.9, use_count=0,
+                      created="2000-01-01T00:00:00")
+    used = Memory(id="used", text="a low belief but useful note", kind=MemoryKind.SEMANTIC,
+                  agent="root", confidence=0.1, use_count=3,
+                  created="2000-01-01T00:00:00")
+    for x in (dead, believed, used):
+        m.store.add(x)
+    removed = _prune_stale(m)
+    ids = {x.id for x in m.store.all("root", [MemoryKind.SEMANTIC])}
+    assert removed == 1 and "dead" not in ids
+    assert {"believed", "used"} <= ids
+
+
+def test_prune_spares_recent_low_belief_memory(tmp_path):
+    """A claim that just came in low (e.g. a fresh web assertion) is not bloat yet — it
+    may still be corroborated. Only aged, unused, sub-floor memory is pruned."""
+    from ag.memory.reflect import _prune_stale
+    from ag.memory.types import Memory, now_iso
+    m = mgr(tmp_path)
+    m.store.add(Memory(id="fresh", text="a brand new low confidence claim",
+                       kind=MemoryKind.SEMANTIC, agent="root",
+                       confidence=0.1, use_count=0, created=now_iso()))
+    assert _prune_stale(m) == 0
+
+
 # --- dedup / merge ----------------------------------------------------------
 def test_exact_duplicate_merges(tmp_path):
     m = mgr(tmp_path)

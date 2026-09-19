@@ -116,12 +116,42 @@ def python_exec(code: str, *, broker: PermissionBroker,
 # --- memory tools (thin wrappers so the reasoning loop can call them) -------
 
 def memory_recall(query: str, *, k: int = 5) -> str:
+    """Recall, annotated with how well-founded each item is. The reasoning loop is told
+    which memories it may rely on and which are unconfirmed, rather than being handed a
+    flat list it will read as fact.
+
+    Durable knowledge only — semantic facts and procedures. Episodes are one past
+    conversation's raw transcript; surfacing one here drags an unrelated (often
+    hallucinated) exchange into this task, which is the cross-conversation bleed the
+    caller must not have to defend against. The current conversation reaches the model
+    as history, not through this tool."""
     from .. import memory
-    hits = memory.recall(query, k=k)
-    return "\n".join(f"- {m.text}" for m in hits) or "(no relevant memories)"
+    from ..memory import MemoryKind
+    mgr = memory.get_manager("root")
+    hits = memory.recall(query, k=k,
+                         kinds=(MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL))
+    if not hits:
+        return "(no relevant memories)"
+    out = []
+    for m in hits:
+        b = mgr.belief(m)
+        mark = "" if b >= mgr.trust_threshold else f" [unconfirmed, {b:.2f}]"
+        if m.disputed:
+            mark = f" [DISPUTED — a contradicting memory exists, {b:.2f}]"
+        out.append(f"- {m.text}{mark}")
+    return "\n".join(out)
 
 
 def memory_remember(text: str, *, max_memories: int = 200) -> str:
+    """Save a fact mid-reasoning. Stored as INFERENCE: this is the model asserting
+    something, not the user stating it, and it must not be able to write itself a
+    high-confidence belief. Corroboration from the user can raise it later."""
     from .. import memory
-    m = memory.remember(text, max_memories=max_memories)
-    return f"remembered: {m.text}" if m else "nothing to remember"
+    mgr = memory.get_manager("root")
+    m = memory.remember(text, max_memories=max_memories,
+                        origin=memory.Origin.INFERENCE)
+    if m is not None:
+        return f"remembered (unconfirmed): {m.text}"
+    # A refusal is worth saying out loud: the loop should learn that it cannot write
+    # AG's self-description into memory, rather than silently retrying.
+    return f"not stored: {mgr.last_refusal}" if mgr.last_refusal else "nothing to remember"

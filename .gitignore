@@ -10,10 +10,17 @@ state/archive/
 state/bench/
 state/skills/
 state/images/
+state/video/
 state/fleet/
+state/sessions/
+state/routing/
 !state/versions/.gitkeep
 !state/runs/.gitkeep
 .DS_Store
 
 # Per-machine launcher state (remembered AG folder path)
 AG_path.txt
+
+# LoRA build artifacts (datasets, trained adapters) and Unsloth JIT cache
+state/lora/
+unsloth_compiled_cache/

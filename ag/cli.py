@@ -56,21 +56,41 @@ def cmd_run(args) -> int:
         cfg.model = args.model
     client = _client(args, cfg)
     # Permanent internet is on via cfg.allow_web; --web / --no-web override per run.
-    web_effective = cfg.allow_web if args.web is None else args.web
+    # With neither flag, ambient web fires only for research-type prompts that need
+    # external/current info — not chat or self-contained tasks (keeps them fast).
+    if args.web is None:
+        from . import routing
+        web_effective = cfg.allow_web and ("research" in routing.tags_for(args.prompt))
+    else:
+        web_effective = args.web
     tools_effective = cfg.allow_local_tools or getattr(args, "tools", False)
     cfg.allow_local_tools = tools_effective
     broker = _make_broker(cfg, web=web_effective, tools=tools_effective)
     trace = None
     if args.verbose:
         def trace(ev):  # surface tool/memory/web activity live on stderr
-            if ev.get("stage") in ("reason", "memory", "web") or ev.get("level") == "error":
+            if ev.get("stage") in ("reason", "memory", "web", "conversation") or ev.get("level") == "error":
                 print(f"[{ev['stage']}] {ev['msg']}", file=sys.stderr)
+    # Resolve which conversation this CLI run belongs to: consecutive `ag run`s chain
+    # into one working session, and a long silence starts a fresh one.
+    session_id = ""
+    if getattr(cfg, "working_memory", True):
+        try:
+            from .memory import working
+            session_id = working.resolve_session(
+                getattr(args, "session", "") or None,
+                idle_reset_min=getattr(cfg, "working_idle_reset_min", 45))
+        except Exception:
+            session_id = ""
     rec = run_pipeline(client, cfg, args.prompt, verbose=args.verbose,
-                       web=web_effective, broker=broker, emit=trace)
-    # Fill long-term memory from normal CLI use too (best-effort, gated by auto_memory).
+                       web=web_effective, broker=broker, emit=trace,
+                       session_id=session_id)
+    # Fill long-term memory from normal CLI use too (best-effort, gated by auto_memory),
+    # and advance the working buffer so the next `ag run` remembers this turn.
     try:
         from .pipeline import capture_memory
-        saved = capture_memory(client, cfg, args.prompt, rec.answer, emit=trace)
+        saved = capture_memory(client, cfg, args.prompt, rec.answer, emit=trace,
+                               session_id=session_id, web_sources=rec.web_sources)
         if saved and args.verbose:
             print(f"[memory] saved {len(saved)} durable fact(s)", file=sys.stderr)
     except Exception:
@@ -402,22 +422,61 @@ def cmd_login(args) -> int:
     return 0
 
 
+def _standing(mgr, m) -> str:
+    """How well-founded a memory is, in one trailing tag — so the list never reads as a
+    flat wall of equally-true statements."""
+    b = mgr.belief(m)
+    via = f"{m.origin}:{m.asserter}" if m.asserter else m.origin
+    about = " about:self" if m.subject == "self" else ""
+    if m.disputed:
+        return f"  (DISPUTED, {b:.2f}, via {via}{about})"
+    if b < mgr.trust_threshold:
+        stale = " stale," if m.volatile and m.confidence > b + 0.05 else ""
+        return f"  (unconfirmed,{stale} {b:.2f}, via {via}{about})"
+    return f"  ({b:.2f}, via {via}{about})"
+
+
 def cmd_memory(args) -> int:
     from . import memory
     if args.action == "add":
         m = memory.remember(args.text or "", max_memories=Config.load().max_memories)
         print(f"remembered: {m.text}" if m else "nothing to remember")
     elif args.action == "recall":
+        mgr = memory.get_manager("root")
         hits = memory.recall(args.text or "", k=args.k)
         if not hits:
             print("(no relevant memories)")
         for m in hits:
-            print(f"- {m.text}")
+            print(f"- {m.text}{_standing(mgr, m)}")
     elif args.action == "list":
+        mgr = memory.get_manager("root")
         mems = memory.all_memories()
         print(f"{len(mems)} memory item(s):")
         for m in mems:
-            print(f"  [{m.kind[:4]}] [{m.id}] {m.text}")
+            print(f"  [{m.kind[:4]}] [{m.id}] {m.text}{_standing(mgr, m)}")
+    elif args.action == "disputed":
+        # AG does not quietly pick a winner between two stable claims that cannot both
+        # be true; it holds both in doubt and shows them here to be settled.
+        items = memory.disputed()
+        print(f"{len(items)} disputed memor(y/ies):" if items
+              else "(nothing disputed)")
+        for m in items:
+            other = m.meta.get("contradicts", "?")
+            print(f"  [{m.id}] {m.text}\n      contradicts [{other}]")
+    elif args.action == "stale":
+        items = memory.needs_verification(k=args.k)
+        print(f"{len(items)} belief(s) due a re-check:" if items
+              else "(nothing stale)")
+        mgr = memory.get_manager("root")
+        for m in items:
+            print(f"  [{m.id}] {m.text}{_standing(mgr, m)}")
+    elif args.action == "verify":
+        m = memory.verify(args.text or "", confirmed=not args.reject)
+        if m is None:
+            print("no such memory")
+        else:
+            print(f"{'rejected' if args.reject else 'confirmed'}: {m.text} "
+                  f"(confidence {m.confidence:.2f})")
     elif args.action == "clear":
         print(f"cleared {memory.clear()} memory item(s)")
     elif args.action == "stats":
@@ -466,7 +525,7 @@ def cmd_acquire(args) -> int:
 
     def trace(ev):
         if ev.get("stage") == "acquire" or ev.get("level") == "error":
-            print(f"[{ev.get('stage')}] {ev.get('message', '')}", file=sys.stderr)
+            print(f"[{ev.get('stage')}] {ev.get('msg', '')}", file=sys.stderr)
 
     res = acquire.author_skill(client, cfg, args.spec or "", broker=broker,
                                approve=True, emit=trace)
@@ -515,14 +574,15 @@ def cmd_lora(args) -> int:
     elif args.action == "build-data":
         def trace(ev):
             if ev.get("stage") == "lora":
-                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
-        st = lora.build_dataset(cfg, emit=trace)
+                print(f"[lora] {ev.get('msg','')}", file=sys.stderr)
+        st = lora.build_dataset(cfg, emit=trace,
+                                refresh_teacher=bool(getattr(args, "refresh_teacher", False)))
         print(f"dataset: {st.total} example(s) "
               f"({st.from_memory} from memory, {st.from_teacher} from teacher) -> {st.path}")
     elif args.action == "train":
         def trace(ev):
             if ev.get("stage") == "lora" or ev.get("level") == "error":
-                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+                print(f"[lora] {ev.get('msg','')}", file=sys.stderr)
         res = lora.train(cfg, emit=trace)
         print(res.reason)
         if res.ok:
@@ -543,10 +603,70 @@ def cmd_lora(args) -> int:
             print("usage: ag lora merge <adapter_id>  (see `ag lora list`)"); return 1
         def trace(ev):
             if ev.get("stage") == "lora" or ev.get("level") == "error":
-                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+                print(f"[lora] {ev.get('msg','')}", file=sys.stderr)
         res = lora.merge_to_gguf(cfg, args.target, emit=trace)
         print(res.reason)
         return 0 if res.ok else 1
+    return 0
+
+
+def cmd_media(args) -> int:
+    """Local image/video generation: what's installed, does the workflow load, make one."""
+    from . import comfy, images, video
+    cfg = Config.load()
+    if args.action == "status":
+        info = comfy.status(cfg)
+        print(f"image backend : {images.backend_for(cfg)}")
+        print(f"comfyui       : {info['host']} "
+              f"({'reachable' if info['reachable'] else 'not running'}"
+              f"{', installed' if info['installed'] else ', not installed'})")
+        print(f"a1111         : {cfg.sd_host} "
+              f"({'reachable' if images.sd_reachable(cfg) else 'not running'})")
+        for kind in ("image", "video"):
+            print(f"{kind:<14}: {info.get(kind + '_workflow', '(none)')}")
+            for m in info.get(f"{kind}_models", []):
+                print(f"  needs       : {m}")
+        return 0
+
+    if args.action == "check":
+        # Validate the workflows against the server that will actually run them.
+        if not comfy.reachable(cfg):
+            print(f"ComfyUI is not running at {cfg.comfy_host} — start it first "
+                  "(nothing can be checked against a server that isn't up)")
+            return 1
+        bad = 0
+        for kind, name in (("image", cfg.comfy_image_workflow),
+                           ("video", cfg.comfy_video_workflow)):
+            try:
+                problems = comfy.validate(comfy.load_workflow(name), cfg)
+            except Exception as e:
+                print(f"{kind}: {name}: {e}")
+                bad += 1
+                continue
+            if problems:
+                bad += 1
+                print(f"{kind}: {name}: {len(problems)} problem(s)")
+                for pr in problems:
+                    print(f"  - {pr}")
+            else:
+                print(f"{kind}: {name}: ok")
+        return 1 if bad else 0
+
+    prompt = (args.prompt or "").strip()
+    if not prompt:
+        print("give a prompt")
+        return 2
+    try:
+        if args.action == "image":
+            r = images.generate(prompt, cfg)
+            print(f"saved {r.path} ({r.width}x{r.height}, {r.steps} steps)")
+        else:
+            r = video.generate(prompt, cfg, seconds=args.seconds or None)
+            print(f"saved {r.path} ({r.seconds}s, {r.width}x{r.height}, "
+                  f"{r.frames} frames @ {r.fps}fps)")
+    except Exception as e:
+        print(f"failed: {e}")
+        return 1
     return 0
 
 
@@ -631,6 +751,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tools", action="store_true",
                    help="enable local tools (calc/file-read/python-exec/memory) + "
                         "the reasoning loop for this run")
+    r.add_argument("--session", default="",
+                   help="pin this run to a named working-memory session (default: "
+                        "continue the recent one, or start fresh after a long gap)")
     r.set_defaults(func=cmd_run)
 
     e = sub.add_parser("evolve",
@@ -704,10 +827,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
 
-    mem = sub.add_parser("memory", help="AG's layered memory (add/recall/list/clear/stats/reflect)")
-    mem.add_argument("action", choices=["add", "recall", "list", "clear", "stats", "reflect"])
-    mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
-    mem.add_argument("-k", type=int, default=5, help="recall: max items")
+    mem = sub.add_parser("memory", help="AG's layered memory (add/recall/list/clear/"
+                                        "stats/reflect/disputed/stale/verify)")
+    mem.add_argument("action", choices=["add", "recall", "list", "clear", "stats",
+                                        "reflect", "disputed", "stale", "verify"])
+    mem.add_argument("text", nargs="?", default="",
+                     help="fact to add, recall query, or memory id to verify")
+    mem.add_argument("-k", type=int, default=5, help="recall/stale: max items")
+    mem.add_argument("--reject", action="store_true",
+                     help="verify: mark the claim false instead of confirming it")
     mem.set_defaults(func=cmd_memory)
 
     sk = sub.add_parser("skills", help="acquired skills (list/enable/disable/remove)")
@@ -719,6 +847,14 @@ def build_parser() -> argparse.ArgumentParser:
     acq.add_argument("spec", help="the capability to acquire, in plain language")
     acq.set_defaults(func=cmd_acquire)
 
+    md = sub.add_parser("media", help="local image/video generation "
+                                      "(status/check/image/video)")
+    md.add_argument("action", choices=["status", "check", "image", "video"])
+    md.add_argument("prompt", nargs="?", default="", help="what to generate")
+    md.add_argument("--seconds", type=float, default=0.0,
+                    help="clip length for 'video' (default: config video_frames)")
+    md.set_defaults(func=cmd_media)
+
     fl = sub.add_parser("fleet", help="agent swarm control (list/enable/disable/kill/revive/clear)")
     fl.add_argument("action", choices=["list", "enable", "disable", "kill", "revive", "clear"])
     fl.add_argument("name", nargs="?", default="", help="agent name (for enable/disable)")
@@ -729,6 +865,9 @@ def build_parser() -> argparse.ArgumentParser:
     lo.add_argument("action", choices=["status", "options", "build-data", "train",
                                        "list", "merge"])
     lo.add_argument("target", nargs="?", default="", help="adapter id (for merge)")
+    lo.add_argument("--refresh-teacher", action="store_true",
+                    help="build-data: regenerate the teacher set instead of reusing it "
+                         "(one model call per task — costs API tokens on a cloud backend)")
     lo.set_defaults(func=cmd_lora)
 
     bn = sub.add_parser("bundle", help="export a portable bundle, or --check portability")
