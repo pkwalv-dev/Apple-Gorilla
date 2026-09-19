@@ -73,3 +73,65 @@ def test_solve_forces_answer_when_steps_exhausted():
     r = reason.solve(client, cfg, system="s", user="u", broker=_broker())
     assert r.answer == "final synthesized answer"
     assert len(r.steps) == 2  # bounded by max_tool_steps
+
+
+# --- a non-answer is not an answer ------------------------------------------
+def test_a_bare_tool_name_is_not_mistaken_for_an_answer():
+    from ag import reason
+    names = {"read_file", "calc"}
+    assert reason._is_not_an_answer("read_file", names)
+    assert reason._is_not_an_answer("  'read_file' ", names)
+    assert reason._is_not_an_answer("", names)
+    # A terse but real answer is left alone — the guard must not eat these.
+    assert not reason._is_not_an_answer("10063", names)
+    assert not reason._is_not_an_answer("Paris.", names)
+
+
+def test_the_loop_reasks_once_when_it_ends_with_a_non_answer(monkeypatch):
+    """After a good observation the model sometimes emits a bare tool name — a tool
+    call whose JSON never got written. Returning that discards the work just done."""
+    from ag import reason
+    from ag.config import Config
+    from ag.model import ModelResult
+    from ag.permissions import PermissionBroker
+
+    replies = iter([
+        '{"tool":"calc","args":{"expr":"2+2"}}',   # a real tool call
+        "calc",                                    # ...then a non-answer
+        "The answer is 4.",                        # the re-ask
+    ])
+
+    class _C:
+        def __init__(self): self.n = 0
+        def complete(self, **kw):
+            self.n += 1
+            return ModelResult(text=next(replies))
+
+    c = _C()
+    rr = reason.solve(c, Config(), system="s", user="what is 2+2?",
+                      broker=PermissionBroker(allow_external_tools=True))
+    assert rr.answer == "The answer is 4."
+    assert c.n == 3                       # asked again exactly once
+    assert [s["tool"] for s in rr.steps] == ["calc"]
+
+
+def test_the_reask_happens_only_once(monkeypatch):
+    """If the second attempt is also useless, AG returns what it has rather than
+    looping — an unhelpful answer beats an unbounded one."""
+    from ag import reason
+    from ag.config import Config
+    from ag.model import ModelResult
+    from ag.permissions import PermissionBroker
+
+    replies = iter(['{"tool":"calc","args":{"expr":"2+2"}}', "calc", "calc", "calc"])
+
+    class _C:
+        def __init__(self): self.n = 0
+        def complete(self, **kw):
+            self.n += 1
+            return ModelResult(text=next(replies))
+
+    c = _C()
+    rr = reason.solve(c, Config(), system="s", user="q",
+                      broker=PermissionBroker(allow_external_tools=True))
+    assert c.n == 3 and rr.answer == "calc"
