@@ -180,6 +180,19 @@ class ReasonResult:
     output_tokens: int = 0
 
 
+def _is_not_an_answer(text: str, names) -> bool:
+    """True when the model's "final answer" is plainly not one.
+
+    Small models sometimes end a turn with nothing, or with a bare tool name — a tool
+    call whose JSON never got written. Returned as-is that becomes the user's answer,
+    and the observations the loop just gathered are thrown away. Kept deliberately
+    narrow: only empty output and a naked tool name qualify, so a legitimately terse
+    answer ("10063", "Paris") is never second-guessed.
+    """
+    t = (text or "").strip().strip("`\"'.,: \n\t")
+    return not t or t in names
+
+
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None, on_delta=None,
           cancel=None, agent: str = "root", parents=(), depth: int = 0) -> ReasonResult:
@@ -221,6 +234,19 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
         tout += res.output_tokens
         action = _parse_action(res.text, tools)
         if not action:
+            if steps and _is_not_an_answer(res.text, by_name):
+                # It gathered what it needed and then said nothing usable. Ask once
+                # more from the same transcript rather than handing that on.
+                _emit(emit, "reason", "no usable answer — asking once more",
+                      level="tool")
+                retry = client.complete(
+                    system=system,
+                    user=transcript + "\nUsing the observations above, give your "
+                                      "final answer as plain text.", cfg=cfg, **dkw)
+                tin += retry.input_tokens
+                tout += retry.output_tokens
+                if not _is_not_an_answer(retry.text, by_name):
+                    return ReasonResult(retry.text.strip(), steps, tin, tout)
             return ReasonResult(res.text.strip(), steps, tin, tout)  # final answer
         tool = by_name[action["tool"]]
         _emit(emit, "reason", f"tool: {tool.name}({_short(action['args'])})",
