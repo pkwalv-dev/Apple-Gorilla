@@ -185,6 +185,19 @@ def test_format_example_masks_the_prompt():
     assert any(l != -100 for l in enc["labels"])
 
 
+def test_warmup_scales_with_the_length_of_the_run():
+    """A ratio of a very short run rounds down to no warmup at all, which is exactly
+    when the cold first update does the most damage."""
+    import dataclasses
+    cfg = dataclasses.replace(Config(), lora_epochs=3, lora_batch_size=1,
+                              lora_grad_accum=8, lora_warmup_ratio=0.03)
+    assert lora._warmup_steps(cfg, 143) >= 2      # 54 steps: the floor applies
+    assert lora._warmup_steps(cfg, 14000) > lora._warmup_steps(cfg, 143)
+    # Never so long that warmup eats the run.
+    assert lora._warmup_steps(cfg, 40) <= 15 // 4 + 2
+    assert lora._warmup_steps(dataclasses.replace(cfg, lora_warmup_ratio=0.0), 143) == 0
+
+
 def test_recommended_config_scales_with_vram():
     assert lora.recommended_config(8.0)["base"] == "Qwen/Qwen3-8B"
     # Tight VRAM shortens the window, but not below what a whole answer needs — a

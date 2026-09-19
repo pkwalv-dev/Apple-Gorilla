@@ -167,8 +167,13 @@ def feasibility(cfg: Optional[Config] = None) -> Feasibility:
     elif vram < 7:
         notes.append(f"{vram} GB VRAM: use a <=4B base (an 8B won't fit for training)")
     elif vram < 10:
+        # Read the real recommendation rather than restating a number that can drift
+        # out of step with it — a status line quoting a stale value is a small lie in
+        # the one place you go to find out what will happen.
+        seq = recommended_config(vram)["max_seq"]
         notes.append(f"{vram} GB VRAM: an 8B trains but is tight — Unsloth + gradient "
-                     "checkpointing + seq 512 recommended (auto-applied)")
+                     f"checkpointing + seq {seq} recommended (auto-applied; lower "
+                     f"lora_max_seq if training runs out of memory)")
     if "bitsandbytes" not in missing and vram is not None:
         notes.append("bitsandbytes/Unsloth on native Windows can be finicky; if 4-bit "
                      "fails to load, run under WSL2")
@@ -634,6 +639,22 @@ class TrainResult:
     reason: str = ""
 
 
+def _warmup_steps(cfg: Config, n_examples: int) -> int:
+    """How many steps to ease the learning rate in over.
+
+    Derived from the run's real length — examples, effective batch, epochs — so the
+    same setting behaves sensibly whether the dataset is 143 examples or 14,000. Short
+    runs get a floor of 2: warming up over "0.4 of a step" is the same as not warming
+    up, which is precisely when the cold first update hurts most.
+    """
+    per_step = max(1, int(cfg.lora_batch_size) * int(cfg.lora_grad_accum))
+    total = max(1, int(round((n_examples / per_step) * float(cfg.lora_epochs))))
+    ratio = float(getattr(cfg, "lora_warmup_ratio", 0.03) or 0.0)
+    if ratio <= 0:
+        return 0
+    return max(2, min(int(round(total * ratio)) or 2, max(1, total // 4)))
+
+
 def _format_example(tokenizer, instruction: str, output: str, max_seq: int) -> dict:
     """Tokenize one pair, MASKING the prompt so training loss is computed on the answer
     tokens only (label -100 = "ignore"). Without this the model also spends gradient
@@ -771,7 +792,9 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
             # most damage to what the base model already knows. Warm up into it, then
             # decay — the standard QLoRA schedule, and the cheapest guard there is
             # against trading general knowledge for a small set of new habits.
-            warmup_ratio=float(getattr(cfg, "lora_warmup_ratio", 0.03) or 0.0),
+            # Expressed in steps, not a ratio: transformers deprecated warmup_ratio,
+            # and a ratio of a very short run rounds down to almost no warmup at all.
+            warmup_steps=_warmup_steps(cfg, n),
             lr_scheduler_type=str(getattr(cfg, "lora_lr_scheduler", "cosine")),
             gradient_checkpointing=bool(cfg.lora_grad_checkpointing),
             optim=str(getattr(cfg, "lora_optimizer", "paged_adamw_8bit")),
