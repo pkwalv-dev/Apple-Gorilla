@@ -91,27 +91,30 @@ def test_capture_memory_does_not_store_formatting_feedback(tmp_path, monkeypatch
     memory.reset()
 
 
-# --- the uncensored toggle wires through the control system -----------------
-def test_uncensored_control_maps_to_config_override():
-    from ag import controls
-    assert controls.overrides_for({"uncensored": True}) == {"uncensored": True}
-    assert controls.overrides_for({"uncensored": False}) == {"uncensored": False}
-    assert "uncensored" not in controls.overrides_for({})   # unsent = standing config
+# --- the failure detector drives the specialist fallback --------------------
+def test_is_failure_flags_empty_and_refusals():
+    assert pipeline._is_failure("") is True
+    assert pipeline._is_failure("  ") is True
+    assert pipeline._is_failure("I cannot help with that request.") is True
+    assert pipeline._is_failure("I'm unable to do that.") is True
+    assert pipeline._is_failure("As an AI, I don't have feelings.") is True
 
 
-# --- model_used is reported, and reflects uncensored mode -------------------
-def test_uncensored_mode_keeps_the_abliterated_model_for_chat(tmp_path, monkeypatch):
-    """With uncensored on, a conversational prompt must NOT be routed to the instruct
-    model — the abliterated model answers, so raw output is what the user gets."""
+def test_is_failure_accepts_real_answers():
+    assert pipeline._is_failure("Paris.") is False
+    assert pipeline._is_failure("The answer is 42.") is False
+    assert pipeline._is_failure("Here are three facts about octopuses: ...") is False
+
+
+# --- model_used defaults to the primary; no fallback on a healthy answer -----
+def test_model_used_reports_the_primary(tmp_path, monkeypatch):
     from ag import config as cfgmod, pipeline
     from ag.model import DryRunClient
     monkeypatch.setattr(cfgmod, "STATE_DIR", tmp_path)
     (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(pipeline, "RUNS_DIR", tmp_path / "runs")
-    cfg = cfgmod.Config(uncensored=True, allow_local_tools=False, use_memory=False,
+    cfg = cfgmod.Config(allow_local_tools=False, use_memory=False,
                         working_memory=False, auto_memory=False)
-    # DryRunClient isn't an OllamaClient, so routing is skipped regardless; the point is
-    # model_used reports the abliterated task model, never the chat model.
+    # DryRunClient isn't an OllamaClient, so routing is inert; model_used is the primary.
     rec = pipeline.run(DryRunClient(), cfg, "how's it going?", broker=None)
     assert rec.model_used == cfg.ollama_model
-    assert rec.model_used != cfg.chat_model

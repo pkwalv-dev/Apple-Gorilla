@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
 
-from . import prompts, scoring
+from . import prompts, routing, scoring
 from .config import Config, RUNS_DIR, ensure_dirs
 from .model import ModelResult, extract_json
 from .profile import load_principles, load_user_context
@@ -387,6 +387,22 @@ _TASK_SIGNALS = _re.compile(
     r"url|directory|folder|path|\.py|\.js|\.json|\.md|\.txt)\b", _re.I)
 
 
+_REFUSAL = _re.compile(
+    r"\b(i (?:can'?t|cannot|can not|am unable|am not able)|i'?m unable|"
+    r"i am sorry,? but|i can'?t help|as an ai\b|i (?:do not|don'?t) have the ability)",
+    _re.I)
+
+
+def _is_failure(text: str) -> bool:
+    """A hard failure the runtime should fall back on: empty output, a stub, or a
+    refusal. Not a quality judgement — AG does not fabricate one — just 'this didn't
+    produce a usable answer', which is the honest trigger for trying the specialist."""
+    t = (text or "").strip()
+    if len(t) < 3:
+        return True
+    return bool(_REFUSAL.search(t[:200]))
+
+
 def _conversational(prompt: str, *, max_chars: int = 400) -> bool:
     """True when a prompt is plain conversation — chat, opinion, or a general question
     with no task to execute. Such turns are answered one-shot by the instruct chat model
@@ -443,31 +459,19 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
               f"carrying the current conversation as {convo_kind}", level="tool",
               turns=convo_turns)
 
-    # Route plain conversation to the instruct chat model, one-shot, with web + the tool
-    # loop off. Task turns keep the abliterated model and its tools. Only applies to the
-    # local Ollama backend; Claude needs no routing.
-    # A conversational turn answers one-shot (no tool loop, no web) whatever the model.
-    # Routing to the instruct chat model happens only when chat routing is on AND the
-    # user is not in uncensored mode (which forces the abliterated model everywhere).
+    # Model routing: the primary (this run's client) reasons and answers; the specialist
+    # is available for it to consult (guidance injected below, tool wired into the reason
+    # loop) and is the runtime's fallback when the primary hard-fails. Local Ollama only;
+    # Claude needs no routing. `conversational` is used solely to gate ambient web.
     conversational = _conversational(raw_prompt)
-    uncensored = bool(getattr(cfg, "uncensored", False))
-    route_to_chat = (bool(getattr(cfg, "chat_routing", True)) and conversational
-                     and not uncensored)
-    call_client, call_cfg, routed = client, cfg, False
     model_used = cfg.ollama_model if getattr(cfg, "backend", "") == "ollama" else cfg.model
-    if route_to_chat and getattr(cfg, "chat_model", ""):
-        from .model import OllamaClient, make_client, ollama_has_model
-        if isinstance(client, OllamaClient) and ollama_has_model(cfg, cfg.chat_model):
-            import dataclasses
-            try:
-                call_cfg = dataclasses.replace(cfg, ollama_model=cfg.chat_model)
-                call_client = make_client(call_cfg, backend="ollama")
-                routed = True
-                model_used = cfg.chat_model
-                _emit(emit, "execute", f"conversational turn — using {cfg.chat_model}",
-                      level="info")
-            except Exception:
-                call_client, call_cfg, routed = client, cfg, False
+    tags = routing.tags_for(raw_prompt)
+    from .model import OllamaClient, ollama_has_model
+    specialist = getattr(cfg, "specialist_model", "")
+    routing_on = (bool(getattr(cfg, "model_routing", True))
+                  and isinstance(client, OllamaClient) and bool(specialist)
+                  and specialist != cfg.ollama_model
+                  and ollama_has_model(cfg, specialist))
 
     web_ctx = ""
     if web and broker is not None:
@@ -527,14 +531,18 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
                   f"recalled {len(facts)} fact(s) from earlier{note}", level="tool",
                   facts=facts)
 
-    # With local tools enabled, run the reason→act→observe loop so AG can compute,
-    # read files, run code, and use memory — not just summarize. Otherwise, one shot.
+    # Give the primary the specialist as an option: guidance on when it helps, and (in
+    # the reason loop) a consult_specialist tool to delegate a subtask to it.
+    if routing_on:
+        exec_sys = f"{exec_sys}\n\n{routing.guidance(cfg, specialist)}"
+
+    # The primary reasons and answers: the reason→act→observe loop when tools are on
+    # (compute, read files, use memory, consult the specialist), else a single call.
     _emit(emit, "execute", "generating the answer", level="tool")
-    from .model import DryRunClient
+    from .model import DryRunClient, make_client
     dry_run = isinstance(client, DryRunClient)
-    # A conversational turn answers one-shot (no tool loop): the chat model converses,
-    # and the tool preamble is what pushes a weak model into narrating fake tool steps.
-    if cfg.allow_local_tools and broker is not None and not conversational:
+    tools_on = cfg.allow_local_tools and broker is not None
+    if tools_on:
         from . import reason
         rr = reason.solve(client, cfg, system=exec_sys, user=eng_user,
                           broker=broker, emit=emit, on_delta=on_delta, cancel=cancel)
@@ -549,12 +557,40 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
             _kw["on_delta"] = on_delta
         if cancel is not None:
             _kw["cancel"] = cancel
-        exec_res = call_client.complete(system=exec_sys, user=eng_user, cfg=call_cfg,
-                                        **_kw)
+        exec_res = client.complete(system=exec_sys, user=eng_user, cfg=cfg, **_kw)
         answer = exec_res.text
         total_in += exec_res.input_tokens
         total_out += exec_res.output_tokens
         dry_run = getattr(exec_res, "dry_run", False)
+
+    # Failure-fallback: a model cannot orchestrate its way out of its own crash, empty
+    # answer, or refusal, so the runtime retries once on the specialist and records the
+    # honest outcome so the capability doc learns which model this task-type favours.
+    if routing_on and not dry_run:
+        if _is_failure(answer):
+            routing.record(cfg, "primary", tags, "failure")
+            _emit(emit, "execute",
+                  f"primary fell short — consulting {specialist}", level="info")
+            try:
+                import dataclasses
+                spec_cfg = dataclasses.replace(cfg, ollama_model=specialist)
+                spec_client = make_client(spec_cfg, backend="ollama")
+                _sk = {"cancel": cancel} if cancel is not None else {}
+                sres = spec_client.complete(system=exec_sys, user=eng_user,
+                                            cfg=spec_cfg, **_sk)
+                if sres.text and not _is_failure(sres.text):
+                    answer = sres.text
+                    total_in += sres.input_tokens
+                    total_out += sres.output_tokens
+                    model_used = specialist
+                    routing.record(cfg, "specialist", tags, "fallback_win")
+                    _emit(emit, "execute", f"answered by {specialist}", level="info")
+                else:
+                    routing.record(cfg, "specialist", tags, "failure")
+            except Exception as e:
+                _emit(emit, "execute", f"specialist unavailable: {e}", level="info")
+        else:
+            routing.record(cfg, "primary", tags, "success")
     _emit(emit, "execute", f"answer ready ({total_out} tokens)", level="info")
 
     elapsed = round(time.time() - t0, 3)

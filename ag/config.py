@@ -27,23 +27,19 @@ class Config:
     # instead of the dry-run stub. "ollama" | "dry".
     offline_backend: str = "ollama"
     model: str = "claude-opus-4-8"            # Claude model, used only on anthropic/auto
-    ollama_model: str = "llama3.1"            # used when backend == ollama
+    # The PRIMARY local brain: a strong instruct model that reasons, uses tools, and
+    # answers every turn. Dual-model routing (see ag/routing.py) lets it call the
+    # specialist below, and the runtime falls back to it when the primary hard-fails.
+    ollama_model: str = "qwen3:8b"            # used when backend == ollama
+    specialist_model: str = "ag-coder-abliterated:latest"  # abliterated fallback/specialist
     # 127.0.0.1, NOT localhost: on many systems 'localhost' resolves to IPv6 ::1
     # first, but Ollama binds IPv4 only — so 'localhost' wastes ~2s per call failing
     # over ::1 before retrying 127.0.0.1. This hits every model call; keep it numeric.
     ollama_host: str = "http://127.0.0.1:11434"
-    # Dual-model routing: the abliterated coder model is the right tool for uncensored,
-    # code, and media/tool work, but a poor conversationalist — it emits report
-    # scaffolding and refuses/clarifies instead of answering. So plain conversation is
-    # routed to a stronger local INSTRUCT model, while task/tool turns keep the
-    # abliterated one. Set chat_model="" to disable routing (single-model). The chat
-    # model must be pulled in Ollama; if it is missing, AG falls back to ollama_model.
-    chat_model: str = "qwen3:8b"              # instruct model for conversational turns
-    chat_routing: bool = True                 # route plain chat to chat_model, one-shot
-    # Uncensored mode: force the abliterated model for EVERY turn (no routing to the
-    # instruct chat model), for when the user wants raw, unfiltered output. Chat still
-    # answers one-shot, so it stays conversational rather than narrating tool steps.
-    uncensored: bool = False
+    # Dual-model routing: the primary reasons and answers; the specialist is consulted
+    # when the capability doc favours it for the task, and the runtime falls back to it
+    # when the primary errors, empties, refuses, or returns a non-answer.
+    model_routing: bool = True                # consult/fall back to the specialist model
     ollama_keep_alive: str = "30m"            # keep the model resident between calls
     ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     # When the local Ollama server isn't reachable, try to launch `ollama serve`
