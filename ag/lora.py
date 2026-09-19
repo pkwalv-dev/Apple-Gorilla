@@ -885,6 +885,36 @@ def _find_gguf_converter(cfg: Config) -> Optional[str]:
     return None
 
 
+# What llama.cpp's converter can emit directly. Everything else — every k-quant,
+# q4_k_m included — is llama-quantize's job, applied to an f16 file afterwards. Asking
+# the converter for one is an argparse error, not a fallback worth attempting.
+_CONVERTER_OUTTYPES = frozenset({"f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"})
+
+
+def _find_quantizer() -> str:
+    """llama-quantize, from PATH, a llama.cpp build tree, or Ollama's own bundle.
+
+    It is rarely on PATH even when llama.cpp is built: the binary lands in build/bin
+    and stays there. Ollama ships one too, which is the fallback that makes this work
+    on a machine that never built llama.cpp at all."""
+    import shutil
+    for name in ("llama-quantize", "llama-quantize.exe", "quantize"):
+        found = shutil.which(name)
+        if found:
+            return found
+    cands = []
+    for base in (Path.home() / "llama.cpp", Path.home() / "code" / "llama.cpp",
+                 ROOT.parent / "llama.cpp"):
+        cands += [base / "build" / "bin" / "llama-quantize", base / "llama-quantize"]
+    ollama = _find_ollama()
+    if ollama:
+        cands.append(Path(ollama).parent / "lib" / "ollama" / "llama-quantize.exe")
+    for p in cands:
+        if p.exists():
+            return str(p)
+    return ""
+
+
 def _find_ollama() -> str:
     """The ollama executable, including the Windows one seen from WSL.
 
@@ -949,31 +979,53 @@ def merge_to_gguf(cfg: Config, adapter_id: str, *, emit=None) -> MergeResult:
         model = PeftModel.from_pretrained(model, str(adir))
         model = model.merge_and_unload()
         merged = adir / "merged"
+        # Start from an empty directory. A half-written save from an earlier attempt
+        # leaves a shard index naming files that were never written, and the converter
+        # then fails on a missing model-0000N-of-0000M.safetensors — a confusing error
+        # about the wrong thing entirely.
+        if merged.exists():
+            shutil.rmtree(merged, ignore_errors=True)
         merged.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(merged))
         AutoTokenizer.from_pretrained(base).save_pretrained(str(merged))
 
         conv = _find_gguf_converter(cfg)
-        gguf = adir / f"model.{cfg.lora_gguf_quant}.gguf"
-        _emit(emit, "lora", "converting merged model to GGUF", level="tool")
+        quant = str(cfg.lora_gguf_quant or "f16").lower()
+        gguf = adir / f"model.{quant}.gguf"
         import sys as _sys
-        r = subprocess.run([_sys.executable, conv, str(merged), "--outfile", str(gguf),
-                            "--outtype", cfg.lora_gguf_quant],
-                           capture_output=True, text=True, timeout=3600)
-        if r.returncode != 0 or not gguf.exists():
-            # Some converter versions don't quantize; fall back to f16 then quantize.
-            gguf_f16 = adir / "model.f16.gguf"
-            r2 = subprocess.run([_sys.executable, conv, str(merged), "--outfile",
-                                 str(gguf_f16), "--outtype", "f16"],
-                                capture_output=True, text=True, timeout=3600)
-            if r2.returncode != 0 or not gguf_f16.exists():
+
+        def _convert(outfile: Path, outtype: str):
+            return subprocess.run([_sys.executable, conv, str(merged), "--outfile",
+                                   str(outfile), "--outtype", outtype],
+                                  capture_output=True, text=True, timeout=3600)
+
+        if quant in _CONVERTER_OUTTYPES:
+            _emit(emit, "lora", f"converting merged model to GGUF ({quant})", level="tool")
+            r = _convert(gguf, quant)
+            if r.returncode != 0 or not gguf.exists():
                 return MergeResult(False, reason=f"GGUF conversion failed: "
-                                   f"{(r.stderr or r2.stderr)[-300:]}")
-            q = shutil.which("llama-quantize") or shutil.which("quantize")
-            if q:
-                subprocess.run([q, str(gguf_f16), str(gguf), cfg.lora_gguf_quant],
-                               capture_output=True, text=True, timeout=1800)
-            gguf = gguf if gguf.exists() else gguf_f16
+                                   f"{(r.stderr or r.stdout)[-300:]}")
+        else:
+            # A k-quant is a two-step job: convert to f16, then quantize that.
+            gguf_f16 = adir / "model.f16.gguf"
+            _emit(emit, "lora", "converting merged model to GGUF (f16)", level="tool")
+            r = _convert(gguf_f16, "f16")
+            if r.returncode != 0 or not gguf_f16.exists():
+                return MergeResult(False, reason=f"GGUF conversion failed: "
+                                   f"{(r.stderr or r.stdout)[-300:]}")
+            q = _find_quantizer()
+            if not q:
+                _emit(emit, "lora", f"no llama-quantize found — shipping f16 instead of "
+                      f"{quant} (larger, same quality)", level="info")
+                gguf = gguf_f16
+            else:
+                _emit(emit, "lora", f"quantizing to {quant}", level="tool")
+                rq = subprocess.run([q, str(gguf_f16), str(gguf), quant],
+                                    capture_output=True, text=True, timeout=1800)
+                if rq.returncode != 0 or not gguf.exists():
+                    _emit(emit, "lora", f"quantize failed ({(rq.stderr or '')[-200:]}); "
+                          f"using the f16 GGUF", level="info")
+                    gguf = gguf_f16
 
         name = f"ag-{_slug_model(base)}-{adapter_id}"
         modelfile = adir / "Modelfile"
