@@ -377,7 +377,10 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         )
     if cfg.use_memory:
         from . import memory
-        mem = memory.context(raw_prompt, k=5)
+        mem = memory.context(
+            raw_prompt, k=getattr(cfg, "memory_inject_k", 4),
+            max_reported=getattr(cfg, "memory_inject_max_reported", 2),
+            min_relevance=getattr(cfg, "memory_inject_min_relevance", 0.55))
         mem_ctx = mem["text"]
         if mem_ctx:
             # Memory is injected WITH its standing: what AG actually has grounds to

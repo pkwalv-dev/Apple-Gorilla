@@ -119,10 +119,13 @@ def memory_context(query: str, *, k: int = 5) -> str:
     return _root().memory_context(query, k=k)
 
 
-def context(query: str, *, k: int = 5, agent: str = "root") -> dict:
+def context(query: str, *, k: int = 5, agent: str = "root",
+            max_reported: Optional[int] = None,
+            min_relevance: Optional[float] = None) -> dict:
     """Recall split into what is established and what is merely reported, so a caller
     can inject the two under different headings instead of asserting both as fact."""
-    return get_manager(agent).context(query, k=k)
+    return get_manager(agent).context(query, k=k, max_reported=max_reported,
+                                      min_relevance=min_relevance)
 
 
 def verify(mem_id: str, *, by: str = Origin.USER, confirmed: bool = True,
