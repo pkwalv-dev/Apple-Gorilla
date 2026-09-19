@@ -184,7 +184,8 @@ def test_web_backed_answers_are_attributed_not_absorbed(tmp_path, monkeypatch):
         max_memories = 200
         memory_reflect = False
 
-    saved = capture_memory(_Client(), _Cfg(), "when does the trail reopen?",
+    saved = capture_memory(_Client(), _Cfg(),
+                           "I'm planning a hike — when does the trail reopen?",
                            "It reopens in May.", web_sources=["trails.example"])
     assert len(saved) == 2
     by_text = {m.text: m for m in memory.all_memories()
@@ -197,6 +198,66 @@ def test_web_backed_answers_are_attributed_not_absorbed(tmp_path, monkeypatch):
     # What the user said about themselves is theirs, not the website's.
     assert from_user.origin == Origin.USER
     memory.reset()
+
+
+def test_a_stated_fact_not_in_the_users_words_is_demoted_to_a_hypothesis(tmp_path,
+                                                                         monkeypatch):
+    """The failure this guards: a weak local model, told to reply, hallucinates
+    "Share the PDF path", the distiller reads that back as the user "stating" they
+    want PDFs, and it lands as a believed fact the user never uttered. USER origin is
+    earned by the user's own words — a "stated" fact absent from them is an inference.
+    """
+    from ag import config as cfgmod
+    from ag.memory import manager as mgrmod
+    from ag.pipeline import capture_memory
+    monkeypatch.setattr(cfgmod, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(mgrmod, "get_embedder", lambda cfg=None, **k: HashingEmbedder())
+    memory.reset()
+
+    class _Client:
+        def complete(self, **kw):
+            import json
+            from types import SimpleNamespace
+            return SimpleNamespace(text=json.dumps({"facts": [
+                {"fact": "User is working on a spreadsheet.", "basis": "stated"},
+                {"fact": "User prefers metric units.", "basis": "stated"},
+            ]}))
+
+    class _Cfg:
+        auto_memory = True
+        max_memories = 200
+        memory_reflect = False
+
+    capture_memory(_Client(), _Cfg(), "please answer in metric", "sure")
+    by_text = {m.text: m for m in memory.all_memories()
+               if m.kind == MemoryKind.SEMANTIC}
+    # "spreadsheet" appears nowhere in the user's message -> demoted to a hypothesis.
+    assert by_text["User is working on a spreadsheet."].origin == Origin.INFERENCE
+    # "metric" is right there in what the user said -> it is genuinely theirs.
+    assert by_text["User prefers metric units."].origin == Origin.USER
+
+
+def test_the_distiller_is_not_shown_ags_own_answer(monkeypatch):
+    """AG's reply must not become the user's testimony, so the distiller is never
+    handed it. The prompt it receives carries the user's message and not the answer."""
+    from ag.pipeline import capture_memory
+    seen = {}
+
+    class _Client:
+        def complete(self, **kw):
+            from types import SimpleNamespace
+            seen["user"] = kw.get("user", "")
+            return SimpleNamespace(text='{"facts": []}')
+
+    class _Cfg:
+        auto_memory = True
+        max_memories = 200
+        memory_reflect = False
+
+    capture_memory(_Client(), _Cfg(), "what's the capital of France?",
+                   "A SECRET ANSWER STRING the distiller must never see")
+    assert "capital of France" in seen["user"]
+    assert "SECRET ANSWER STRING" not in seen["user"]
 
 
 def test_web_source_extraction():
