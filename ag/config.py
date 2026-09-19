@@ -54,6 +54,32 @@ class Config:
     sd_width: int = 512
     sd_height: int = 512
     sd_sampler: str = "Euler a"
+    # --- ComfyUI backend: unfiltered, open-weight image AND video generation -----
+    # A1111 can only run SD-family checkpoints. The current open-weight models that
+    # carry no safety filter in the weights — Chroma1-HD for images (8.9B, Apache-2.0,
+    # a de-distilled FLUX.1-schnell retrained with no safety filter, and the only one
+    # of these that restores real CFG and negative prompts) and Wan 2.2 TI2V-5B for
+    # video (Apache-2.0, text- and image-to-video in one checkpoint, the largest video
+    # model that fits an 8GB card) — both run under ComfyUI, so AG speaks its API too.
+    #
+    # "auto" prefers ComfyUI when it answers and falls back to A1111, so an existing
+    # SD install keeps working untouched.
+    image_backend: str = "auto"               # auto | comfy | a1111
+    allow_video_gen: bool = True
+    comfy_host: str = "http://127.0.0.1:8188"
+    comfy_autostart: bool = True
+    comfy_cmd: str = ""                       # overrides auto-discovery of main.py
+    # Workflows are DATA, not code: AG substitutes the prompt/seed/size into a graph
+    # exported from ComfyUI itself ("Export (API)"). Drop a replacement of the same
+    # name in state/workflows/ and it wins over the shipped one — so a new model is a
+    # new JSON file, not a patch to AG.
+    comfy_image_workflow: str = "chroma1hd_txt2img"
+    comfy_video_workflow: str = "wan22_ti2v_txt2vid"
+    video_width: int = 704
+    video_height: int = 400
+    video_frames: int = 49                    # ~2s at 24fps; 121 is Wan 2.2's 5s
+    video_fps: int = 24
+    video_steps: int = 20
     effort: str = "high"                      # low | medium | high | xhigh | max
     # Extended-thinking control (like the Claude app's toggle). "off" disables the
     # model's chain-of-thought (fastest), "on" forces it, "auto" leaves the model to

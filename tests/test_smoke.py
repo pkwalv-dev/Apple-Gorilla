@@ -203,7 +203,11 @@ def test_image_generate_saves_png(tmp_path, monkeypatch):
 
     monkeypatch.setattr(images, "IMAGES_DIR", tmp_path)
     monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp())
-    res = images.generate("a red bicycle", _Cfg())
+    # This stubs the A1111 API specifically, so pin that backend: with "auto" the
+    # stub also answers ComfyUI's probe and AG would (correctly) prefer ComfyUI.
+    import dataclasses as _dc
+    res = images.generate("a red bicycle",
+                          _dc.replace(_Cfg(), image_backend="a1111"))
     assert res.data_url.startswith("data:image/png;base64,")
     from pathlib import Path
     assert Path(res.path).exists() and Path(res.path).read_bytes() == png

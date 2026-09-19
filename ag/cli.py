@@ -591,6 +591,66 @@ def cmd_lora(args) -> int:
     return 0
 
 
+def cmd_media(args) -> int:
+    """Local image/video generation: what's installed, does the workflow load, make one."""
+    from . import comfy, images, video
+    cfg = Config.load()
+    if args.action == "status":
+        info = comfy.status(cfg)
+        print(f"image backend : {images.backend_for(cfg)}")
+        print(f"comfyui       : {info['host']} "
+              f"({'reachable' if info['reachable'] else 'not running'}"
+              f"{', installed' if info['installed'] else ', not installed'})")
+        print(f"a1111         : {cfg.sd_host} "
+              f"({'reachable' if images.sd_reachable(cfg) else 'not running'})")
+        for kind in ("image", "video"):
+            print(f"{kind:<14}: {info.get(kind + '_workflow', '(none)')}")
+            for m in info.get(f"{kind}_models", []):
+                print(f"  needs       : {m}")
+        return 0
+
+    if args.action == "check":
+        # Validate the workflows against the server that will actually run them.
+        if not comfy.reachable(cfg):
+            print(f"ComfyUI is not running at {cfg.comfy_host} — start it first "
+                  "(nothing can be checked against a server that isn't up)")
+            return 1
+        bad = 0
+        for kind, name in (("image", cfg.comfy_image_workflow),
+                           ("video", cfg.comfy_video_workflow)):
+            try:
+                problems = comfy.validate(comfy.load_workflow(name), cfg)
+            except Exception as e:
+                print(f"{kind}: {name}: {e}")
+                bad += 1
+                continue
+            if problems:
+                bad += 1
+                print(f"{kind}: {name}: {len(problems)} problem(s)")
+                for pr in problems:
+                    print(f"  - {pr}")
+            else:
+                print(f"{kind}: {name}: ok")
+        return 1 if bad else 0
+
+    prompt = (args.prompt or "").strip()
+    if not prompt:
+        print("give a prompt")
+        return 2
+    try:
+        if args.action == "image":
+            r = images.generate(prompt, cfg)
+            print(f"saved {r.path} ({r.width}x{r.height}, {r.steps} steps)")
+        else:
+            r = video.generate(prompt, cfg, seconds=args.seconds or None)
+            print(f"saved {r.path} ({r.seconds}s, {r.width}x{r.height}, "
+                  f"{r.frames} frames @ {r.fps}fps)")
+    except Exception as e:
+        print(f"failed: {e}")
+        return 1
+    return 0
+
+
 def cmd_bundle(args) -> int:
     from . import bundle
     if args.check:
@@ -764,6 +824,14 @@ def build_parser() -> argparse.ArgumentParser:
     acq = sub.add_parser("acquire", help="author + test + register a new skill on demand")
     acq.add_argument("spec", help="the capability to acquire, in plain language")
     acq.set_defaults(func=cmd_acquire)
+
+    md = sub.add_parser("media", help="local image/video generation "
+                                      "(status/check/image/video)")
+    md.add_argument("action", choices=["status", "check", "image", "video"])
+    md.add_argument("prompt", nargs="?", default="", help="what to generate")
+    md.add_argument("--seconds", type=float, default=0.0,
+                    help="clip length for 'video' (default: config video_frames)")
+    md.set_defaults(func=cmd_media)
 
     fl = sub.add_parser("fleet", help="agent swarm control (list/enable/disable/kill/revive/clear)")
     fl.add_argument("action", choices=["list", "enable", "disable", "kill", "revive", "clear"])

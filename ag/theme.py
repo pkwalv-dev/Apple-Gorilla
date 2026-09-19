@@ -93,6 +93,9 @@ button.danger{background:linear-gradient(180deg,#fb7185,var(--danger));color:#ff
 
 /* --- run controls ---------------------------------------------------- */
 .ctl-right{margin-left:auto;display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+/* An explicit display: wins over the hidden attribute, so say so once, globally —
+   otherwise every hideable control needs its own inline style to disappear. */
+[hidden]{display:none!important}
 .ctl{display:inline-flex;gap:7px;align-items:center;font-family:var(--mono);font-size:.76rem;
   font-weight:500;color:var(--muted);user-select:none;letter-spacing:.01em}
 .ctl input{width:15px;height:15px;accent-color:var(--accent)}

@@ -76,6 +76,23 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
             return f"generate_image error: {e}"
         return f"image generated and saved to {res.path}"
 
+    def _generate_video(args, broker):
+        from . import video
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            return "generate_video error: provide a 'prompt'"
+        try:
+            secs = float(args.get("seconds") or 0) or None
+        except (TypeError, ValueError):
+            secs = None
+        try:
+            res = video.generate(prompt, cfg, seconds=secs,
+                                 negative_prompt=str(args.get("negative", "")))
+        except Exception as e:
+            return f"generate_video error: {e}"
+        return (f"video generated ({res.seconds}s, {res.width}x{res.height}) and "
+                f"saved to {res.path}")
+
     reg = [
         Tool("calc", "expr", None,
              'exact arithmetic, e.g. {"tool":"calc","args":{"expr":"(17*23)-4"}}',
@@ -111,13 +128,20 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
              'e.g. {"tool":"github_fetch","args":{"repo":"ollama/ollama","path":"README.md"}}',
              _github),
     ]
-    # Local image generation, offered only when enabled in config.
+    # Local media generation, each offered only when enabled in config.
     if cfg is None or getattr(cfg, "allow_image_gen", False):
         reg.append(Tool(
             "generate_image", "prompt", None,
-            'create an image from a text prompt via the local Stable Diffusion server, '
+            "create an image from a text prompt on this machine's GPU, "
             'e.g. {"tool":"generate_image","args":{"prompt":"a red bicycle at sunset"}}',
             _generate_image))
+    if cfg is None or getattr(cfg, "allow_video_gen", False):
+        reg.append(Tool(
+            "generate_video", "prompt", None,
+            "create a short video clip from a text prompt on this machine's GPU "
+            '(slow — minutes, not seconds), e.g. {"tool":"generate_video","args":'
+            '{"prompt":"a red bicycle rolling down a hill at sunset","seconds":3}}',
+            _generate_video))
     return reg
 
 
@@ -189,7 +213,7 @@ def _is_not_an_answer(text: str, names) -> bool:
     narrow: only empty output and a naked tool name qualify, so a legitimately terse
     answer ("10063", "Paris") is never second-guessed.
     """
-    t = (text or "").strip().strip("`\"'.,: \n\t")
+    t = (text or "").strip().strip("`\"'.,:  \n\t")
     return not t or t in names
 
 
