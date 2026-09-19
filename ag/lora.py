@@ -885,12 +885,24 @@ def _find_gguf_converter(cfg: Config) -> Optional[str]:
     return None
 
 
+def _find_ollama() -> str:
+    """The ollama executable, including the Windows one seen from WSL.
+
+    Training runs under WSL (the CUDA stack lives there) while Ollama is a Windows
+    install, so the merge step straddles both. WSL's PATH interop exposes it only as
+    `ollama.exe`, and looking for the bare name alone reported "ollama not on PATH" on
+    a machine where it was running and reachable — blocking the one step that turns a
+    trained adapter into something you can actually select.
+    """
+    import shutil
+    return shutil.which("ollama") or shutil.which("ollama.exe") or ""
+
+
 def merge_feasibility(cfg: Config) -> dict:
     """What's needed to close the loop (merge -> GGUF -> Ollama), and what's missing."""
-    import shutil
     missing = [d for d in ("torch", "transformers", "peft") if _missing(d)]
     conv = _find_gguf_converter(cfg)
-    ollama = bool(shutil.which("ollama"))
+    ollama = bool(_find_ollama())
     ok = (not missing) and bool(conv) and ollama
     notes = []
     if missing:
@@ -967,7 +979,10 @@ def merge_to_gguf(cfg: Config, adapter_id: str, *, emit=None) -> MergeResult:
         modelfile = adir / "Modelfile"
         modelfile.write_text(f"FROM {gguf.name}\n", encoding="utf-8")
         _emit(emit, "lora", f"registering Ollama model {name}", level="tool")
-        rc = subprocess.run(["ollama", "create", name, "-f", str(modelfile)],
+        # The Modelfile names the GGUF relatively and `cwd` is the adapter directory,
+        # so this also works when a WSL process drives the Windows ollama.exe: the
+        # interop layer translates the cwd, and a relative FROM needs no translating.
+        rc = subprocess.run([_find_ollama(), "create", name, "-f", modelfile.name],
                             capture_output=True, text=True, timeout=1800, cwd=str(adir))
         if rc.returncode != 0:
             return MergeResult(False, gguf_path=str(gguf),
