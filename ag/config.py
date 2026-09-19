@@ -154,10 +154,20 @@ class Config:
     memory_embed_backend: str = "auto"          # auto | ollama | hash | none
     memory_embed_model: str = "nomic-embed-text"  # local Ollama embedding model (keyless)
     memory_weights: dict = field(default_factory=lambda: {  # recall blend
-        "semantic": 0.55, "keyword": 0.2, "recency": 0.15, "importance": 0.1,
+        "semantic": 0.45, "keyword": 0.18, "recency": 0.12, "importance": 0.10,
+        "confidence": 0.15,
     })
     memory_recency_halflife_days: float = 30.0  # recency decay half-life
     memory_merge_threshold: float = 0.92        # cosine >= this => near-duplicate, merged
+    # --- Veracity: what AG believes, as opposed to what it merely heard -----
+    # Belief is seeded from a memory's origin (user > own observation > distillation >
+    # inference > web) and rises only on INDEPENDENT corroboration, so repetition can
+    # never manufacture confidence. Below the floor a memory is not recalled at all;
+    # between floor and trust it is recalled explicitly as an unconfirmed hypothesis.
+    memory_confidence_floor: float = 0.2        # below this, never surfaced
+    memory_trust_threshold: float = 0.65        # at/above this, stated as established
+    memory_confidence_halflife_days: float = 180.0  # volatile beliefs decay to "unknown"
+    memory_contradiction_threshold: float = 0.72    # similarity at which two claims clash
     memory_caps: dict = field(default_factory=lambda: {  # per-layer retention caps
         "episodic": 2000, "semantic": 1000, "procedural": 500,
     })

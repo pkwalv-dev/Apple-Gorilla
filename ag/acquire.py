@@ -182,7 +182,11 @@ def _remember_skill(cfg: Config, skill: Skill, agent: str) -> None:
             f"Acquired skill '{skill.name}': {skill.description}. "
             f"Use the '{skill.name}' tool when this capability is needed.",
             kind=memory.MemoryKind.PROCEDURAL, source="acquire", importance=0.75,
-            tags=["skill", skill.name])
+            tags=["skill", skill.name],
+            # Self-knowledge AG earned by observation: the skill exists because it was
+            # authored here and passed its own test gate. That is the one kind of claim
+            # about AG that AG is entitled to record.
+            subject=memory.Subject.SELF, volatile=False)
     except Exception:
         pass
 

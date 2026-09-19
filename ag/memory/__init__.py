@@ -24,7 +24,9 @@ from .manager import SHARED_AGENT, MemoryManager
 from .reflect import consolidate as _consolidate
 from .reflect import reflect as _reflect
 from .store import JsonlStore, MemoryStore
-from .types import Memory, MemoryKind, new_id, now_iso
+from .types import (CONFIDENCE_PRIORS, Memory, MemoryKind, Origin, Subject,
+                    combine_confidence, effective_confidence, evidence_key,
+                    guess_subject, is_identity_claim, new_id, now_iso, prior_for)
 
 MEMORY_DIR = STATE_DIR / "memory"
 
@@ -32,7 +34,10 @@ __all__ = [
     "Memory", "MemoryKind", "MemoryManager", "MemoryStore", "JsonlStore",
     "Embedder", "HashingEmbedder", "OllamaEmbedder", "cosine", "get_embedder",
     "get_manager", "reflect", "consolidate", "remember", "recall",
-    "memory_context", "all_memories", "forget", "clear", "MEMORY_DIR",
+    "memory_context", "context", "all_memories", "forget", "clear", "MEMORY_DIR",
+    "Origin", "Subject", "CONFIDENCE_PRIORS", "prior_for", "combine_confidence",
+    "effective_confidence", "evidence_key", "guess_subject", "is_identity_claim",
+    "is_self_reference", "verify", "disputed", "needs_verification",
 ]
 
 # --- namespaced managers (cached per agent) --------------------------------
@@ -78,45 +83,64 @@ def consolidate(*, agent: str = "root") -> dict:
 # --- back-compat surface (default "root" namespace) ------------------------
 def remember(text: str, tags: Optional[List[str]] = None, *,
              max_memories: int = 200, kind: str = MemoryKind.SEMANTIC,
-             importance: float = 0.5, source: str = "manual") -> Optional[Memory]:
+             importance: float = 0.5, source: str = "manual",
+             origin: Optional[str] = None, confidence: Optional[float] = None,
+             volatile: Optional[bool] = None, asserter: str = "",
+             subject: Optional[str] = None) -> Optional[Memory]:
     """Store a durable fact in root memory. Signature is a superset of the old one so
-    existing callers (`memory.remember(text, max_memories=...)`) keep working."""
+    existing callers (`memory.remember(text, max_memories=...)`) keep working.
+
+    `origin` says what kind of evidence the claim rests on and sets its starting
+    confidence; it defaults from `source`, so callers that do not care about veracity
+    still get a sensible prior rather than blind trust."""
     return _root().remember(text, tags=tags, kind=kind, importance=importance,
-                            source=source)
-
-
-_SELF_REF_MARKERS = (
-    # identity questions
-    "your name", "who are you", "what are you", "about yourself",
-    "what is apple-gorilla", "who is apple-gorilla", "know about yourself",
-    "gotten smarter", "gotten any smarter", "abliterated model", "describe yourself",
-    "your capabilities", "do you have persistent memory", "are you sentient",
-    "are you conscious",
-    # (false) self-descriptions AG must not learn or recall about itself
-    "protocol layer", "not an autonomous agent",
-    "no persistent memory", "do not have persistent memory",
-    "does not have persistent memory", "without persistent memory",
-    "no built-in file access", "do not have built-in file access",
-    "no direct file access", "without direct file access",
-    "self-iteration", "limited to text-based", "cannot fulfill this request",
-)
+                            source=source, origin=origin, confidence=confidence,
+                            volatile=volatile, asserter=asserter, subject=subject)
 
 
 def is_self_reference(text: str) -> bool:
-    """True if the text is about AG's own identity/nature/capabilities. Such content is
-    the system prompt's domain (prompts.AG_IDENTITY), not memory's: storing or recalling
-    it lets a stale/wrong self-description override the authoritative identity. So memory
-    neither captures nor recalls it."""
-    t = (text or "").lower()
-    return any(mk in t for mk in _SELF_REF_MARKERS)
+    """True if the text is about AG rather than about the world or the user.
+
+    This is now a *classification*, not a veto: the write gate in MemoryManager decides
+    what may be stored about AG and by whom, and recall drops only identity claims. The
+    function is kept because one caller still needs the blunt version — LoRA dataset
+    building (`ag.lora`), where ANY self-description in a training pair would be baked
+    into weights and then argue with the system prompt forever.
+    """
+    return guess_subject(text) == Subject.SELF
 
 
-def recall(query: str, *, k: int = 5) -> List[Memory]:
-    return _root().recall(query, k=k)
+def recall(query: str, *, k: int = 5,
+           min_confidence: Optional[float] = None) -> List[Memory]:
+    return _root().recall(query, k=k, min_confidence=min_confidence)
 
 
 def memory_context(query: str, *, k: int = 5) -> str:
     return _root().memory_context(query, k=k)
+
+
+def context(query: str, *, k: int = 5, agent: str = "root") -> dict:
+    """Recall split into what is established and what is merely reported, so a caller
+    can inject the two under different headings instead of asserting both as fact."""
+    return get_manager(agent).context(query, k=k)
+
+
+def verify(mem_id: str, *, by: str = Origin.USER, confirmed: bool = True,
+           agent: str = "root") -> Optional[Memory]:
+    """Confirm or reject a belief — resets staleness, settles a dispute, or collapses
+    a claim that turned out to be wrong."""
+    return get_manager(agent).verify(mem_id, by=by, confirmed=confirmed)
+
+
+def disputed(*, agent: str = "root") -> List[Memory]:
+    """Memories in open contradiction with another — AG deliberately does not pick a
+    winner on its own for facts that cannot change."""
+    return get_manager(agent).disputed()
+
+
+def needs_verification(*, k: int = 10, agent: str = "root") -> List[Memory]:
+    """Beliefs that have gone stale and still matter: the re-check queue."""
+    return get_manager(agent).needs_verification(k=k)
 
 
 def all_memories(*, agent: str = "root") -> List[Memory]:

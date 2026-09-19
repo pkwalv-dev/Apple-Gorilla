@@ -209,9 +209,24 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
     """Turn AG's own memory into instruction/output pairs.
 
     Episodic memories are stored as "Q: ...\\nA: ..." — recover those as supervised
-    pairs. Procedural memories become "how should you handle X" style guidance. Only
-    reasonably-scored / durable items are used, so we train on what went well.
-    Identity/self-description exchanges are excluded (see _IDENTITY_Q_MARKERS)."""
+    pairs. Procedural memories become "how should you handle X" style guidance.
+
+    Training is the one place where a memory stops being revisable. Everything else in
+    AG can re-weigh a belief later — lower its confidence, mark it disputed, forget it —
+    but once a pair is in the dataset it is pressed into the weights, where none of that
+    reaches it. So this is the strictest filter in the system, and it is deliberately
+    stricter than recall:
+
+    - Only BELIEVED procedures train. Reflection writes procedures as unconfirmed
+      hypotheses (~0.45); fine-tuning on those would turn a guess about what works into
+      a reflex. A procedure must have been corroborated or verified first.
+    - Disputed and superseded memories never train, at any confidence.
+    - Web-derived answers never train. They were fine to answer with, attributed and
+      caveated, but a model cannot carry the caveat into its weights — it would learn
+      the claim and lose the attribution.
+    - Self-descriptions never train (see _IDENTITY_Q_MARKERS): AG's identity comes from
+      the system prompt, and a fine-tuned self-description fights it forever.
+    """
     pairs: List[dict] = []
     try:
         from . import memory
@@ -220,20 +235,26 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
             score = float(m.meta.get("score", 0) or 0)
             if score and score < 6:      # skip low-quality exchanges
                 continue
+            if m.meta.get("web_sources"):
+                continue                 # untrusted content must not become a weight
             mt = re.search(r"Q:\s*(.*?)\s*A:\s*(.*)", m.text, re.DOTALL)
             if mt:
                 q, a = mt.group(1).strip(), mt.group(2).strip()
-                # Reuse the shared self-reference filter (checks question AND answer) so
-                # identity/self-description never trains from memory. See
+                # The blunt self-reference filter (question AND answer) — see
                 # memory.is_self_reference and _IDENTITY_Q_MARKERS.
                 if q and a and not (memory.is_self_reference(q)
                                     or memory.is_self_reference(a)):
                     pairs.append({"instruction": q, "output": a, "source": "memory"})
         for m in mgr.store.all("root", [memory.MemoryKind.PROCEDURAL]):
-            if m.text.strip():
-                pairs.append({
-                    "instruction": "What is a good approach for this kind of task?",
-                    "output": m.text.strip(), "source": "memory"})
+            if not m.text.strip():
+                continue
+            if m.disputed or m.meta.get("superseded_by"):
+                continue
+            if mgr.belief(m) < mgr.trust_threshold:
+                continue                 # an unconfirmed method is not a lesson yet
+            pairs.append({
+                "instruction": "What is a good approach for this kind of task?",
+                "output": m.text.strip(), "source": "memory"})
     except Exception:
         pass
     return pairs

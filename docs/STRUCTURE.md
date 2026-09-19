@@ -44,12 +44,13 @@ Apple-Gorilla/
 │   ├── permissions.py          default-deny capability broker
 │   ├── server.py               built-in web app: streaming realtime log + scorecard + LoRA tab
 │   ├── lora.py                 [extras only] QLoRA fine-tune of a LOCAL model (weights)
-│   ├── memory/                 layered persistent memory
-│   │   ├── types.py            Memory record + layer taxonomy (episodic/semantic/procedural)
+│   ├── memory/                 layered persistent memory, graded by how well-founded it is
+│   │   ├── types.py            Memory record + layers + veracity (Origin/priors) + self-other (Subject)
 │   │   ├── embed.py            meaning-based embeddings (Ollama + stdlib hashing fallback)
 │   │   ├── store.py            MemoryStore interface + JSONL engine (per-agent, per-layer)
-│   │   ├── manager.py          hybrid recall (meaning+keyword+recency), graph links, namespaces
-│   │   └── reflect.py          the learning loop: episodes → facts + procedures
+│   │   ├── manager.py          hybrid recall (meaning+keyword+recency+belief), corroboration,
+│   │   │                       contradiction, decay, self-write gate, graph links, namespaces
+│   │   └── reflect.py          the learning loop: episodes → facts + procedures (as hypotheses)
 │   ├── tools/
 │   │   ├── web.py        [evolvable] permission-gated internet (search/fetch/rerank/extract)
 │   │   ├── local.py           offline tools: calc / file read / python_exec / memory

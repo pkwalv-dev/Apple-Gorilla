@@ -1929,7 +1929,8 @@ class _Handler(BaseHTTPRequestHandler):
                 convo = format_history(history,
                                        max_turns=getattr(cfg, "max_history_turns", 12))
                 capture_memory(client, cfg, prompt, rec.answer,
-                               conversation=convo, emit=write)
+                               conversation=convo, emit=write,
+                               web_sources=rec.web_sources)
             except Exception:
                 pass
         except (BrokenPipeError, ConnectionError, _Interrupted, Cancelled):
