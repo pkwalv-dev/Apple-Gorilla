@@ -135,6 +135,8 @@ class Config:
     lora_dropout: float = 0.05
     lora_epochs: float = 1.0
     lora_lr: float = 2e-4
+    lora_warmup_ratio: float = 0.03            # ease into the LR; short runs need it most
+    lora_lr_scheduler: str = "cosine"          # decay after warmup (standard QLoRA)
     lora_max_seq: int = 1024                   # detection lowers this on tight VRAM
     lora_batch_size: int = 1
     lora_grad_accum: int = 8                   # effective batch without the memory cost

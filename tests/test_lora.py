@@ -39,14 +39,19 @@ def test_build_dataset_from_memory(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
     import ag.memory as memory
     mgr = memory.get_manager("root", cfg=Config())
-    mgr.record_episode("What is 2+2?", "4", score=9.0)          # high score -> kept
+    # Answers have to be substantive to train: a bare "4" is not a lesson, and a pair
+    # that thin teaches the model to answer with nothing. See _MIN_ANSWER_CHARS.
+    mgr.record_episode("What is 2+2?",
+                       "It is 4. For anything beyond mental arithmetic, call the calc "
+                       "tool rather than computing it in your head.", score=9.0)
     mgr.record_episode("bad one", "wrong", score=2.0)           # low score -> dropped
+    mgr.record_episode("terse one", "Yep.", score=9.0)          # too thin -> dropped
     st = lora.build_dataset(Config(), use_teacher=False)
     assert st.from_memory >= 1 and st.total == st.from_memory
     assert lora.dataset_size() == st.total
-    # The low-scored exchange must not appear.
+    # Neither the low-scored nor the threadbare exchange may appear.
     text = lora.DATASET_FILE.read_text(encoding="utf-8")
-    assert "2+2" in text and "bad one" not in text
+    assert "2+2" in text and "bad one" not in text and "terse one" not in text
 
 
 def test_build_dataset_from_teacher(monkeypatch, tmp_path):
@@ -94,9 +99,43 @@ def test_available_bases_annotates_fit_by_vram():
     assert b24["Qwen/Qwen3-8B"]["fit"] == "fits"
 
 
+class _StubTokenizer:
+    """Word-per-token stand-in, so the windowing logic can be tested without torch."""
+
+    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False):
+        raise RuntimeError("no chat template")  # exercise the plain-text fallback
+
+    def __call__(self, text, truncation=False, max_length=None):
+        ids = list(range(len(text.split())))
+        if truncation and max_length:
+            ids = ids[:max_length]
+        return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+
+def test_format_example_reports_whether_the_pair_fits():
+    """Training on a clipped answer teaches clipped answers, so the pair has to say
+    whether it survived the window — the caller drops it if not."""
+    tok = _StubTokenizer()
+    short = lora._format_example(tok, "a question", "a short answer", max_seq=64)
+    assert short["complete"] is True
+    long = lora._format_example(tok, "a question", "word " * 500, max_seq=64)
+    assert long["complete"] is False
+    assert len(long["input_ids"]) == 64            # it WAS cut, hence the flag
+
+
+def test_format_example_masks_the_prompt():
+    tok = _StubTokenizer()
+    enc = lora._format_example(tok, "the question here", "the answer here",
+                               max_seq=64)
+    assert enc["labels"][0] == -100                # loss is on the answer only
+    assert any(l != -100 for l in enc["labels"])
+
+
 def test_recommended_config_scales_with_vram():
     assert lora.recommended_config(8.0)["base"] == "Qwen/Qwen3-8B"
-    assert lora.recommended_config(8.0)["max_seq"] <= 512      # tight -> short seq
+    # Tight VRAM shortens the window, but not below what a whole answer needs — a
+    # window that clips the training target is the more expensive kind of saving.
+    assert 768 <= lora.recommended_config(8.0)["max_seq"] < 1024
     assert lora.recommended_config(5.0)["base"] == "Qwen/Qwen3-4B"
     assert lora.recommended_config(24.0)["max_seq"] >= 1024
     assert lora.recommended_config(8.0)["grad_checkpointing"] is True
