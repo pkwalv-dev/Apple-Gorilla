@@ -99,6 +99,60 @@ def test_available_bases_annotates_fit_by_vram():
     assert b24["Qwen/Qwen3-8B"]["fit"] == "fits"
 
 
+def _proc(text, tags=()):
+    from ag.memory.types import Memory, MemoryKind
+    return Memory(id="p", text=text, kind=MemoryKind.PROCEDURAL, tags=list(tags))
+
+
+def test_procedures_are_asked_about_their_own_situation():
+    """Each procedure records the situation it applies to; that is the question. Filing
+    them all under one generic prompt trains the model to ignore the prompt."""
+    p = lora._procedure_pair(_proc("arith — when math prompts — use calc; return exact"))
+    assert p["instruction"] == "What is the best approach when math prompts?"
+    assert p["output"] == "use calc; return exact"   # the steps, not the label
+
+    p = lora._procedure_pair(_proc("For arithmetic, call calc first."))
+    assert p["instruction"] == "What is a good approach for arithmetic?"
+
+    p = lora._procedure_pair(_proc("When the build is red, bisect before guessing."))
+    assert p["instruction"] == "What is a good approach when the build is red?"
+
+    p = lora._procedure_pair(_proc("Acquired skill 'fx': converts currencies.",
+                                   tags=["skill", "fx"]))
+    assert "'fx' skill" in p["instruction"]
+
+
+def test_shapeless_procedures_are_skipped_not_given_a_generic_prompt():
+    assert lora._procedure_pair(_proc("Prefer small commits.")) is None
+
+
+def test_procedure_instructions_do_not_collide(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    import ag.memory as memory
+    from ag.memory import MemoryKind, Origin
+    mgr = memory.get_manager("root", cfg=Config())
+    for name, when, steps in (("arith", "math prompts", "call calc first"),
+                              ("triage", "the build is red", "bisect, then revert"),
+                              ("review", "a diff is large", "read tests first")):
+        mgr.remember(f"{name} — when {when} — {steps}", kind=MemoryKind.PROCEDURAL,
+                     origin=Origin.OBSERVED)
+    pairs = lora._pairs_from_memory(Config())
+    assert len(pairs) == 3
+    assert len({p["instruction"] for p in pairs}) == 3   # one prompt each, not one shared
+
+
+def test_both_training_paths_target_the_same_modules():
+    """Falling back from Unsloth to transformers+peft must change speed and memory, not
+    which fine-tune you end up with."""
+    assert set(lora.LORA_TARGET_MODULES) == {
+        "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
+    import pathlib
+    src = pathlib.Path(lora.__file__).read_text(encoding="utf-8")
+    # Both call sites read the one list — neither hardcodes its own.
+    assert src.count("target_modules=list(LORA_TARGET_MODULES)") == 2
+    assert "target_modules=[" not in src
+
+
 class _StubTokenizer:
     """Word-per-token stand-in, so the windowing logic can be tested without torch."""
 

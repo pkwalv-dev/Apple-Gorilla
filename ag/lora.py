@@ -216,6 +216,58 @@ def _is_identity_question(q: str) -> bool:
 _MIN_PROMPT_CHARS = 8
 _MIN_ANSWER_CHARS = 60
 
+_PROC_SEP = " — "
+# "For arithmetic, call calc first." / "When the build is red, bisect." — the situation
+# a free-text procedure applies to, recoverable from its opening clause.
+_PROC_SITUATION = re.compile(r"^(for|when|if|while|during|with)\s+([^,.;]{3,60})[,;]",
+                             re.IGNORECASE)
+
+
+def _procedure_pair(m) -> Optional[dict]:
+    """Turn one procedural memory into a pair whose QUESTION is the situation it is for.
+
+    Every procedure used to be filed under the same instruction, "What is a good
+    approach for this kind of task?" — one prompt mapped onto a dozen unrelated
+    answers, which teaches the model that the question carries no information and that
+    any of those answers is an acceptable response to it. A procedure already records
+    the situation it applies to; asking about that situation is what makes the pair
+    teach something.
+
+    Returns None for a procedure with no recoverable situation: a bare one-liner would
+    only reintroduce a generic, colliding instruction.
+    """
+    text = m.text.strip()
+    tags = [t for t in (m.tags or []) if t and t != "skill"]
+    if "skill" in (m.tags or []) and tags:
+        return {"instruction": f"When should you use the '{tags[0]}' skill, and what "
+                               f"does it do?",
+                "output": text, "source": "memory"}
+
+    # Reflection's shape: "name — when <situation> — steps" (see reflect._fmt_procedure).
+    parts = [p.strip() for p in text.split(_PROC_SEP) if p.strip()]
+    idx = next((i for i, p in enumerate(parts) if p.lower().startswith("when ")), -1)
+    if idx >= 0:
+        situation = parts[idx][len("when "):].strip().rstrip("?.")
+        # The steps are the answer. The leading name is a label for the procedure, not
+        # something a model should learn to say back, so prefer what follows the
+        # situation and fall back to the name only when there are no steps.
+        rest = _PROC_SEP.join(parts[idx + 1:]).strip() or _PROC_SEP.join(parts[:idx]).strip()
+        if situation and rest:
+            return {"instruction": f"What is the best approach when {situation}?",
+                    "output": rest, "source": "memory"}
+
+    mt = _PROC_SITUATION.match(text)
+    if mt:
+        lead, situation = mt.group(1).lower(), mt.group(2).strip()
+        ask = "when" if lead in ("when", "if", "while", "during") else "for"
+        return {"instruction": f"What is a good approach {ask} {situation}?",
+                "output": text, "source": "memory"}
+
+    if len(parts) > 1 and parts[0]:
+        return {"instruction": f"What is a good approach for {parts[0].rstrip(':')}?",
+                "output": _PROC_SEP.join(parts[1:]), "source": "memory"}
+    return None
+
 
 def _pairs_from_memory(cfg: Config) -> List[dict]:
     """Turn AG's own memory into instruction/output pairs.
@@ -278,9 +330,9 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
                 continue
             if mgr.belief(m) < mgr.trust_threshold:
                 continue                 # an unconfirmed method is not a lesson yet
-            pairs.append({
-                "instruction": "What is a good approach for this kind of task?",
-                "output": m.text.strip(), "source": "memory"})
+            pair = _procedure_pair(m)
+            if pair:
+                pairs.append(pair)
     except Exception:
         pass
     return pairs
@@ -532,6 +584,15 @@ def list_adapters() -> List[dict]:
 # --------------------------------------------------------------------------- #
 # Training (heavy deps, lazy-imported)
 # --------------------------------------------------------------------------- #
+# Attention AND MLP projections. Both training paths use this same list so that
+# falling back from Unsloth to transformers+peft changes only the speed and memory
+# profile, never which model you end up with — an adapter that touches attention only
+# is a materially different fine-tune, and silently getting one depending on whether
+# an optional package happened to be installed is not a fallback, it is a coin toss.
+LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj",
+                       "gate_proj", "up_proj", "down_proj")
+
+
 @dataclass
 class TrainResult:
     ok: bool
@@ -617,8 +678,7 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
                     model, r=cfg.lora_r, lora_alpha=cfg.lora_alpha,
                     lora_dropout=cfg.lora_dropout, bias="none",
                     use_gradient_checkpointing="unsloth",
-                    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                                    "gate_proj", "up_proj", "down_proj"])
+                    target_modules=list(LORA_TARGET_MODULES))
             except Exception as ue:
                 _emit(emit, "lora", f"Unsloth path failed ({ue}); falling back to "
                       "transformers+peft", level="info")
@@ -646,7 +706,7 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
             model = get_peft_model(model, LoraConfig(
                 r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
                 bias="none", task_type="CAUSAL_LM",
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]))
+                target_modules=list(LORA_TARGET_MODULES)))
 
         from transformers import (DataCollatorForSeq2Seq, Trainer,
                                   TrainingArguments)
