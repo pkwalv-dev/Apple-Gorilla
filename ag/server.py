@@ -101,35 +101,11 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     <button class="cmd primary" id="runbtn" onclick="go()">Run</button>
     <button class="cmd" id="stopbtn" onclick="stopRun()" hidden>Stop</button>
     <span class="cmd-note">executes a request</span>
+    <!-- Generated from ag/controls.py — one declaration drives the markup, the
+         browser's save/restore/collect, and the server's config overrides. Add a
+         capability there, not here. -->
     <span class="ctl-right">
-      <label class="ctl" title="Stream the model's raw output — including its reasoning (Ollama's &lt;think&gt; blocks) — live as it is generated. Stop ends the response and returns control immediately; a local model may take a moment more to wind down in the background."><input type="checkbox" id="verbose"> show reasoning</label>
-      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
-        <select id="model" class="ctl-select" onchange="saveModel()">
-          <option value="">loading…</option>
-        </select>
-      </label>
-      <label class="ctl">thinking
-        <select id="think" class="ctl-select" onchange="saveThink()">
-          <option value="auto">auto</option>
-          <option value="off">off · fast</option>
-          <option value="on">on</option>
-        </select>
-      </label>
-      <button class="help" data-help="Extended thinking, like the toggle in the Claude app. 'off' suppresses the model's step-by-step reasoning (fastest per call); 'on' forces it; 'auto' leaves the model to decide. Only affects thinking-capable models (Claude, Qwen3); ignored by others.">?</button>
-      <label class="ctl"><input type="checkbox" id="web" checked> internet</label>
-      <label class="ctl"><input type="checkbox" id="tools" checked onchange="syncTools()"> tools</label>
-      <button class="help" data-help="Turns on AG's reason→act→observe loop: it can call tools (exact-math calc, read local files, recall/save memory, delegate to a sub-agent) before answering. Off = a single model call with no tool use.">?</button>
-      <label class="ctl"><input type="checkbox" id="codeexec" onchange="saveCtl()"> run code</label>
-      <button class="help" data-help="DANGEROUS: lets the python_exec tool run real Python in a subprocess on this machine. Requires 'tools'. Off by default — only enable for prompts you trust.">?</button>
-      <label class="ctl"><input type="checkbox" id="acquire" onchange="syncTools()"> self-extend</label>
-      <button class="help" data-help="If AG lacks a capability this prompt needs, it authors a new tested skill (and may install Python deps / fetch allowlisted code), then uses it. Requires 'tools'. New skills persist and are reused, and are inherited by sub-agents.">?</button>
-      <label class="ctl" id="autonwrap" title="How self-extend proceeds. ask = plan and wait for your approval before installing/running anything (surfaced in the live trace). auto = complete end-to-end within this run's grants.">acquire
-        <select id="autonomy" class="ctl-select" onchange="saveCtl()">
-          <option value="ask">ask first</option>
-          <option value="auto">auto</option>
-        </select>
-      </label>
-      <label class="ctl" title="Recall durable facts from long-term memory into context, and distill new durable facts after the answer. Off = this run neither reads nor writes long-term memory."><input type="checkbox" id="memory" checked onchange="saveCtl()"> memory</label>
+__CONTROLS__
     </span>
   </div>
 </div>
@@ -471,14 +447,12 @@ async function go(){
   CURRENT_RUNID=runId;
   const verbose=$('verbose')?$('verbose').checked:false;
   try{
+    // Every declared control goes along automatically — see AG_CONTROLS.
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
       signal:ctrl.signal,
-      body:JSON.stringify({prompt:p,web:$('web').checked,history:hist,think:$('think').value,
-        model:($('model')?$('model').value:''),
-        tools:$('tools').checked,code_exec:$('codeexec').checked,
-        acquire:$('acquire').checked,autonomy:$('autonomy').value,
-        memory:$('memory').checked,
-        verbose:verbose,run_id:runId})});
+      body:JSON.stringify(Object.assign(ctlPayload(),
+        {prompt:p,history:hist,model:($('model')?$('model').value:''),
+         run_id:runId}))});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
@@ -758,35 +732,47 @@ async function loadTools(){
     +escapeHtml(d.highest_friction_wired||'–')+'</td></tr>';
   t.innerHTML=h; t.style.display='table';
 }
-function saveThink(){ try{ localStorage.setItem('ag_think',$('think').value); }catch(e){} }
-function restoreThink(){ try{ const v=localStorage.getItem('ag_think');
-  if(v&&$('think')) $('think').value=v; }catch(e){} }
-/* ---- tools / self-extend / memory toggles ----------------------------- */
-function saveCtl(){ try{
-  localStorage.setItem('ag_tools',$('tools').checked?'1':'0');
-  localStorage.setItem('ag_codeexec',$('codeexec').checked?'1':'0');
-  localStorage.setItem('ag_acquire',$('acquire').checked?'1':'0');
-  localStorage.setItem('ag_autonomy',$('autonomy').value);
-  localStorage.setItem('ag_memory',$('memory').checked?'1':'0');
-}catch(e){} }
-function syncTools(){
-  // 'run code' and 'self-extend' both require the tool loop; disable them when tools
-  // is off so the controls can never claim an effect they won't have.
-  const on=$('tools').checked;
-  $('codeexec').disabled=!on; $('acquire').disabled=!on;
-  if(!on){ $('codeexec').checked=false; $('acquire').checked=false; }
-  $('autonomy').disabled=!(on&&$('acquire').checked);
-  $('autonwrap').style.opacity=$('autonomy').disabled?'.5':'1';
-  saveCtl();
+/* ---- run controls ------------------------------------------------------
+   Everything below is generic: it reads the declaration shipped from
+   ag/controls.py, so a new control needs no JavaScript at all. */
+const AG_CONTROLS=__CONTROLS_JSON__;
+function ctlEl(c){ return $(c.id); }
+function ctlGet(c){ const el=ctlEl(c); if(!el) return null;
+  return c.kind==='toggle' ? el.checked : el.value; }
+function ctlSet(c,v){ const el=ctlEl(c); if(!el) return;
+  if(c.kind==='toggle') el.checked=!!v; else el.value=v; }
+/* Live = this control can actually affect the run. A control whose prerequisite is
+   off is disabled, cleared and dimmed, so the bar never offers a switch that does
+   nothing. The server enforces the same rule; the page is not the authority. */
+function ctlLive(c){
+  if(!c.requires) return true;
+  const dep=AG_CONTROLS.find(x=>x.id===c.requires); if(!dep) return true;
+  const el=ctlEl(dep); if(!el) return true;
+  return ctlLive(dep) && (dep.kind==='toggle' ? el.checked : !!el.value);
 }
-function restoreCtl(){ try{
-  const g=(k,d)=>{ const v=localStorage.getItem(k); return v==null?d:v; };
-  if($('tools')) $('tools').checked = g('ag_tools','1')==='1';
-  if($('codeexec')) $('codeexec').checked = g('ag_codeexec','0')==='1';
-  if($('acquire')) $('acquire').checked = g('ag_acquire','0')==='1';
-  if($('autonomy')) $('autonomy').value = g('ag_autonomy','ask');
-  if($('memory')) $('memory').checked = g('ag_memory','1')==='1';
-}catch(e){} syncTools(); }
+function syncCtls(){
+  for(const c of AG_CONTROLS){
+    const el=ctlEl(c); if(!el) continue;
+    const live=ctlLive(c);
+    el.disabled=!live;
+    if(!live && c.kind==='toggle') el.checked=false;
+    const wrap=$(c.id+'-wrap'); if(wrap) wrap.style.opacity=live?'1':'.45';
+  }
+  saveCtls();
+}
+function saveCtls(){ try{ for(const c of AG_CONTROLS){ const v=ctlGet(c);
+  if(v===null) continue;
+  localStorage.setItem('ag_ctl_'+c.id, c.kind==='toggle'?(v?'1':'0'):String(v));
+}}catch(e){} }
+function restoreCtls(){ try{ for(const c of AG_CONTROLS){
+  if(!ctlEl(c)) continue;
+  const raw=localStorage.getItem('ag_ctl_'+c.id);
+  if(raw==null) ctlSet(c,c.default);
+  else ctlSet(c, c.kind==='toggle' ? raw==='1' : raw);
+}}catch(e){} syncCtls(); }
+function ctlPayload(){ const out={};
+  for(const c of AG_CONTROLS){ const v=ctlGet(c); if(v!==null) out[c.id]=v; }
+  return out; }
 function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
 async function loadModels(){
   const sel=$('model'); if(!sel) return;
@@ -1094,16 +1080,26 @@ function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
   if($('evogithub')) $('evogithub').checked=(v==='1'); }catch(e){}
   if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
 
-restoreThink(); restoreCtl(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
+restoreCtls(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
 </script></body></html>"""
 
+_MODEL_PICKER = """      <label class="ctl" title="Which model answers this run. Local models run offline via Ollama; the Claude cloud option appears when you're signed in. Bigger local models are smarter but slower — watch the activity timer on the reply.">model
+        <select id="model" class="ctl-select" onchange="saveModel()">
+          <option value="">loading…</option>
+        </select>
+      </label>"""
+
+
 def _render_page() -> str:
-    """Assemble the page from the evolvable theme (fonts + CSS) and the template."""
+    """Assemble the page from the evolvable theme (fonts + CSS), the declared run
+    controls, and the template."""
     from . import __version__
-    from . import theme
+    from . import controls, theme
     return (_PAGE_TEMPLATE
             .replace("__FONTS__", theme.FONT_LINK)
             .replace("__THEME__", theme.THEME_CSS)
+            .replace("__CONTROLS__", controls.render_html(extra_before=_MODEL_PICKER))
+            .replace("__CONTROLS_JSON__", controls.spec_json())
             .replace("__VERSION__", __version__))
 
 PAGE = _render_page()
@@ -1599,26 +1595,16 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send(200, json.dumps({"error": str(e)}), "application/json")
             return
-        want_web = payload.get("web", None)
         history = _clean_history(payload.get("history"))
-        think = str(payload.get("think", "auto")).lower()
-        if think not in ("off", "auto", "on"):
-            think = "auto"
         model = str(payload.get("model", "")).strip()[:100]
         verbose = bool(payload.get("verbose", False))
         run_id = str(payload.get("run_id", ""))[:64]
-        # Per-run capability toggles from the chat controls (default to the config's
-        # standing values when a key is absent, so the API stays backward-compatible).
-        tools = payload.get("tools", None)
-        code_exec = bool(payload.get("code_exec", False))
-        acquire = bool(payload.get("acquire", False))
-        autonomy = str(payload.get("autonomy", "ask")).lower()
-        if autonomy not in ("ask", "auto"):
-            autonomy = "ask"
-        memory = payload.get("memory", None)
-        self._stream_run(prompt, want_web, history, think, model, verbose, run_id,
-                         tools=tools, code_exec=code_exec, acquire=acquire,
-                         autonomy=autonomy, memory=memory)
+        # Every declared run control, validated and reduced to the Config fields it
+        # changes for this run only. A key that isn't sent keeps the standing config
+        # value, so an older client or a bare `{"prompt": ...}` behaves as before.
+        from . import controls
+        self._stream_run(prompt, history, model, verbose, run_id,
+                         overrides=controls.overrides_for(payload))
 
     def _ndjson_writer(self):
         """Begin a streamed NDJSON response and return a write(event) callback."""
@@ -1855,10 +1841,13 @@ class _Handler(BaseHTTPRequestHandler):
             return {"backend": "ollama", "ollama_model": model}
         return {}
 
-    def _stream_run(self, prompt: str, want_web, history=None, think="auto", model="",
-                    verbose=False, run_id="", *, tools=None, code_exec=False,
-                    acquire=False, autonomy="ask", memory=None):
+    def _stream_run(self, prompt: str, history=None, model="", verbose=False,
+                    run_id="", *, overrides=None):
         """Run the pipeline, streaming each stage event as one NDJSON line.
+
+        `overrides` is the set of Config fields this request changes, already validated
+        by ag.controls — the same machinery the CLI uses sits underneath, so a control
+        in the GUI reflects what actually happens rather than describing it.
 
         The model's output is always streamed internally via `on_delta`: when
         `verbose` is set the chunks are forwarded to the browser as 'delta' events so
@@ -1870,24 +1859,10 @@ class _Handler(BaseHTTPRequestHandler):
         from .pipeline import capture_memory
         write = self._ndjson_writer()
         # Per-request overrides, without mutating the shared handler config.
-        overrides = {"think": think}
-        overrides.update(self._parse_model_choice(model))
-        # Chat-control toggles map to real config flags for this run only. Each is
-        # honored by the same machinery the CLI uses, so the GUI reflects reality:
-        #  tools    -> the reason→act loop (calc/file/memory/delegate tools)
-        #  run code -> the python_exec tool (only meaningful with tools on)
-        #  self-extend + autonomy -> acquire_skill (author/install/test a new skill)
-        #  memory   -> recall + auto-capture of durable facts
-        if tools is not None:
-            overrides["allow_local_tools"] = bool(tools)
-        overrides["allow_code_exec"] = bool(code_exec) and (tools is None or bool(tools))
-        overrides["allow_acquire"] = bool(acquire) and (tools is None or bool(tools))
-        overrides["acquisition_autonomy"] = autonomy
-        if memory is not None:
-            overrides["use_memory"] = bool(memory)
-            overrides["auto_memory"] = bool(memory)
-        cfg = dataclasses.replace(self.cfg, **overrides)
-        web_eff = cfg.allow_web if want_web is None else bool(want_web)
+        merged = dict(overrides or {})
+        merged.update(self._parse_model_choice(model))
+        cfg = dataclasses.replace(self.cfg, **merged)
+        web_eff = bool(cfg.allow_web)
         broker = _build_broker(cfg, web=web_eff)
 
         # A Canceller lets /stop close the upstream model connection at any point (even
