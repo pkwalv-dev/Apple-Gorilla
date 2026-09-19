@@ -78,9 +78,15 @@ Output valid Markdown ONLY, in exactly this structure:
 """
 
 MEMORY_DISTILLER_SYSTEM = """[role:memory]
-You maintain Apple-Gorilla's long-term memory. Given one exchange (the user's
-message and AG's answer, possibly with earlier turns for context), extract only
-DURABLE facts worth recalling in a totally separate future conversation.
+You maintain Apple-Gorilla's long-term memory. Given the USER'S message (sometimes
+with earlier turns for context), extract only DURABLE facts worth recalling in a
+totally separate future conversation.
+
+Extract facts ONLY from what the USER actually wrote. You are not given AG's reply,
+and you must not invent one: if the user's message does not contain a durable fact,
+return none. Do not turn a request ("analyze this") into a claim about the user
+("the user works on analysis"). A fact you cannot point to in the user's own words
+does not belong here.
 
 Save a fact ONLY if it is:
 - stable over time (a preference, a standing goal, who the user is, a project they
@@ -97,9 +103,10 @@ Write each fact as a short, self-contained third-person statement (e.g.
 
 For each fact also report HOW YOU KNOW IT — this sets how much AG will believe it:
 - "basis": "stated" if the user said it themselves (directly or plainly implied by
-  their own words), or "inferred" if you concluded it from how the exchange went.
+  their own words), or "inferred" if you concluded it from context.
   Be strict: if you are generalizing, guessing, or reading between the lines, it is
-  "inferred". A wrong "stated" makes AG confidently wrong later.
+  "inferred". A wrong "stated" makes AG confidently wrong later, and AG will demote a
+  "stated" fact it cannot find in the user's own words.
 - "volatile": true if this can change without anyone mentioning it (where they live,
   what they are working on right now, which version they use); false for things that
   are stable (who they are, a long-standing preference).

@@ -106,9 +106,16 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
         # may be kept about AG, which is finer-grained than dropping the whole exchange.
         if memory.is_identity_claim(raw_prompt):
             return []
+        # The distiller sees the USER'S words, not AG's answer. A durable fact about
+        # the user lives in what the user said; AG's reply is its own paraphrase and,
+        # on a weak local model, often a hallucination ("Share the PDF path...") with
+        # no basis in the prompt at all. Feeding that back in is how AG comes to
+        # "know" things the user never said. Earlier turns are context, but a fact
+        # must trace to the user's own words to be graded as the user's.
         user = (
             (f"# Earlier context\n{conversation}\n\n" if conversation else "")
-            + f"# User's message\n{raw_prompt}\n\n# AG's answer\n{answer[:2000]}\n"
+            + f"# The user's message (extract durable facts only from this)\n"
+            + f"{raw_prompt}\n"
         )
         res = client.complete(system=prompts.MEMORY_DISTILLER_SYSTEM, user=user,
                               cfg=cfg, max_tokens=400)
@@ -119,6 +126,13 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
             text, origin, volatile = _unpack_fact(item)
             if not text:
                 continue
+            # A backstop on the model's own honesty: USER origin is the top prior, and
+            # it is earned only by the user's actual words. If the distiller calls a
+            # fact "stated" but nothing in it appears in the user's message, it is
+            # generalizing — demote it to an inference so it enters as a hypothesis,
+            # never as an established premise.
+            if origin == memory.Origin.USER and not _grounded_in(text, raw_prompt):
+                origin = memory.Origin.INFERENCE
             # What the user stated is testimony; what the distiller worked out is a
             # guess. Storing them at the same confidence is how an agent ends up
             # certain about something nobody ever said.
@@ -178,6 +192,35 @@ def _web_sources(web_ctx: str) -> List[str]:
         if host and host not in out:
             out.append(host)
     return out
+
+
+_GROUNDING_STOP = frozenset(
+    "the a an of to for and or is are was were be been being user users you your "
+    "they them it its this that these those on in at by with as their has have had "
+    "want wants wanted need needs prefer prefers using use used work works working "
+    "about into from over more most less than then so not no yes do does did".split())
+
+
+def _grounded_in(fact: str, prompt: str) -> bool:
+    """True if a distilled fact traces to the user's actual words.
+
+    A content word of the fact (length >= 4, not a stopword) must appear in the
+    prompt. This is a floor, not a paraphrase check: it lets "I use metric" ground
+    "User prefers metric units" (shared: metric) while rejecting a fact whose subject
+    ("PDFs", "extraction") never occurs in what the user typed. Prefix-matched so
+    plurals and simple inflections still count.
+    """
+    import re
+    low = (prompt or "").lower()
+    words = [w for w in re.findall(r"[a-z0-9]+", (fact or "").lower())
+             if len(w) >= 4 and w not in _GROUNDING_STOP]
+    if not words:
+        return True          # nothing checkable (e.g. all stopwords) — don't demote
+    for w in words:
+        stem = w[:-1] if len(w) > 4 and w.endswith("s") else w
+        if stem in low:
+            return True
+    return False
 
 
 def _unpack_fact(item):
