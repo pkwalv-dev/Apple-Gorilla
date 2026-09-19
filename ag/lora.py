@@ -18,6 +18,7 @@ Nothing here trains automatically or in the background; training is always expli
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -639,6 +640,33 @@ class TrainResult:
     reason: str = ""
 
 
+def _pin_fused_ce_budget(cfg: Config, vram_gb: Optional[float], *, emit=None) -> None:
+    """Give Unsloth's fused cross-entropy an explicit working budget on a small card.
+
+    It normally sizes that buffer at half of *free* VRAM, read the first time it runs.
+    By then training has claimed nearly everything on an 8GB card, so the probe returns
+    about zero and it raises "No or negligible GPU memory available for fused cross
+    entropy" a few steps in — a run that was otherwise working dies at step 3.
+
+    Pinning a small budget makes it chunk the loss to fit instead of measuring and
+    giving up. Finer chunks cost a little speed; not finishing costs the whole run.
+    Only applied where the probe is actually unreliable, and never over an explicit
+    setting from the environment — a bigger card should keep Unsloth's own sizing.
+
+    Must run before `import unsloth`: the variable is read at module import time.
+    """
+    budget = float(getattr(cfg, "lora_ce_target_gb", 0.5) or 0.0)
+    if budget <= 0 or vram_gb is None or vram_gb >= 12:
+        return
+    if os.environ.get("UNSLOTH_CE_LOSS_TARGET_GB"):
+        return
+    os.environ["UNSLOTH_CE_LOSS_TARGET_GB"] = str(budget)
+    from .pipeline import _emit
+    _emit(emit, "lora", f"fused cross-entropy budget pinned to {budget} GB "
+          f"({vram_gb} GB card — its free-memory probe reads ~0 mid-run)",
+          level="info")
+
+
 def _warmup_steps(cfg: Config, n_examples: int) -> int:
     """How many steps to ease the learning rate in over.
 
@@ -724,6 +752,7 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
             # Unsloth: same LoRA/QLoRA result, ~half the VRAM and faster — the path that
             # makes an 8B fit on 8GB. Falls through to transformers+peft if it errors.
             try:
+                _pin_fused_ce_budget(cfg, feas.vram_gb, emit=emit)
                 from unsloth import FastLanguageModel
                 model, tok = FastLanguageModel.from_pretrained(
                     model_name=cfg.lora_base_model, max_seq_length=max_seq,

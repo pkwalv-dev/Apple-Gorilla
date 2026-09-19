@@ -142,6 +142,9 @@ class Config:
     lora_lr: float = 2e-4
     lora_warmup_ratio: float = 0.03            # ease into the LR; short runs need it most
     lora_lr_scheduler: str = "cosine"          # decay after warmup (standard QLoRA)
+    # Working budget for Unsloth's fused cross-entropy on a small card, where its own
+    # free-VRAM probe reads ~0 mid-run and aborts training. 0 disables the pin.
+    lora_ce_target_gb: float = 0.5
     lora_max_seq: int = 1024                   # detection lowers this on tight VRAM
     lora_batch_size: int = 1
     lora_grad_accum: int = 8                   # effective batch without the memory cost
