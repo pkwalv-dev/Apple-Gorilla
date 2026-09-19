@@ -89,3 +89,29 @@ def test_capture_memory_does_not_store_formatting_feedback(tmp_path, monkeypatch
     sem = memory.get_manager("root").store.all("root", [MemoryKind.SEMANTIC])
     assert not any("bold" in m.text.lower() for m in sem)
     memory.reset()
+
+
+# --- the uncensored toggle wires through the control system -----------------
+def test_uncensored_control_maps_to_config_override():
+    from ag import controls
+    assert controls.overrides_for({"uncensored": True}) == {"uncensored": True}
+    assert controls.overrides_for({"uncensored": False}) == {"uncensored": False}
+    assert "uncensored" not in controls.overrides_for({})   # unsent = standing config
+
+
+# --- model_used is reported, and reflects uncensored mode -------------------
+def test_uncensored_mode_keeps_the_abliterated_model_for_chat(tmp_path, monkeypatch):
+    """With uncensored on, a conversational prompt must NOT be routed to the instruct
+    model — the abliterated model answers, so raw output is what the user gets."""
+    from ag import config as cfgmod, pipeline
+    from ag.model import DryRunClient
+    monkeypatch.setattr(cfgmod, "STATE_DIR", tmp_path)
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(pipeline, "RUNS_DIR", tmp_path / "runs")
+    cfg = cfgmod.Config(uncensored=True, allow_local_tools=False, use_memory=False,
+                        working_memory=False, auto_memory=False)
+    # DryRunClient isn't an OllamaClient, so routing is skipped regardless; the point is
+    # model_used reports the abliterated task model, never the chat model.
+    rec = pipeline.run(DryRunClient(), cfg, "how's it going?", broker=None)
+    assert rec.model_used == cfg.ollama_model
+    assert rec.model_used != cfg.chat_model

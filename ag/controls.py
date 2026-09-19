@@ -127,6 +127,14 @@ RUN_CONTROLS: Tuple[Control, ...] = (
               "new durable facts after the answer. Off = this run neither reads nor "
               "writes long-term memory.",
     ),
+    Control(
+        id="uncensored", kind=TOGGLE, label="uncensored", default=False,
+        sets=("uncensored",),
+        help="Force the abliterated (uncensored) model for every turn. Off (default) = "
+             "AG routes plain conversation to a stronger instruct model and uses the "
+             "abliterated model only for tool/code tasks. On = the abliterated model "
+             "answers everything, for raw, unfiltered output.",
+    ),
 )
 
 BY_ID: Dict[str, Control] = {c.id: c for c in RUN_CONTROLS}
