@@ -506,7 +506,7 @@ def cmd_acquire(args) -> int:
 
     def trace(ev):
         if ev.get("stage") == "acquire" or ev.get("level") == "error":
-            print(f"[{ev.get('stage')}] {ev.get('message', '')}", file=sys.stderr)
+            print(f"[{ev.get('stage')}] {ev.get('msg', '')}", file=sys.stderr)
 
     res = acquire.author_skill(client, cfg, args.spec or "", broker=broker,
                                approve=True, emit=trace)
@@ -555,14 +555,15 @@ def cmd_lora(args) -> int:
     elif args.action == "build-data":
         def trace(ev):
             if ev.get("stage") == "lora":
-                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
-        st = lora.build_dataset(cfg, emit=trace)
+                print(f"[lora] {ev.get('msg','')}", file=sys.stderr)
+        st = lora.build_dataset(cfg, emit=trace,
+                                refresh_teacher=bool(getattr(args, "refresh_teacher", False)))
         print(f"dataset: {st.total} example(s) "
               f"({st.from_memory} from memory, {st.from_teacher} from teacher) -> {st.path}")
     elif args.action == "train":
         def trace(ev):
             if ev.get("stage") == "lora" or ev.get("level") == "error":
-                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+                print(f"[lora] {ev.get('msg','')}", file=sys.stderr)
         res = lora.train(cfg, emit=trace)
         print(res.reason)
         if res.ok:
@@ -583,7 +584,7 @@ def cmd_lora(args) -> int:
             print("usage: ag lora merge <adapter_id>  (see `ag lora list`)"); return 1
         def trace(ev):
             if ev.get("stage") == "lora" or ev.get("level") == "error":
-                print(f"[lora] {ev.get('message','')}", file=sys.stderr)
+                print(f"[lora] {ev.get('msg','')}", file=sys.stderr)
         res = lora.merge_to_gguf(cfg, args.target, emit=trace)
         print(res.reason)
         return 0 if res.ok else 1
@@ -774,6 +775,9 @@ def build_parser() -> argparse.ArgumentParser:
     lo.add_argument("action", choices=["status", "options", "build-data", "train",
                                        "list", "merge"])
     lo.add_argument("target", nargs="?", default="", help="adapter id (for merge)")
+    lo.add_argument("--refresh-teacher", action="store_true",
+                    help="build-data: regenerate the teacher set instead of reusing it "
+                         "(one model call per task — costs API tokens on a cloud backend)")
     lo.set_defaults(func=cmd_lora)
 
     bn = sub.add_parser("bundle", help="export a portable bundle, or --check portability")
