@@ -48,10 +48,17 @@ def test_page_has_working_memory_and_directive_ui():
 
 
 def test_page_has_thinking_selector():
-    # Extended-thinking must be user-selectable (like the Claude app) and sent per run.
-    for hook in ("id=\"think\"", "think:$('think').value", "value=\"auto\"",
-                 "value=\"off\"", "value=\"on\"", "saveThink()"):
+    # Extended-thinking must be user-selectable (like the Claude app) and reach the run.
+    # Asserted through the declaration rather than the generated markup: the control bar
+    # is rendered from ag.controls, so that is where a missing control would originate.
+    from ag import controls
+    think = controls.BY_ID["think"]
+    assert think.kind == controls.CHOICE
+    assert {v for v, _ in think.options} == {"auto", "off", "on"}
+    assert think.sets == ("think",)
+    for hook in ('id="think"', 'value="auto"', 'value="off"', 'value="on"'):
         assert hook in server.PAGE, f"thinking selector missing {hook!r}"
+    assert controls.overrides_for({"think": "off"})["think"] == "off"
 
 
 def test_page_has_propose_select_apply_ui():

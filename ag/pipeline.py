@@ -8,12 +8,13 @@ tools + memory + web), scored on measured speed.
 from __future__ import annotations
 
 import json
+import re as _re
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
 
-from . import prompts, scoring
+from . import prompts, routing, scoring
 from .config import Config, RUNS_DIR, ensure_dirs
 from .model import ModelResult, extract_json
 from .profile import load_principles, load_user_context
@@ -30,6 +31,11 @@ class RunRecord:
     output_tokens: int = 0
     run_id: str = ""
     scorecard: dict = field(default_factory=dict)  # speed (measured); accuracy/quality unscored
+    # Which untrusted sources this answer leaned on. Carried out of the run so memory
+    # capture can tell "the user told me this" from "a web page told me this" — the
+    # taint is invisible by the time you are only looking at the finished answer.
+    web_sources: List[str] = field(default_factory=list)
+    model_used: str = ""            # the model that actually produced the answer
 
 
 def _emit(emit, stage: str, msg: str, level: str = "info", **data) -> None:
@@ -82,32 +88,112 @@ def format_history(history, *, max_turns: int = 12, max_chars: int = 4000) -> st
     return block
 
 
+def _update_working(client, cfg: Config, raw_prompt: str, answer: str,
+                    *, session_id: str, history=None, emit=None) -> None:
+    """Fold this finished exchange into the session's working buffer (best-effort).
+
+    Separate from durable capture and NOT gated by auto_memory: keeping the current
+    conversation coherent is a different job from deciding what to remember forever.
+    Skipped on the dry-run stub, whose answer is not a real turn."""
+    from .model import DryRunClient
+    if (not getattr(cfg, "working_memory", True) or not session_id
+            or isinstance(client, DryRunClient)):
+        return
+    try:
+        from .memory import working
+        wm = working.load(session_id)
+        if wm.is_empty():
+            working.seed_from_history(wm, history)
+        working.update(wm, raw_prompt, answer, client=client, cfg=cfg,
+                       recent_turns=getattr(cfg, "working_recent_turns", 6),
+                       summary_chars=getattr(cfg, "working_summary_chars", 700),
+                       emit=emit)
+        working.save(wm)
+    except Exception as e:
+        _emit(emit, "memory", f"working memory update skipped: {e}", level="info")
+
+
 def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
-                   *, conversation: str = "", emit=None) -> list:
+                   *, conversation: str = "", session_id: str = "", history=None,
+                   emit=None, web_sources: Optional[List[str]] = None) -> list:
     """Distill durable facts from a finished exchange and store them (best-effort).
 
     This is what lets long-term memory actually FILL from normal use, so future
     sessions have something to recall. Gated by cfg.auto_memory; never raises into
     the caller and never runs on the dry-run stub (its output is uninformative).
+
+    Also advances the per-session working buffer, which is independent of auto_memory —
+    a user who turns off durable memory still gets a coherent conversation.
     """
+    _update_working(client, cfg, raw_prompt, answer, session_id=session_id,
+                    history=history, emit=emit)
     from .model import DryRunClient
     if not getattr(cfg, "auto_memory", True) or isinstance(client, DryRunClient):
         return []
     try:
         from . import memory
+        # An identity question has nothing durable in it, and its answer is exactly the
+        # self-description that must never be stored, so skip the exchange outright.
+        # Everything else is distilled normally — memory's own write gate decides what
+        # may be kept about AG, which is finer-grained than dropping the whole exchange.
+        if memory.is_identity_claim(raw_prompt):
+            return []
+        # The distiller sees the USER'S words, not AG's answer. A durable fact about
+        # the user lives in what the user said; AG's reply is its own paraphrase and,
+        # on a weak local model, often a hallucination ("Share the PDF path...") with
+        # no basis in the prompt at all. Feeding that back in is how AG comes to
+        # "know" things the user never said. Earlier turns are context, but a fact
+        # must trace to the user's own words to be graded as the user's.
         user = (
             (f"# Earlier context\n{conversation}\n\n" if conversation else "")
-            + f"# User's message\n{raw_prompt}\n\n# AG's answer\n{answer[:2000]}\n"
+            + f"# The user's message (extract durable facts only from this)\n"
+            + f"{raw_prompt}\n"
         )
         res = client.complete(system=prompts.MEMORY_DISTILLER_SYSTEM, user=user,
                               cfg=cfg, max_tokens=400)
         data = extract_json(res.text) or {}
-        facts = [str(f).strip() for f in (data.get("facts") or []) if str(f).strip()]
         saved = []
-        for f in facts[:3]:
-            m = memory.remember(f, max_memories=cfg.max_memories)
+        sources = list(web_sources or [])
+        for item in (data.get("facts") or [])[:3]:
+            text, origin, volatile = _unpack_fact(item)
+            if not text:
+                continue
+            # Presentation feedback is not a durable fact — drop it before it can be
+            # stored and re-injected on every formatting-adjacent turn.
+            if _is_style_meta(text):
+                _emit(emit, "memory", "skipped a formatting-style note (not durable)",
+                      level="info")
+                continue
+            # The distiller's job is facts about the USER or their work, not world
+            # trivia. A "give me facts about octopuses" turn was leaking octopus facts
+            # into durable memory. Drop a world-knowledge fact ONLY when it is the model
+            # volunteering trivia — if the answer leaned on web sources, the fact is kept
+            # and attributed to the site (as a hypothesis) below.
+            if memory.guess_subject(text) == memory.Subject.WORLD and not sources:
+                _emit(emit, "memory", "skipped a world-knowledge fact (not about the user)",
+                      level="info")
+                continue
+            # A backstop on the model's own honesty: USER origin is the top prior, and
+            # it is earned only by the user's actual words. If the distiller calls a
+            # fact "stated" but nothing in it appears in the user's message, it is
+            # generalizing — demote it to an inference so it enters as a hypothesis,
+            # never as an established premise.
+            if origin == memory.Origin.USER and not _grounded_in(text, raw_prompt):
+                origin = memory.Origin.INFERENCE
+            # What the user stated is testimony; what the distiller worked out is a
+            # guess. Storing them at the same confidence is how an agent ends up
+            # certain about something nobody ever said.
+            asserter = ""
+            if sources and origin != memory.Origin.USER:
+                # The answer leaned on untrusted pages, and anything NOT traceable to
+                # the user's own words is really that page talking. Attribute it, so it
+                # enters as a hypothesis credited to a named site rather than as a fact
+                # AG appears to have worked out for itself.
+                origin, asserter = memory.Origin.WEB, sources[0]
+            m = memory.remember(text, max_memories=cfg.max_memories,
+                                origin=origin, volatile=volatile, asserter=asserter)
             if m is not None:
-                saved.append(f)
+                saved.append(text)
         if saved:
             _emit(emit, "memory",
                   f"saved {len(saved)} durable fact(s) to long-term memory",
@@ -117,7 +203,11 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
         # and reusable procedures. This is what turns remembering into learning.
         try:
             mgr = memory.get_manager("root", cfg=cfg)
-            mgr.record_episode(raw_prompt, answer)
+            # Record where the answer came from. An answer built on web pages is a fine
+            # record of what happened, but a poor thing to fine-tune weights on — see
+            # ag.lora._pairs_from_memory, which reads this flag.
+            mgr.record_episode(raw_prompt, answer,
+                               meta={"web_sources": sources} if sources else None)
             if getattr(cfg, "memory_reflect", True):
                 every = max(1, int(getattr(cfg, "memory_reflect_every", 10)))
                 n_ep = len(mgr.store.all("root", [memory.MemoryKind.EPISODIC]))
@@ -129,6 +219,92 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
     except Exception as e:
         _emit(emit, "memory", f"memory capture skipped: {e}", level="info")
         return []
+
+
+def _web_sources(web_ctx: str) -> List[str]:
+    """The domains behind a gathered web context block, in order of use.
+
+    Domains rather than full URLs: the domain is the unit of independence that memory
+    reasons about (two pages on one site are one witness, two sites are two)."""
+    import re
+    from urllib.parse import urlparse
+    out: List[str] = []
+    for url in re.findall(r"^URL:\s*(\S+)", web_ctx or "", re.MULTILINE):
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            continue
+        if host.startswith("www."):
+            host = host[4:]
+        if host and host not in out:
+            out.append(host)
+    return out
+
+
+_GROUNDING_STOP = frozenset(
+    "the a an of to for and or is are was were be been being user users you your "
+    "they them it its this that these those on in at by with as their has have had "
+    "want wants wanted need needs prefer prefers using use used work works working "
+    "about into from over more most less than then so not no yes do does did".split())
+
+
+def _grounded_in(fact: str, prompt: str) -> bool:
+    """True if a distilled fact traces to the user's actual words.
+
+    A content word of the fact (length >= 4, not a stopword) must appear in the
+    prompt. This is a floor, not a paraphrase check: it lets "I use metric" ground
+    "User prefers metric units" (shared: metric) while rejecting a fact whose subject
+    ("PDFs", "extraction") never occurs in what the user typed. Prefix-matched so
+    plurals and simple inflections still count.
+    """
+    import re
+    low = (prompt or "").lower()
+    words = [w for w in re.findall(r"[a-z0-9]+", (fact or "").lower())
+             if len(w) >= 4 and w not in _GROUNDING_STOP]
+    if not words:
+        return True          # nothing checkable (e.g. all stopwords) — don't demote
+    for w in words:
+        stem = w[:-1] if len(w) > 4 and w.endswith("s") else w
+        if stem in low:
+            return True
+    return False
+
+
+_STYLE_META = _re.compile(
+    r"\b(format|formatting|bold|asterisk|markdown|italic|font|emoji|capitaliz|"
+    r"punctuation|verbose|concise|tone|wording|phrasing|style)\b", _re.I)
+
+
+def _is_style_meta(text: str) -> bool:
+    """A fact that is really about how AG should WRITE, not about the user or their work.
+
+    The distiller is told to skip these, but the local model is weak and does not always
+    comply, so this is the backstop: presentation feedback ('prefers less bold') is a
+    transient instruction for the moment, and storing it durably is what had AG fixating
+    on formatting across unrelated turns instead of answering the question."""
+    low = (text or "").lower()
+    return bool(_STYLE_META.search(low)) and (
+        "user" in low or "prefer" in low or "wants" in low or "ag " in low
+        or "you " in low or "your " in low or "output" in low or "response" in low
+        or "answer" in low or "reply" in low or "message" in low)
+
+
+def _unpack_fact(item):
+    """Read one distilled fact as (text, origin, volatile).
+
+    Accepts the bare string the distiller used to return as well as the richer object,
+    so an older/weaker model degrades to the middling "distilled" prior instead of
+    losing the fact or, worse, being trusted as if the user had said it."""
+    from .memory import Origin
+    if isinstance(item, dict):
+        text = str(item.get("fact") or item.get("text") or "").strip()
+        basis = str(item.get("basis", "")).strip().lower()
+        origin = (Origin.USER if basis == "stated"
+                  else Origin.INFERENCE if basis == "inferred"
+                  else Origin.DISTILLED)
+        vol = item.get("volatile")
+        return text, origin, (None if vol is None else bool(vol))
+    return str(item or "").strip(), Origin.DISTILLED, None
 
 
 def optimize(client, cfg: Config, raw_prompt: str,
@@ -157,7 +333,12 @@ def optimize(client, cfg: Config, raw_prompt: str,
     sys_p, user_p = _split_engineered(res.text)
     if not user_p:  # optimizer failed to produce; fall back to raw
         sys_p, user_p = "", raw_prompt
-    return sys_p or prompts.EXECUTOR_SYSTEM_DEFAULT, user_p, res.text
+    # Identity must survive the optimizer: when it emits a task system prompt, prepend
+    # AG_IDENTITY so the executor never answers as a generic base model. When it emits
+    # none, EXECUTOR_SYSTEM_DEFAULT already carries the identity.
+    executor_system = (prompts.AG_IDENTITY + "\n\n" + sys_p) if sys_p \
+        else prompts.EXECUTOR_SYSTEM_DEFAULT
+    return executor_system, user_p, res.text
 
 
 def gather_web_context(query: str, broker, *, max_results: int = 3, candidates: int = 8,
@@ -202,9 +383,52 @@ def gather_web_context(query: str, broker, *, max_results: int = 3, candidates: 
     return "\n\n".join(blocks)
 
 
+# Signals that a prompt is a TASK (wants tools, code, files, media, or the web) rather
+# than plain conversation. Deliberately about doing, not about topic: their presence
+# keeps the tool loop + abliterated model; their absence routes a short turn to the
+# instruct chat model, one-shot. Kept conservative — when unsure, treat as a task so a
+# real request never loses its tools.
+_TASK_SIGNALS = _re.compile(
+    r"\b(file|files|read|write|edit|open|save|code|run|execute|python|script|calc|"
+    r"calculate|compute|generate|image|video|render|draw|fetch|download|scrape|"
+    r"search|http|https|repo|repository|git|commit|install|build|debug|refactor|"
+    r"implement|deploy|api|json|sql|database|acquire|evolve|skill|screenshot|browse|"
+    r"url|directory|folder|path|\.py|\.js|\.json|\.md|\.txt)\b", _re.I)
+
+
+_REFUSAL = _re.compile(
+    r"\b(i (?:can'?t|cannot|can not|am unable|am not able)|i'?m unable|"
+    r"i am sorry,? but|i can'?t help|as an ai\b|i (?:do not|don'?t) have the ability)",
+    _re.I)
+
+
+def _is_failure(text: str) -> bool:
+    """A hard failure the runtime should fall back on: empty output, a stub, or a
+    refusal. Not a quality judgement — AG does not fabricate one — just 'this didn't
+    produce a usable answer', which is the honest trigger for trying the specialist."""
+    t = (text or "").strip()
+    if len(t) < 3:
+        return True
+    return bool(_REFUSAL.search(t[:200]))
+
+
+def _conversational(prompt: str, *, max_chars: int = 400) -> bool:
+    """True when a prompt is plain conversation — chat, opinion, or a general question
+    with no task to execute. Such turns are answered one-shot by the instruct chat model
+    with the tool loop and web off: it converses well, and the abliterated coder model's
+    action/observation scaffolding (and web noise) is exactly what makes chat feel dumb.
+    A long prompt or any task signal falls through to the full tool-using path."""
+    p = (prompt or "").strip()
+    if not p:
+        return True
+    if len(p) > max_chars:
+        return False
+    return _TASK_SIGNALS.search(p) is None
+
+
 def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         web: bool = False, broker=None, emit=None, history=None,
-        on_delta=None, cancel=None) -> RunRecord:
+        session_id: str = "", on_delta=None, cancel=None) -> RunRecord:
     """Pipeline for a single request: execute with context, tools, and memory.
 
     One model path (no per-run self-review): AG answers directly, layering on
@@ -218,11 +442,45 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
     t0 = time.time()
     total_in = total_out = 0
 
-    convo = format_history(history, max_turns=getattr(cfg, "max_history_turns", 12))
+    # Working memory: the current conversation held as a rolling summary + verbatim
+    # recent turns + a pinned decision ledger, scoped to THIS session and kept apart
+    # from the durable store. Falls back to a raw transcript when the buffer is off or
+    # empty, so an older client (or a bare CLI run) behaves exactly as before.
+    convo, convo_kind, convo_turns = "", "conversation", 0
+    if getattr(cfg, "working_memory", True) and session_id:
+        try:
+            from .memory import working
+            wm = working.load(session_id)
+            if wm.is_empty():
+                working.seed_from_history(wm, history)
+            convo = working.render(
+                wm, summary_chars=getattr(cfg, "working_summary_chars", 700))
+            convo_kind = "working memory"
+            convo_turns = wm.turn_count or (len(wm.recent) + 1) // 2
+        except Exception as e:
+            _emit(emit, "memory", f"working memory unavailable: {e}", level="info")
+    if not convo:
+        convo = format_history(history, max_turns=getattr(cfg, "max_history_turns", 12))
+        convo_turns = len([h for h in (history or [])
+                           if isinstance(h, dict) and str(h.get("text", "")).strip()])
     if convo:
         _emit(emit, "conversation",
-              f"carrying {len([h for h in history if str(h.get('text','')).strip()])}"
-              " earlier turn(s) as working memory", level="tool")
+              f"carrying the current conversation as {convo_kind}", level="tool",
+              turns=convo_turns)
+
+    # Model routing: the primary (this run's client) reasons and answers; the specialist
+    # is available for it to consult (guidance injected below, tool wired into the reason
+    # loop) and is the runtime's fallback when the primary hard-fails. Local Ollama only;
+    # Claude needs no routing. `conversational` is used solely to gate ambient web.
+    conversational = _conversational(raw_prompt)
+    model_used = cfg.ollama_model if getattr(cfg, "backend", "") == "ollama" else cfg.model
+    tags = routing.tags_for(raw_prompt)
+    from .model import OllamaClient, ollama_has_model
+    specialist = getattr(cfg, "specialist_model", "")
+    routing_on = (bool(getattr(cfg, "model_routing", True))
+                  and isinstance(client, OllamaClient) and bool(specialist)
+                  and specialist != cfg.ollama_model
+                  and ollama_has_model(cfg, specialist))
 
     web_ctx = ""
     if web and broker is not None:
@@ -262,22 +520,38 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         )
     if cfg.use_memory:
         from . import memory
-        mem_ctx = memory.memory_context(raw_prompt, k=5)
+        mem = memory.context(
+            raw_prompt, k=getattr(cfg, "memory_inject_k", 4),
+            max_reported=getattr(cfg, "memory_inject_max_reported", 2),
+            min_relevance=getattr(cfg, "memory_inject_min_relevance", 0.55))
+        mem_ctx = mem["text"]
         if mem_ctx:
-            exec_sys = (f"{exec_sys}\n\n# Relevant memory (durable facts AG has "
-                        f"retained about this user/context)\n{mem_ctx}")
-            facts = [ln[2:] if ln.startswith("- ") else ln
-                     for ln in mem_ctx.splitlines() if ln.strip()]
+            # Memory is injected WITH its standing: what AG actually has grounds to
+            # believe, kept apart from what it has merely been told once. The executor
+            # must never have to guess which lines it can reason from.
+            exec_sys = (f"{exec_sys}\n\n# Relevant memory (what AG has retained about "
+                        f"this user/context; believe it in proportion to its stated "
+                        f"standing, and prefer what the user says now over any of it)"
+                        f"\n{mem_ctx}")
+            facts = mem["known"] + mem["reported"]
+            n_rep = len(mem["reported"])
+            note = f" ({n_rep} unconfirmed)" if n_rep else ""
             _emit(emit, "memory",
-                  f"recalled {len(facts)} fact(s) from earlier", level="tool",
+                  f"recalled {len(facts)} fact(s) from earlier{note}", level="tool",
                   facts=facts)
 
-    # With local tools enabled, run the reason→act→observe loop so AG can compute,
-    # read files, run code, and use memory — not just summarize. Otherwise, one shot.
+    # Give the primary the specialist as an option: guidance on when it helps, and (in
+    # the reason loop) a consult_specialist tool to delegate a subtask to it.
+    if routing_on:
+        exec_sys = f"{exec_sys}\n\n{routing.guidance(cfg, specialist)}"
+
+    # The primary reasons and answers: the reason→act→observe loop when tools are on
+    # (compute, read files, use memory, consult the specialist), else a single call.
     _emit(emit, "execute", "generating the answer", level="tool")
-    from .model import DryRunClient
+    from .model import DryRunClient, make_client
     dry_run = isinstance(client, DryRunClient)
-    if cfg.allow_local_tools and broker is not None:
+    tools_on = cfg.allow_local_tools and broker is not None
+    if tools_on:
         from . import reason
         rr = reason.solve(client, cfg, system=exec_sys, user=eng_user,
                           broker=broker, emit=emit, on_delta=on_delta, cancel=cancel)
@@ -297,6 +571,35 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         total_in += exec_res.input_tokens
         total_out += exec_res.output_tokens
         dry_run = getattr(exec_res, "dry_run", False)
+
+    # Failure-fallback: a model cannot orchestrate its way out of its own crash, empty
+    # answer, or refusal, so the runtime retries once on the specialist and records the
+    # honest outcome so the capability doc learns which model this task-type favours.
+    if routing_on and not dry_run:
+        if _is_failure(answer):
+            routing.record(cfg, "primary", tags, "failure")
+            _emit(emit, "execute",
+                  f"primary fell short — consulting {specialist}", level="info")
+            try:
+                import dataclasses
+                spec_cfg = dataclasses.replace(cfg, ollama_model=specialist)
+                spec_client = make_client(spec_cfg, backend="ollama")
+                _sk = {"cancel": cancel} if cancel is not None else {}
+                sres = spec_client.complete(system=exec_sys, user=eng_user,
+                                            cfg=spec_cfg, **_sk)
+                if sres.text and not _is_failure(sres.text):
+                    answer = sres.text
+                    total_in += sres.input_tokens
+                    total_out += sres.output_tokens
+                    model_used = specialist
+                    routing.record(cfg, "specialist", tags, "fallback_win")
+                    _emit(emit, "execute", f"answered by {specialist}", level="info")
+                else:
+                    routing.record(cfg, "specialist", tags, "failure")
+            except Exception as e:
+                _emit(emit, "execute", f"specialist unavailable: {e}", level="info")
+        else:
+            routing.record(cfg, "primary", tags, "success")
     _emit(emit, "execute", f"answer ready ({total_out} tokens)", level="info")
 
     elapsed = round(time.time() - t0, 3)
@@ -317,6 +620,8 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         output_tokens=total_out,
         run_id=time.strftime("%Y%m%d-%H%M%S"),
         scorecard=card.as_dict(),
+        web_sources=_web_sources(web_ctx),
+        model_used=model_used,
     )
     _persist(rec)
     _prune_runs(cfg.max_runs)

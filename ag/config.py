@@ -19,17 +19,27 @@ VERSIONS_DIR = STATE_DIR / "versions"
 class Config:
     """Runtime configuration. Persisted to config.json (itself an evolvable file)."""
 
-    backend: str = "auto"                     # auto | anthropic | ollama | dry
+    # Default to the LOCAL model so AG never spends Claude API tokens unless the user
+    # explicitly asks for it (pick "Claude cloud" in the model menu, or set backend
+    # "anthropic"/"auto"). "auto" = use Claude when signed in, else offline_backend.
+    backend: str = "ollama"                   # ollama | anthropic | auto | dry
     # When backend == "auto" and no Anthropic creds are present, fall back to this
-    # instead of the dry-run stub — so "use Claude when signed in, else run locally"
-    # works with one setting. "ollama" | "dry".
+    # instead of the dry-run stub. "ollama" | "dry".
     offline_backend: str = "ollama"
-    model: str = "claude-opus-5"
-    ollama_model: str = "llama3.1"            # used when backend == ollama
+    model: str = "claude-opus-4-8"            # Claude model, used only on anthropic/auto
+    # The PRIMARY local brain: a strong instruct model that reasons, uses tools, and
+    # answers every turn. Dual-model routing (see ag/routing.py) lets it call the
+    # specialist below, and the runtime falls back to it when the primary hard-fails.
+    ollama_model: str = "qwen3:8b"            # used when backend == ollama
+    specialist_model: str = "ag-coder-abliterated:latest"  # abliterated fallback/specialist
     # 127.0.0.1, NOT localhost: on many systems 'localhost' resolves to IPv6 ::1
     # first, but Ollama binds IPv4 only — so 'localhost' wastes ~2s per call failing
     # over ::1 before retrying 127.0.0.1. This hits every model call; keep it numeric.
     ollama_host: str = "http://127.0.0.1:11434"
+    # Dual-model routing: the primary reasons and answers; the specialist is consulted
+    # when the capability doc favours it for the task, and the runtime falls back to it
+    # when the primary errors, empties, refuses, or returns a non-answer.
+    model_routing: bool = True                # consult/fall back to the specialist model
     ollama_keep_alive: str = "30m"            # keep the model resident between calls
     ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     # When the local Ollama server isn't reachable, try to launch `ollama serve`
@@ -52,12 +62,38 @@ class Config:
     sd_width: int = 512
     sd_height: int = 512
     sd_sampler: str = "Euler a"
+    # --- ComfyUI backend: unfiltered, open-weight image AND video generation -----
+    # A1111 can only run SD-family checkpoints. The current open-weight models that
+    # carry no safety filter in the weights — Chroma1-HD for images (8.9B, Apache-2.0,
+    # a de-distilled FLUX.1-schnell retrained with no safety filter, and the only one
+    # of these that restores real CFG and negative prompts) and Wan 2.2 TI2V-5B for
+    # video (Apache-2.0, text- and image-to-video in one checkpoint, the largest video
+    # model that fits an 8GB card) — both run under ComfyUI, so AG speaks its API too.
+    #
+    # "auto" prefers ComfyUI when it answers and falls back to A1111, so an existing
+    # SD install keeps working untouched.
+    image_backend: str = "auto"               # auto | comfy | a1111
+    allow_video_gen: bool = True
+    comfy_host: str = "http://127.0.0.1:8188"
+    comfy_autostart: bool = True
+    comfy_cmd: str = ""                       # overrides auto-discovery of main.py
+    # Workflows are DATA, not code: AG substitutes the prompt/seed/size into a graph
+    # exported from ComfyUI itself ("Export (API)"). Drop a replacement of the same
+    # name in state/workflows/ and it wins over the shipped one — so a new model is a
+    # new JSON file, not a patch to AG.
+    comfy_image_workflow: str = "chroma1hd_txt2img"
+    comfy_video_workflow: str = "wan22_ti2v_txt2vid"
+    video_width: int = 704
+    video_height: int = 400
+    video_frames: int = 49                    # ~2s at 24fps; 121 is Wan 2.2's 5s
+    video_fps: int = 24
+    video_steps: int = 20
     effort: str = "high"                      # low | medium | high | xhigh | max
     # Extended-thinking control (like the Claude app's toggle). "off" disables the
     # model's chain-of-thought (fastest), "on" forces it, "auto" leaves the model to
     # its default. Applies to thinking-capable backends (Qwen3 via Ollama, Claude via
     # the API); ignored by models that don't think.
-    think: str = "auto"                       # off | auto | on
+    think: str = "off"                        # off | auto | on (off keeps simple tasks fast)
     max_output_tokens: int = 32000            # main answer generation
     meta_output_tokens: int = 16000           # optimizer / evolve calls
     speed_budget_s: float = 30.0              # target wall-clock for a full speed score
@@ -122,7 +158,7 @@ class Config:
     # kept out of the core import path so the base tool stays stdlib-portable. Needs
     # the extras in requirements-lora.txt (torch/transformers/peft/datasets/bitsandbytes)
     # and an NVIDIA GPU. On an 8GB card this targets a 7-8B base in 4-bit ("stretch").
-    lora_base_model: str = "Qwen/Qwen3-8B"     # HF id of the base to specialize (selectable)
+    lora_base_model: str = "OBLITERATUS/Qwen2.5-Coder-7B-Instruct-OBLITERATED"  # base to specialize (selectable)
     lora_use_unsloth: bool = True              # use Unsloth when installed (less VRAM, faster);
                                                # falls back to transformers+peft when absent
     lora_4bit: bool = True                     # QLoRA 4-bit base (required on small VRAM)
@@ -130,9 +166,19 @@ class Config:
     lora_optimizer: str = "paged_adamw_8bit"   # paged 8-bit: small state, spills to RAM
     lora_r: int = 16                           # LoRA rank
     lora_alpha: int = 32                       # LoRA alpha
-    lora_dropout: float = 0.05
+    # 0, not the customary 0.05: Unsloth silently falls back off its fused LoRA kernels
+    # whenever dropout is non-zero, and on short runs (tens of steps) the regularisation
+    # that buys is negligible next to the throughput it costs. Raise it only for long
+    # runs on a large dataset, where overfitting is a real risk — the trade is reported
+    # at train time so it is never paid by accident.
+    lora_dropout: float = 0.0
     lora_epochs: float = 1.0
     lora_lr: float = 2e-4
+    lora_warmup_ratio: float = 0.03            # ease into the LR; short runs need it most
+    lora_lr_scheduler: str = "cosine"          # decay after warmup (standard QLoRA)
+    # Working budget for Unsloth's fused cross-entropy on a small card, where its own
+    # free-VRAM probe reads ~0 mid-run and aborts training. 0 disables the pin.
+    lora_ce_target_gb: float = 0.5
     lora_max_seq: int = 1024                   # detection lowers this on tight VRAM
     lora_batch_size: int = 1
     lora_grad_accum: int = 8                   # effective batch without the memory cost
@@ -152,15 +198,39 @@ class Config:
     memory_embed_backend: str = "auto"          # auto | ollama | hash | none
     memory_embed_model: str = "nomic-embed-text"  # local Ollama embedding model (keyless)
     memory_weights: dict = field(default_factory=lambda: {  # recall blend
-        "semantic": 0.55, "keyword": 0.2, "recency": 0.15, "importance": 0.1,
+        "semantic": 0.45, "keyword": 0.18, "recency": 0.12, "importance": 0.10,
+        "confidence": 0.15,
     })
     memory_recency_halflife_days: float = 30.0  # recency decay half-life
     memory_merge_threshold: float = 0.92        # cosine >= this => near-duplicate, merged
+    # --- Veracity: what AG believes, as opposed to what it merely heard -----
+    # Belief is seeded from a memory's origin (user > own observation > distillation >
+    # inference > web) and rises only on INDEPENDENT corroboration, so repetition can
+    # never manufacture confidence. Below the floor a memory is not recalled at all;
+    # between floor and trust it is recalled explicitly as an unconfirmed hypothesis.
+    memory_confidence_floor: float = 0.2        # below this, never surfaced
+    memory_trust_threshold: float = 0.65        # at/above this, stated as established
+    memory_confidence_halflife_days: float = 180.0  # volatile beliefs decay to "unknown"
+    memory_contradiction_threshold: float = 0.72    # similarity at which two claims clash
     memory_caps: dict = field(default_factory=lambda: {  # per-layer retention caps
         "episodic": 2000, "semantic": 1000, "procedural": 500,
     })
     memory_reflect: bool = True                 # distill episodes -> facts/procedures
     memory_reflect_every: int = 10              # run reflection every N auto-memory writes
+    # --- Auto-inject discipline (B1): keep the durable block from crowding the window.
+    # Only what AG can actually stand on is auto-injected; unconfirmed hypotheses are
+    # capped hard and otherwise reached on demand via the recall tool.
+    memory_inject_k: int = 4                     # max durable facts recalled into context
+    memory_inject_max_reported: int = 2          # max unconfirmed hypotheses auto-injected
+    memory_inject_min_relevance: float = 0.55    # auto-inject only topically-relevant memory
+                                                 # (shared word, or semantic cosine >= this)
+    # --- Working memory (A3): per-session buffer for conversational coherence -----
+    # Summary + verbatim recent turns + a pinned decision ledger, scoped to one session
+    # and kept structurally apart from the durable store (see ag/memory/working.py).
+    working_memory: bool = True                  # use the per-session working buffer
+    working_recent_turns: int = 6               # verbatim exchanges kept in the tail
+    working_summary_chars: int = 700            # rendered rolling-summary budget
+    working_idle_reset_min: int = 45            # CLI: silence longer than this -> new session
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main

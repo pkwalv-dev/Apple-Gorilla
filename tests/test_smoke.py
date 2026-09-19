@@ -203,21 +203,35 @@ def test_image_generate_saves_png(tmp_path, monkeypatch):
 
     monkeypatch.setattr(images, "IMAGES_DIR", tmp_path)
     monkeypatch.setattr(_u, "urlopen", lambda *a, **k: _Resp())
-    res = images.generate("a red bicycle", _Cfg())
+    # This stubs the A1111 API specifically, so pin that backend: with "auto" the
+    # stub also answers ComfyUI's probe and AG would (correctly) prefer ComfyUI.
+    import dataclasses as _dc
+    res = images.generate("a red bicycle",
+                          _dc.replace(_Cfg(), image_backend="a1111"))
     assert res.data_url.startswith("data:image/png;base64,")
     from pathlib import Path
     assert Path(res.path).exists() and Path(res.path).read_bytes() == png
 
 
 def test_image_generate_unreachable_raises(monkeypatch):
+    """No server, either backend: a clear error, never a fabricated image.
+
+    Autostart is off here on purpose. With it on, this test would launch a real
+    ComfyUI on a machine that has one installed and then block for the full startup
+    window, because the stubbed urlopen never lets the readiness poll succeed.
+    """
+    import dataclasses as _dc
     import urllib.request as _u, urllib.error as _e
     import pytest
     from ag import images
     from ag.config import Config as _Cfg
     def boom(*a, **k): raise _e.URLError("refused")
     monkeypatch.setattr(_u, "urlopen", boom)
-    with pytest.raises(RuntimeError):
-        images.generate("x", _Cfg())
+    for backend in ("a1111", "comfy"):
+        cfg = _dc.replace(_Cfg(), image_backend=backend, sd_autostart=False,
+                          comfy_autostart=False)
+        with pytest.raises(RuntimeError):
+            images.generate("x", cfg)
 
 
 def test_ensure_sd_running(monkeypatch):

@@ -1,8 +1,8 @@
 {
-  "backend": "auto",
+  "backend": "ollama",
   "offline_backend": "ollama",
   "model": "claude-opus-4-8",
-  "ollama_model": "qwen2.5-coder:7b",
+  "ollama_model": "qwen3:8b",
   "ollama_host": "http://127.0.0.1:11434",
   "ollama_keep_alive": "30m",
   "ollama_options": {
@@ -18,7 +18,7 @@
   "sd_height": 512,
   "sd_sampler": "Euler a",
   "effort": "high",
-  "think": "auto",
+  "think": "off",
   "max_output_tokens": 32000,
   "meta_output_tokens": 16000,
   "speed_budget_s": 30.0,
@@ -53,17 +53,17 @@
   ],
   "evolve_use_github": false,
   "evolve_github_refs": [],
-  "lora_base_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "lora_base_model": "OBLITERATUS/Qwen2.5-Coder-7B-Instruct-OBLITERATED",
   "lora_use_unsloth": true,
   "lora_4bit": true,
   "lora_grad_checkpointing": true,
   "lora_optimizer": "paged_adamw_8bit",
   "lora_r": 16,
   "lora_alpha": 32,
-  "lora_dropout": 0.05,
-  "lora_epochs": 1.0,
+  "lora_dropout": 0.0,
+  "lora_epochs": 3,
   "lora_lr": 0.0002,
-  "lora_max_seq": 1024,
+  "lora_max_seq": 768,
   "lora_batch_size": 1,
   "lora_grad_accum": 8,
   "lora_min_examples": 16,
@@ -100,5 +100,6 @@
     "ag/theme.py",
     "profile/principles.md",
     "config.json"
-  ]
+  ],
+  "specialist_model": "ag-coder-abliterated:latest"
 }
