@@ -118,10 +118,18 @@ def python_exec(code: str, *, broker: PermissionBroker,
 def memory_recall(query: str, *, k: int = 5) -> str:
     """Recall, annotated with how well-founded each item is. The reasoning loop is told
     which memories it may rely on and which are unconfirmed, rather than being handed a
-    flat list it will read as fact."""
+    flat list it will read as fact.
+
+    Durable knowledge only — semantic facts and procedures. Episodes are one past
+    conversation's raw transcript; surfacing one here drags an unrelated (often
+    hallucinated) exchange into this task, which is the cross-conversation bleed the
+    caller must not have to defend against. The current conversation reaches the model
+    as history, not through this tool."""
     from .. import memory
+    from ..memory import MemoryKind
     mgr = memory.get_manager("root")
-    hits = memory.recall(query, k=k)
+    hits = memory.recall(query, k=k,
+                         kinds=(MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL))
     if not hits:
         return "(no relevant memories)"
     out = []
