@@ -56,11 +56,11 @@ def cmd_run(args) -> int:
         cfg.model = args.model
     client = _client(args, cfg)
     # Permanent internet is on via cfg.allow_web; --web / --no-web override per run.
-    # When neither flag is given, ambient web is suppressed on plain conversational
-    # turns (no point web-searching "how's it going?"); an explicit flag always wins.
+    # With neither flag, ambient web fires only for research-type prompts that need
+    # external/current info — not chat or self-contained tasks (keeps them fast).
     if args.web is None:
-        from .pipeline import _conversational
-        web_effective = cfg.allow_web and not _conversational(args.prompt)
+        from . import routing
+        web_effective = cfg.allow_web and ("research" in routing.tags_for(args.prompt))
     else:
         web_effective = args.web
     tools_effective = cfg.allow_local_tools or getattr(args, "tools", False)

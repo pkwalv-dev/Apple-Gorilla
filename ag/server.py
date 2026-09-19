@@ -2093,10 +2093,11 @@ class _Handler(BaseHTTPRequestHandler):
         merged = dict(overrides or {})
         merged.update(self._parse_model_choice(model))
         cfg = dataclasses.replace(self.cfg, **merged)
-        # Ambient web is suppressed on plain conversational turns: a chat like "how's it
-        # going?" should not fire eight web searches. An explicit task still searches.
-        from .pipeline import _conversational
-        web_eff = bool(cfg.allow_web) and not _conversational(prompt)
+        # Ambient web fires only when the prompt actually needs external/current info
+        # (a research-type task), not on chat or self-contained work like coding — that
+        # was making simple requests slow. An explicit model/run still has web available.
+        from . import routing
+        web_eff = bool(cfg.allow_web) and ("research" in routing.tags_for(prompt))
         broker = _build_broker(cfg, web=web_eff)
         # Normalize the session id (a per-tab id from the client) so this run's working
         # memory loads and saves under one key; empty falls back to a raw transcript.

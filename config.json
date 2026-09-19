@@ -18,7 +18,7 @@
   "sd_height": 512,
   "sd_sampler": "Euler a",
   "effort": "high",
-  "think": "auto",
+  "think": "off",
   "max_output_tokens": 32000,
   "meta_output_tokens": 16000,
   "speed_budget_s": 30.0,

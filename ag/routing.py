@@ -41,8 +41,9 @@ _TAG_PATTERNS = {
         r"compile|script|regex|api|json|sql|bug|stack ?trace|traceback|class|method|"
         r"\.py|\.js|\.ts|\.rs|\.go|\.cpp|\.java|npm|pip|git)\b", re.I),
     "creative": re.compile(
-        r"\b(write|story|poem|haiku|lyrics|fiction|character|dialogue|screenplay|"
-        r"novel|brainstorm|imagine|creative)\b", re.I),
+        r"\b(story|poem|haiku|lyrics|fiction|dialogue|screenplay|novel|brainstorm|"
+        r"creative writing|write (?:a|me a|the) (?:story|poem|song|haiku|essay|script))\b",
+        re.I),
     "math": re.compile(
         r"\b(calculate|compute|solve|equation|integral|derivative|probability|"
         r"algebra|matrix|proof|arithmetic|sum of|factor(?:ial)?)\b", re.I),

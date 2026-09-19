@@ -91,6 +91,34 @@ def test_capture_memory_does_not_store_formatting_feedback(tmp_path, monkeypatch
     memory.reset()
 
 
+def test_capture_memory_drops_world_knowledge(tmp_path, monkeypatch):
+    """A 'give me facts about octopuses' turn must not leak world trivia into durable
+    memory — only facts about the user or their work are kept."""
+    from ag import config as cfgmod
+    from ag.memory import manager as mgrmod
+    from ag.memory.embed import HashingEmbedder
+    from ag import memory
+
+    monkeypatch.setattr(cfgmod, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(mgrmod, "get_embedder", lambda cfg=None, **k: HashingEmbedder())
+    memory.reset()
+
+    class _Client:
+        def complete(self, **kw):
+            return SimpleNamespace(text='{"facts": [{"fact": "Octopuses have three '
+                                        'hearts.", "basis": "stated", "volatile": false}]}')
+
+    cfg = cfgmod.Config()
+    cfg.working_memory = False
+    saved = pipeline.capture_memory(_Client(), cfg,
+                                    "give me three fun facts about octopuses", "...")
+    assert saved == []                    # world trivia dropped
+    from ag.memory import MemoryKind
+    sem = memory.get_manager("root").store.all("root", [MemoryKind.SEMANTIC])
+    assert not any("octopus" in m.text.lower() for m in sem)
+    memory.reset()
+
+
 # --- the failure detector drives the specialist fallback --------------------
 def test_is_failure_flags_empty_and_refusals():
     assert pipeline._is_failure("") is True

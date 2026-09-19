@@ -24,7 +24,14 @@ def test_tags_pick_up_task_kind():
     assert "code" in routing.tags_for("debug this python function")
     assert "creative" in routing.tags_for("write me a poem about the sea")
     assert "math" in routing.tags_for("calculate the integral of x^2")
+    assert "research" in routing.tags_for("search for the latest news on X")
     assert routing.tags_for("how's it going?") == {"general"}   # floor only
+
+
+def test_write_a_function_is_code_not_creative():
+    """'write' alone must not tag a coding task as creative (the old false positive)."""
+    tags = routing.tags_for("Write a Python function that returns the nth Fibonacci number")
+    assert "code" in tags and "creative" not in tags
 
 
 # --- seeding + persistence --------------------------------------------------
