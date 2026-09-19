@@ -164,6 +164,15 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
                 _emit(emit, "memory", "skipped a formatting-style note (not durable)",
                       level="info")
                 continue
+            # The distiller's job is facts about the USER or their work, not world
+            # trivia. A "give me facts about octopuses" turn was leaking octopus facts
+            # into durable memory. Drop a world-knowledge fact ONLY when it is the model
+            # volunteering trivia — if the answer leaned on web sources, the fact is kept
+            # and attributed to the site (as a hypothesis) below.
+            if memory.guess_subject(text) == memory.Subject.WORLD and not sources:
+                _emit(emit, "memory", "skipped a world-knowledge fact (not about the user)",
+                      level="info")
+                continue
             # A backstop on the model's own honesty: USER origin is the top prior, and
             # it is earned only by the user's actual words. If the distiller calls a
             # fact "stated" but nothing in it appears in the user's message, it is

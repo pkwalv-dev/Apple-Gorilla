@@ -93,7 +93,7 @@ class Config:
     # model's chain-of-thought (fastest), "on" forces it, "auto" leaves the model to
     # its default. Applies to thinking-capable backends (Qwen3 via Ollama, Claude via
     # the API); ignored by models that don't think.
-    think: str = "auto"                       # off | auto | on
+    think: str = "off"                        # off | auto | on (off keeps simple tasks fast)
     max_output_tokens: int = 32000            # main answer generation
     meta_output_tokens: int = 16000           # optimizer / evolve calls
     speed_budget_s: float = 30.0              # target wall-clock for a full speed score
