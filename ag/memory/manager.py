@@ -439,7 +439,17 @@ class MemoryManager:
         executor is told which of these it may reason from and which it must treat as
         an unverified hypothesis. Presenting a 0.3-confidence web claim in the same
         breath as something the user said is how an agent ends up confidently wrong.
+
+        Episodes are excluded by default. An episode is the raw transcript of one past
+        exchange — session-scoped working memory, and the caller already threads the
+        CURRENT conversation into the prompt as history. Recalling an episode HERE only
+        ever pulls one from a DIFFERENT conversation, dragging a stale (often
+        hallucinated) transcript into an unrelated one. The durable cross-conversation
+        layer is semantic facts and procedures; episodes stay recorded, keep feeding
+        reflection, and remain explicitly recallable — they just don't auto-inject.
         """
+        if kinds is None:
+            kinds = (MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL)
         hits = self.recall(query, k=k, kinds=kinds)
         # Identity is set authoritatively by the system prompt, so a recalled
         # self-description would only fight it. Operational self-knowledge — what AG's

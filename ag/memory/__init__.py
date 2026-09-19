@@ -16,7 +16,7 @@ memory is just data under state/memory/ that travels with the agent.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence
 
 from ..config import STATE_DIR
 from .embed import Embedder, HashingEmbedder, OllamaEmbedder, cosine, get_embedder
@@ -110,9 +110,9 @@ def is_self_reference(text: str) -> bool:
     return guess_subject(text) == Subject.SELF
 
 
-def recall(query: str, *, k: int = 5,
+def recall(query: str, *, k: int = 5, kinds: Optional[Iterable[str]] = None,
            min_confidence: Optional[float] = None) -> List[Memory]:
-    return _root().recall(query, k=k, min_confidence=min_confidence)
+    return _root().recall(query, k=k, kinds=kinds, min_confidence=min_confidence)
 
 
 def memory_context(query: str, *, k: int = 5) -> str:

@@ -51,6 +51,30 @@ def test_layers_are_separate(tmp_path):
     assert hits and hits[0].kind == MemoryKind.PROCEDURAL
 
 
+def test_context_does_not_auto_inject_episodes(tmp_path):
+    """An episode is one past conversation's transcript. The current conversation is
+    threaded into the prompt as history, so an episode surfacing in context() only ever
+    comes from a DIFFERENT conversation — the cross-conversation bleed that had AG
+    volunteering a stale, hallucinated 'rush b' answer in unrelated chats."""
+    m = mgr(tmp_path)
+    m.record_episode("rush b",
+                     "The latest Rush tour dates include Houston and Pittsburgh...",
+                     score=5.0)
+    m.remember("User prefers metric units.", kind=MemoryKind.SEMANTIC)
+
+    ctx = m.context("rush")
+    blob = ctx["text"].lower()
+    assert "rush" not in blob and "houston" not in blob     # the episode stays out
+    assert not any(h.kind == MemoryKind.EPISODIC for h in ctx["hits"])
+
+    # But the episode is still stored, and still explicitly recallable — not nerfed.
+    assert len(m.store.all("root", [MemoryKind.EPISODIC])) == 1
+    assert m.recall("rush", kinds=[MemoryKind.EPISODIC])
+    # A caller that explicitly asks for episodes in context() still gets them.
+    assert any(h.kind == MemoryKind.EPISODIC
+               for h in m.context("rush", kinds=[MemoryKind.EPISODIC])["hits"])
+
+
 # --- dedup / merge ----------------------------------------------------------
 def test_exact_duplicate_merges(tmp_path):
     m = mgr(tmp_path)
