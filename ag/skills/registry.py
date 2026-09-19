@@ -32,6 +32,8 @@ class Skill:
     name: str
     description: str
     arg: str = "input"                     # primary args key run() reads
+    args: List[str] = field(default_factory=list)   # every key run() reads, primary first
+    optional: List[str] = field(default_factory=list)  # of those, the ones with defaults
     capabilities: List[str] = field(default_factory=list)  # broker grants run() needs
     deps: List[str] = field(default_factory=list)          # pip deps
     agent: str = "root"                    # owning namespace
@@ -43,12 +45,29 @@ class Skill:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    def keys(self) -> List[str]:
+        """The call contract: every key `run()` reads, primary first."""
+        return list(self.args) if self.args else [self.arg]
+
+    def example_args(self) -> str:
+        """The args object to show the model — required keys only, primary first."""
+        req = [k for k in self.keys() if k not in self.optional] or self.keys()
+        return "{" + ",".join(f'"{k}":"..."' for k in req) + "}"
+
     @classmethod
     def from_dict(cls, d: dict) -> "Skill":
+        # A manifest written before the contract was validated can hold a whole
+        # sentence where a key belongs; normalise it on the way in so an already-
+        # registered skill is advertised correctly without a migration.
+        from .contract import normalize_arg
+        raw = str(d.get("arg", "input")) or "input"
+        arg = normalize_arg(raw) or "input"
         return cls(
             name=str(d.get("name", "")),
             description=str(d.get("description", "")),
-            arg=str(d.get("arg", "input")) or "input",
+            arg=arg,
+            args=[str(a) for a in (d.get("args") or [])] or [arg],
+            optional=[str(a) for a in (d.get("optional") or [])],
             capabilities=[str(c) for c in (d.get("capabilities") or [])],
             deps=[str(x) for x in (d.get("deps") or [])],
             agent=str(d.get("agent", "root")),
@@ -220,8 +239,10 @@ def _to_tool(skill: Skill, run: Callable):
             return str(run(args, broker))
         except Exception as e:
             return f"{skill.name} error: {e}"
+    opt = [k for k in skill.keys() if k in skill.optional]
     desc = (f'{skill.description} '
-            f'e.g. {{"tool":"{skill.name}","args":{{"{skill.arg}":"..."}}}}')
+            f'e.g. {{"tool":"{skill.name}","args":{skill.example_args()}}}'
+            + (f' (optional: {", ".join(opt)})' if opt else ''))
     return Tool(skill.name, skill.arg, None, desc, _invoke)
 
 
