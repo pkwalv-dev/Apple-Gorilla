@@ -217,3 +217,51 @@ def test_only_ags_own_output_directories_are_served(tmp_path, monkeypatch):
         assert server.media_file("") is None
     finally:
         mine.unlink(missing_ok=True)
+
+
+# --- validating a workflow against the server that will run it ---------------
+def _object_info(**over):
+    """A minimal /object_info reply: ComfyUI reports each input as [type, opts]."""
+    base = {
+        "UNETLoader": {"input": {"required": {"unet_name": [[], {}],
+                                              "weight_dtype": [["default"], {}]}}},
+        "SaveImage": {"input": {"required": {"images": ["IMAGE", {}]},
+                                "optional": {"filename_prefix": ["STRING", {}]}}},
+    }
+    base.update(over)
+    return base
+
+
+def test_validate_reports_a_bare_models_directory(monkeypatch):
+    """A fresh ComfyUI offers an EMPTY list of checkpoints. Treating "no options" as
+    "nothing to check" would pass a workflow that cannot possibly load."""
+    monkeypatch.setattr(comfy, "_get",
+                        lambda cfg, path, **k: json.dumps(_object_info()).encode())
+    graph = {"1": {"class_type": "UNETLoader",
+                   "inputs": {"unet_name": "chroma1-hd.safetensors",
+                              "weight_dtype": "default"}}}
+    problems = comfy.validate(graph, _cfg())
+    assert len(problems) == 1
+    assert "chroma1-hd.safetensors" in problems[0] and "empty" in problems[0]
+
+
+def test_validate_catches_a_renamed_socket_and_an_unknown_node(monkeypatch):
+    """The reason the templates are checked at all: ComfyUI renames inputs between
+    releases, and a graph written against the old name fails deep in the queue."""
+    monkeypatch.setattr(comfy, "_get",
+                        lambda cfg, path, **k: json.dumps(_object_info()).encode())
+    graph = {"1": {"class_type": "UNETLoader",
+                   "inputs": {"ckpt_name": "x.safetensors"}},
+             "2": {"class_type": "SomeCustomNode", "inputs": {}}}
+    problems = " | ".join(comfy.validate(graph, _cfg()))
+    assert "unknown input 'ckpt_name'" in problems
+    assert "missing required input 'unet_name'" in problems
+    assert "no node class 'SomeCustomNode'" in problems
+
+
+def test_validate_says_so_when_the_server_cannot_be_reached(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("refused")
+    monkeypatch.setattr(comfy, "_get", boom)
+    problems = comfy.validate({}, _cfg())
+    assert len(problems) == 1 and "cannot read" in problems[0]

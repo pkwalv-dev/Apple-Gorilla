@@ -61,6 +61,30 @@ def reachable(cfg: Config, timeout: float = 1.5) -> bool:
         return False
 
 
+def _interpreter_for(comfy_dir: Path, fallback: str) -> str:
+    """The Python that can actually run this ComfyUI.
+
+    ComfyUI needs a CUDA torch build, which AG's own interpreter has no reason to
+    have — so a venv beside main.py, or the portable build's bundled runtime, is
+    preferred over whatever is running AG. Launching with the wrong interpreter fails
+    at `import torch`, several seconds into a detached process where nobody sees it.
+    """
+    names = ("python.exe", "python")
+    for rel in (("python_embeded",), (".venv", "Scripts"), (".venv", "bin"),
+                ("venv", "Scripts"), ("venv", "bin")):
+        base = comfy_dir.joinpath(*rel)
+        if not base.exists():
+            base = comfy_dir.parent.joinpath(*rel)     # the portable build's sibling
+        for n in names:
+            p = base / n
+            try:
+                if p.exists():
+                    return str(p)
+            except OSError:
+                continue
+    return fallback
+
+
 def _find_comfy() -> Optional[Tuple[list, str]]:
     """Locate an installed ComfyUI. Returns (argv, cwd) or None. Never installs."""
     import os
@@ -79,9 +103,8 @@ def _find_comfy() -> Optional[Tuple[list, str]]:
             for cand in (base, base / "ComfyUI"):
                 try:
                     if (cand / "main.py").exists():
-                        py = cand.parent / "python_embeded" / "python.exe"
-                        exe = str(py) if py.exists() else sys.executable
-                        return ([exe, "main.py"], str(cand))
+                        return ([_interpreter_for(cand, sys.executable), "main.py"],
+                                str(cand))
                 except OSError:
                     continue
     return None
@@ -316,12 +339,17 @@ def validate(graph: Dict[str, Any], cfg: Config) -> List[str]:
             problems.append(f"node {nid} ({cls}): missing required input {miss!r}")
         for extra in sorted(given - known):
             problems.append(f"node {nid} ({cls}): unknown input {extra!r}")
-        # A loader names a file the server must actually have on disk.
+        # A loader names a file the server must actually have on disk. An EMPTY
+        # choice list is the important case, not a skippable one: it means that
+        # models directory is bare, which is exactly what a fresh install looks like.
         for key, val in (node.get("inputs") or {}).items():
             choices = (required.get(key) or [None])[0]
-            if isinstance(val, str) and isinstance(choices, list) and choices                     and val not in choices:
-                problems.append(f"node {nid} ({cls}): {key}={val!r} is not installed "
-                                f"(server offers {len(choices)} option(s))")
+            if isinstance(val, str) and isinstance(choices, list) \
+                    and val not in choices:
+                where = ("that directory is empty" if not choices else
+                         "server has " + ", ".join(map(str, choices[:3])))
+                problems.append(f"node {nid} ({cls}): {key}={val!r} is not "
+                                f"installed ({where})")
     return problems
 
 
