@@ -224,6 +224,13 @@ _SELF_MARKERS = (
     "apple-gorilla", "ag's ", "ag is ", "ag has ", "ag can ", "ag cannot ", "ag will ",
     "your tool", "your web", "your calc", "your skill", "your memory", "your model",
     "you are ", "you can ", "you cannot ", "you have ", "yourself", "my own ",
+    # First person — how AG describes itself in its OWN answers, which is the form
+    # that reaches memory as an episode and then, unfiltered, becomes training data.
+    # "I cannot open PDFs" is a statement about a missing tool, not a fact about the
+    # world, and fine-tuning on it teaches the disposition to refuse.
+    "i cannot ", "i can't ", "i can not ", "i am unable", "i'm unable", "i lack ",
+    "i do not have", "i don't have", "i am not able", "my tools ", "my capabilit",
+    "as an ai", "i am an ai",
 )
 _USER_MARKERS = ("user ", "the user", "they prefer", "their project")
 

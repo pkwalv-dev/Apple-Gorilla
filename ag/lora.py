@@ -127,7 +127,12 @@ def recommended_config(vram_gb: Optional[float] = None) -> dict:
     elif v >= 10:
         base, seq = "Qwen/Qwen3-8B", 1024
     elif v >= 7:
-        base, seq = "Qwen/Qwen3-8B", 512      # 8GB: tight, needs the savers below
+        # 8GB: tight, needs the savers below. 768 rather than 512 because the window
+        # has to hold a whole answer — a shorter one does not save memory so much as
+        # silently clip the training target, which is the more expensive failure. With
+        # Unsloth + 4-bit + gradient checkpointing at batch 1 this fits; if it OOMs,
+        # lower lora_max_seq (it is clamped by this value, never raised past it).
+        base, seq = "Qwen/Qwen3-8B", 768
     elif v >= 5:
         base, seq = "Qwen/Qwen3-4B", 768
     else:
@@ -205,6 +210,13 @@ def _is_identity_question(q: str) -> bool:
     return any(mk in ql for mk in _IDENTITY_Q_MARKERS)
 
 
+# A supervised pair has to carry a lesson. Roughly one sentence of answer is the floor:
+# below that it is an acknowledgement or a quip, and training on it pushes the model
+# toward replying with nothing.
+_MIN_PROMPT_CHARS = 8
+_MIN_ANSWER_CHARS = 60
+
+
 def _pairs_from_memory(cfg: Config) -> List[dict]:
     """Turn AG's own memory into instruction/output pairs.
 
@@ -226,24 +238,38 @@ def _pairs_from_memory(cfg: Config) -> List[dict]:
       the claim and lose the attribution.
     - Self-descriptions never train (see _IDENTITY_Q_MARKERS): AG's identity comes from
       the system prompt, and a fine-tuned self-description fights it forever.
+    - Clipped answers never train. An answer cut mid-sentence teaches the model to stop
+      mid-sentence, which is a defect no amount of good data elsewhere undoes.
+    - Threadbare exchanges never train. Most episodes carry no score at all (the
+      pipeline does not score a normal run), so `score` cannot be the quality bar
+      without emptying this source entirely. The bar is the content itself: a
+      one-line throwaway like "Well, what do you know!" is not a lesson.
     """
     pairs: List[dict] = []
     try:
         from . import memory
+        from .memory.manager import LEGACY_EPISODE_CHARS
         mgr = memory.get_manager("root", cfg=cfg)
         for m in mgr.store.all("root", [memory.MemoryKind.EPISODIC]):
             score = float(m.meta.get("score", 0) or 0)
-            if score and score < 6:      # skip low-quality exchanges
+            if score and score < 6:      # an explicit bad score disqualifies
                 continue
             if m.meta.get("web_sources"):
                 continue                 # untrusted content must not become a weight
+            if m.meta.get("truncated"):
+                continue                 # recorded as clipped when it was stored
             mt = re.search(r"Q:\s*(.*?)\s*A:\s*(.*)", m.text, re.DOTALL)
             if mt:
                 q, a = mt.group(1).strip(), mt.group(2).strip()
+                # Episodes stored under the old 400-character cap carry no `truncated`
+                # flag; an answer landing exactly on it was almost certainly cut.
+                if len(a) == LEGACY_EPISODE_CHARS:
+                    continue
+                if len(q) < _MIN_PROMPT_CHARS or len(a) < _MIN_ANSWER_CHARS:
+                    continue             # too thin to be teaching anything
                 # The blunt self-reference filter (question AND answer) — see
                 # memory.is_self_reference and _IDENTITY_Q_MARKERS.
-                if q and a and not (memory.is_self_reference(q)
-                                    or memory.is_self_reference(a)):
+                if not (memory.is_self_reference(q) or memory.is_self_reference(a)):
                     pairs.append({"instruction": q, "output": a, "source": "memory"})
         for m in mgr.store.all("root", [memory.MemoryKind.PROCEDURAL]):
             if not m.text.strip():
@@ -517,7 +543,12 @@ class TrainResult:
 def _format_example(tokenizer, instruction: str, output: str, max_seq: int) -> dict:
     """Tokenize one pair, MASKING the prompt so training loss is computed on the answer
     tokens only (label -100 = "ignore"). Without this the model also spends gradient
-    learning to predict the question, which dilutes answer quality."""
+    learning to predict the question, which dilutes answer quality.
+
+    Also reports whether the pair FIT. An example longer than the window is silently
+    cut here, and the cut answer then becomes the training target — the model learns to
+    stop mid-sentence. The caller drops anything marked incomplete rather than teaching
+    it a truncated answer."""
     try:
         full = tokenizer.apply_chat_template(
             [{"role": "user", "content": instruction},
@@ -530,6 +561,7 @@ def _format_example(tokenizer, instruction: str, output: str, max_seq: int) -> d
         prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
         full = prompt + output
     enc = tokenizer(full, truncation=True, max_length=max_seq)
+    enc["complete"] = len(tokenizer(full)["input_ids"]) <= max_seq
     n_prompt = min(len(tokenizer(prompt, truncation=True, max_length=max_seq)["input_ids"]),
                    len(enc["input_ids"]))
     labels = list(enc["input_ids"])
@@ -620,11 +652,34 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
                                   TrainingArguments)
         ds = ds.map(lambda r: _format_example(tok, r["instruction"], r["output"], max_seq),
                     remove_columns=ds.column_names)
+        # Refuse to train on anything the window would clip. Fewer complete examples
+        # beat more truncated ones: a clipped target teaches the model to stop early,
+        # and no amount of good data elsewhere undoes that.
+        fitted = ds.filter(lambda r: r["complete"])
+        dropped = len(ds) - len(fitted)
+        if dropped:
+            _emit(emit, "lora", f"dropped {dropped} of {len(ds)} example(s) longer than "
+                  f"the {max_seq}-token window (raise lora_max_seq to keep them)",
+                  level="info")
+        ds = fitted.remove_columns(["complete"])
+        n = len(ds)
+        if n < int(getattr(cfg, "lora_min_examples", 16)):
+            return TrainResult(False, examples=n,
+                               reason=f"only {n} example(s) fit the {max_seq}-token "
+                                      f"window (need >= {cfg.lora_min_examples}); "
+                                      f"raise lora_max_seq or build more data")
         args = TrainingArguments(
             output_dir=str(out_dir / "_trainer"),
             per_device_train_batch_size=cfg.lora_batch_size,
             gradient_accumulation_steps=cfg.lora_grad_accum,
             num_train_epochs=cfg.lora_epochs, learning_rate=cfg.lora_lr,
+            # A run this short (a few dozen optimizer steps) spends a large share of
+            # its budget in the first few updates, where a cold full-rate step does the
+            # most damage to what the base model already knows. Warm up into it, then
+            # decay — the standard QLoRA schedule, and the cheapest guard there is
+            # against trading general knowledge for a small set of new habits.
+            warmup_ratio=float(getattr(cfg, "lora_warmup_ratio", 0.03) or 0.0),
+            lr_scheduler_type=str(getattr(cfg, "lora_lr_scheduler", "cosine")),
             gradient_checkpointing=bool(cfg.lora_grad_checkpointing),
             optim=str(getattr(cfg, "lora_optimizer", "paged_adamw_8bit")),
             bf16=bf16, fp16=not bf16, logging_steps=5, save_strategy="no", report_to=[])

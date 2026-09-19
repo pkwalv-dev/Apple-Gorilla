@@ -65,6 +65,15 @@ _DEFAULT_TRUST = 0.65
 # between an agent that learns about itself and one that can be told who it is.
 _SELF_WRITE_ORIGINS = frozenset({Origin.OBSERVED, Origin.USER})
 
+# How much of an exchange an episode keeps. Sized against the fine-tuning window
+# (~768 tokens ≈ 2800 characters for a prompt+answer pair): keeping much more would
+# cost storage for text the tokenizer would cut anyway, and keeping much less — the
+# old 400-character cap — silently clipped most answers mid-sentence, which then
+# trained the model to do the same. Anything cut is flagged; see record_episode.
+_EPISODE_Q_CHARS = 1200
+_EPISODE_A_CHARS = 3000
+LEGACY_EPISODE_CHARS = 400  # the old cap, for spotting clipped records already stored
+
 _WORD_MIN = 2
 
 
@@ -283,9 +292,18 @@ class MemoryManager:
         """Log one exchange as episodic memory — the raw experience reflection learns
         from. Importance is seeded from the run's score when available. An episode is a
         faithful record that this exchange HAPPENED, which is why it is stored at
-        observed-grade confidence even though its content may be anything at all."""
-        text = f"Q: {(prompt or '').strip()[:400]}\nA: {(answer or '').strip()[:400]}"
+        observed-grade confidence even though its content may be anything at all.
+
+        An episode that had to be cut is flagged. A clipped answer is still a usable
+        record of what was asked and roughly what came back, but it is NOT a usable
+        training target — fine-tuning on one teaches the model to stop mid-sentence —
+        so the flag lets ag.lora refuse it while recall keeps it."""
+        q, a = (prompt or "").strip(), (answer or "").strip()
+        truncated = len(q) > _EPISODE_Q_CHARS or len(a) > _EPISODE_A_CHARS
+        text = f"Q: {q[:_EPISODE_Q_CHARS]}\nA: {a[:_EPISODE_A_CHARS]}"
         m = dict(meta or {})
+        if truncated:
+            m["truncated"] = True
         if score is not None:
             m["score"] = score
         imp = 0.4 if score is None else _clamp01(0.2 + 0.06 * float(score))

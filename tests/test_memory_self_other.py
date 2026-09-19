@@ -25,6 +25,17 @@ def test_subject_classification():
     assert guess_subject("You cannot read local files.") == Subject.SELF
 
 
+def test_first_person_self_denial_is_a_claim_about_ag():
+    """How AG describes itself in its OWN answers — the form that reaches memory as an
+    episode and, unfiltered, became training data teaching it to refuse."""
+    assert guess_subject("No, I cannot open PDFs directly.") == Subject.SELF
+    assert guess_subject("I lack the capability to render PDF files.") == Subject.SELF
+    assert guess_subject("My tools only support reading plain text.") == Subject.SELF
+    # ...without dragging in ordinary statements about the world or the user.
+    assert guess_subject("The deploy key rotates on Fridays.") == Subject.WORLD
+    assert guess_subject("User cannot attend on Tuesday.") == Subject.USER
+
+
 def test_identity_claims_are_a_narrower_set_than_self_claims():
     """Not everything about AG is an identity claim — that distinction is the whole
     point, because the old blocklist could not make it."""
@@ -217,6 +228,69 @@ def test_only_believed_procedures_reach_the_lora_dataset(tmp_path, monkeypatch):
     memory.reset()
 
 
+def _lora_env(tmp_path, monkeypatch):
+    from ag import config as cfgmod
+    from ag.memory import manager as mgrmod
+    monkeypatch.setattr(cfgmod, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(mgrmod, "get_embedder", lambda cfg=None, **k: HashingEmbedder())
+    memory.reset()
+    return memory.get_manager("root")
+
+
+def test_capability_denials_do_not_train(tmp_path, monkeypatch):
+    """The regression this whole filter exists for: AG answered "I cannot open PDFs"
+    because no PDF skill existed, and that answer was being fine-tuned into the weights
+    as a disposition to refuse. The fix for the missing capability is a skill."""
+    from ag import config as cfgmod, lora
+    m = _lora_env(tmp_path, monkeypatch)
+    m.record_episode("Can you open a pdf?",
+                     "No, I cannot open PDFs directly. I lack the capability to render "
+                     "or interact with PDF files. My tools only support plain text.",
+                     score=9.0)
+    m.record_episode("How should I structure a retry loop?",
+                     "Back off exponentially with jitter, cap the total wait, and give "
+                     "up on errors that will never succeed on a retry.", score=9.0)
+    instructions = [p["instruction"] for p in lora._pairs_from_memory(cfgmod.Config())]
+    assert "Can you open a pdf?" not in instructions
+    assert "How should I structure a retry loop?" in instructions
+    memory.reset()
+
+
+def test_clipped_episodes_do_not_train(tmp_path, monkeypatch):
+    """A cut answer teaches the model to stop mid-sentence, so it is flagged where it
+    is stored and refused where it would be trained."""
+    from ag import config as cfgmod, lora
+    from ag.memory.manager import _EPISODE_A_CHARS
+    m = _lora_env(tmp_path, monkeypatch)
+    long_answer = "Break the migration into reversible steps. " * 200
+    ep = m.record_episode("How do I migrate the schema?", long_answer, score=9.0)
+    assert ep.meta.get("truncated") is True
+    assert len(long_answer) > _EPISODE_A_CHARS
+    assert lora._pairs_from_memory(cfgmod.Config()) == []
+    memory.reset()
+
+
+def test_legacy_400_char_episodes_do_not_train(tmp_path, monkeypatch):
+    """Episodes stored under the old cap carry no flag, so the cap itself is the tell."""
+    from ag import config as cfgmod, lora
+    from ag.memory.manager import LEGACY_EPISODE_CHARS
+    m = _lora_env(tmp_path, monkeypatch)
+    clipped = "x" * LEGACY_EPISODE_CHARS
+    m.store.add(Memory(id="legacy-ep", text=f"Q: an old question\nA: {clipped}",
+                       kind=MemoryKind.EPISODIC, agent="root",
+                       meta={"score": 9.0}))
+    assert lora._pairs_from_memory(cfgmod.Config()) == []
+    memory.reset()
+
+
+def test_threadbare_exchanges_do_not_train(tmp_path, monkeypatch):
+    from ag import config as cfgmod, lora
+    m = _lora_env(tmp_path, monkeypatch)
+    m.record_episode("What do you know?", "Well, what do you know!", score=9.0)
+    assert lora._pairs_from_memory(cfgmod.Config()) == []
+    memory.reset()
+
+
 def test_web_backed_episodes_do_not_train(tmp_path, monkeypatch):
     from ag import config as cfgmod
     from ag import lora
@@ -225,9 +299,12 @@ def test_web_backed_episodes_do_not_train(tmp_path, monkeypatch):
     monkeypatch.setattr(mgrmod, "get_embedder", lambda cfg=None, **k: HashingEmbedder())
     memory.reset()
     m = memory.get_manager("root")
-    m.record_episode("who won in 1998", "France", score=9.0,
-                     meta={"web_sources": ["sports.example"]})
-    m.record_episode("what is 12*13", "156", score=9.0)
+    m.record_episode("who won in 1998",
+                     "France won, beating Brazil 3-0 in the final held in Paris.",
+                     score=9.0, meta={"web_sources": ["sports.example"]})
+    m.record_episode("what is 12*13",
+                     "156. Reach for the calc tool on anything past mental arithmetic, "
+                     "so the answer is computed rather than recalled.", score=9.0)
     instructions = [p["instruction"] for p in lora._pairs_from_memory(cfgmod.Config())]
     assert "what is 12*13" in instructions
     assert "who won in 1998" not in instructions
