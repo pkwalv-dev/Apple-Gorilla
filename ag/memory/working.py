@@ -31,6 +31,7 @@ cannot write a false belief into the durable store.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from dataclasses import asdict, dataclass, field
@@ -99,8 +100,15 @@ class WorkingMemory:
 
 
 # --- session identity -------------------------------------------------------
+_COUNTER = itertools.count()
+
+
 def new_session_id() -> str:
-    return time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    """A sortable, unique session id. The process-wide counter is the tiebreaker: two
+    ids minted in the same millisecond (a fast test, or a rapid rotate) must still
+    differ, or a rotated session collides with the one it replaced."""
+    return (time.strftime("%Y%m%d-%H%M%S")
+            + f"-{int(time.time() * 1000) % 1000:03d}-{next(_COUNTER) % 1000:03d}")
 
 
 def _safe(session_id: str) -> str:
