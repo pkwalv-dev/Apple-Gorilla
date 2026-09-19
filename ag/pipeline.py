@@ -30,6 +30,10 @@ class RunRecord:
     output_tokens: int = 0
     run_id: str = ""
     scorecard: dict = field(default_factory=dict)  # speed (measured); accuracy/quality unscored
+    # Which untrusted sources this answer leaned on. Carried out of the run so memory
+    # capture can tell "the user told me this" from "a web page told me this" — the
+    # taint is invisible by the time you are only looking at the finished answer.
+    web_sources: List[str] = field(default_factory=list)
 
 
 def _emit(emit, stage: str, msg: str, level: str = "info", **data) -> None:
@@ -83,7 +87,8 @@ def format_history(history, *, max_turns: int = 12, max_chars: int = 4000) -> st
 
 
 def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
-                   *, conversation: str = "", emit=None) -> list:
+                   *, conversation: str = "", emit=None,
+                   web_sources: Optional[List[str]] = None) -> list:
     """Distill durable facts from a finished exchange and store them (best-effort).
 
     This is what lets long-term memory actually FILL from normal use, so future
@@ -95,10 +100,11 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
         return []
     try:
         from . import memory
-        # Never store self-referential exchanges: AG's identity/capabilities are set by
-        # the system prompt, and a captured (often stale/wrong) self-description would be
-        # recalled later and override it. See memory.is_self_reference.
-        if memory.is_self_reference(raw_prompt) or memory.is_self_reference(answer):
+        # An identity question has nothing durable in it, and its answer is exactly the
+        # self-description that must never be stored, so skip the exchange outright.
+        # Everything else is distilled normally — memory's own write gate decides what
+        # may be kept about AG, which is finer-grained than dropping the whole exchange.
+        if memory.is_identity_claim(raw_prompt):
             return []
         user = (
             (f"# Earlier context\n{conversation}\n\n" if conversation else "")
@@ -107,12 +113,26 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
         res = client.complete(system=prompts.MEMORY_DISTILLER_SYSTEM, user=user,
                               cfg=cfg, max_tokens=400)
         data = extract_json(res.text) or {}
-        facts = [str(f).strip() for f in (data.get("facts") or []) if str(f).strip()]
         saved = []
-        for f in facts[:3]:
-            m = memory.remember(f, max_memories=cfg.max_memories)
+        sources = list(web_sources or [])
+        for item in (data.get("facts") or [])[:3]:
+            text, origin, volatile = _unpack_fact(item)
+            if not text:
+                continue
+            # What the user stated is testimony; what the distiller worked out is a
+            # guess. Storing them at the same confidence is how an agent ends up
+            # certain about something nobody ever said.
+            asserter = ""
+            if sources and origin != memory.Origin.USER:
+                # The answer leaned on untrusted pages, and anything NOT traceable to
+                # the user's own words is really that page talking. Attribute it, so it
+                # enters as a hypothesis credited to a named site rather than as a fact
+                # AG appears to have worked out for itself.
+                origin, asserter = memory.Origin.WEB, sources[0]
+            m = memory.remember(text, max_memories=cfg.max_memories,
+                                origin=origin, volatile=volatile, asserter=asserter)
             if m is not None:
-                saved.append(f)
+                saved.append(text)
         if saved:
             _emit(emit, "memory",
                   f"saved {len(saved)} durable fact(s) to long-term memory",
@@ -122,7 +142,11 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
         # and reusable procedures. This is what turns remembering into learning.
         try:
             mgr = memory.get_manager("root", cfg=cfg)
-            mgr.record_episode(raw_prompt, answer)
+            # Record where the answer came from. An answer built on web pages is a fine
+            # record of what happened, but a poor thing to fine-tune weights on — see
+            # ag.lora._pairs_from_memory, which reads this flag.
+            mgr.record_episode(raw_prompt, answer,
+                               meta={"web_sources": sources} if sources else None)
             if getattr(cfg, "memory_reflect", True):
                 every = max(1, int(getattr(cfg, "memory_reflect_every", 10)))
                 n_ep = len(mgr.store.all("root", [memory.MemoryKind.EPISODIC]))
@@ -134,6 +158,44 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
     except Exception as e:
         _emit(emit, "memory", f"memory capture skipped: {e}", level="info")
         return []
+
+
+def _web_sources(web_ctx: str) -> List[str]:
+    """The domains behind a gathered web context block, in order of use.
+
+    Domains rather than full URLs: the domain is the unit of independence that memory
+    reasons about (two pages on one site are one witness, two sites are two)."""
+    import re
+    from urllib.parse import urlparse
+    out: List[str] = []
+    for url in re.findall(r"^URL:\s*(\S+)", web_ctx or "", re.MULTILINE):
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            continue
+        if host.startswith("www."):
+            host = host[4:]
+        if host and host not in out:
+            out.append(host)
+    return out
+
+
+def _unpack_fact(item):
+    """Read one distilled fact as (text, origin, volatile).
+
+    Accepts the bare string the distiller used to return as well as the richer object,
+    so an older/weaker model degrades to the middling "distilled" prior instead of
+    losing the fact or, worse, being trusted as if the user had said it."""
+    from .memory import Origin
+    if isinstance(item, dict):
+        text = str(item.get("fact") or item.get("text") or "").strip()
+        basis = str(item.get("basis", "")).strip().lower()
+        origin = (Origin.USER if basis == "stated"
+                  else Origin.INFERENCE if basis == "inferred"
+                  else Origin.DISTILLED)
+        vol = item.get("volatile")
+        return text, origin, (None if vol is None else bool(vol))
+    return str(item or "").strip(), Origin.DISTILLED, None
 
 
 def optimize(client, cfg: Config, raw_prompt: str,
@@ -272,14 +334,21 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         )
     if cfg.use_memory:
         from . import memory
-        mem_ctx = memory.memory_context(raw_prompt, k=5)
+        mem = memory.context(raw_prompt, k=5)
+        mem_ctx = mem["text"]
         if mem_ctx:
-            exec_sys = (f"{exec_sys}\n\n# Relevant memory (durable facts AG has "
-                        f"retained about this user/context)\n{mem_ctx}")
-            facts = [ln[2:] if ln.startswith("- ") else ln
-                     for ln in mem_ctx.splitlines() if ln.strip()]
+            # Memory is injected WITH its standing: what AG actually has grounds to
+            # believe, kept apart from what it has merely been told once. The executor
+            # must never have to guess which lines it can reason from.
+            exec_sys = (f"{exec_sys}\n\n# Relevant memory (what AG has retained about "
+                        f"this user/context; believe it in proportion to its stated "
+                        f"standing, and prefer what the user says now over any of it)"
+                        f"\n{mem_ctx}")
+            facts = mem["known"] + mem["reported"]
+            n_rep = len(mem["reported"])
+            note = f" ({n_rep} unconfirmed)" if n_rep else ""
             _emit(emit, "memory",
-                  f"recalled {len(facts)} fact(s) from earlier", level="tool",
+                  f"recalled {len(facts)} fact(s) from earlier{note}", level="tool",
                   facts=facts)
 
     # With local tools enabled, run the reason→act→observe loop so AG can compute,
@@ -327,6 +396,7 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         output_tokens=total_out,
         run_id=time.strftime("%Y%m%d-%H%M%S"),
         scorecard=card.as_dict(),
+        web_sources=_web_sources(web_ctx),
     )
     _persist(rec)
     _prune_runs(cfg.max_runs)

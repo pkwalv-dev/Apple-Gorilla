@@ -70,7 +70,8 @@ def cmd_run(args) -> int:
     # Fill long-term memory from normal CLI use too (best-effort, gated by auto_memory).
     try:
         from .pipeline import capture_memory
-        saved = capture_memory(client, cfg, args.prompt, rec.answer, emit=trace)
+        saved = capture_memory(client, cfg, args.prompt, rec.answer, emit=trace,
+                               web_sources=rec.web_sources)
         if saved and args.verbose:
             print(f"[memory] saved {len(saved)} durable fact(s)", file=sys.stderr)
     except Exception:
@@ -402,22 +403,61 @@ def cmd_login(args) -> int:
     return 0
 
 
+def _standing(mgr, m) -> str:
+    """How well-founded a memory is, in one trailing tag — so the list never reads as a
+    flat wall of equally-true statements."""
+    b = mgr.belief(m)
+    via = f"{m.origin}:{m.asserter}" if m.asserter else m.origin
+    about = " about:self" if m.subject == "self" else ""
+    if m.disputed:
+        return f"  (DISPUTED, {b:.2f}, via {via}{about})"
+    if b < mgr.trust_threshold:
+        stale = " stale," if m.volatile and m.confidence > b + 0.05 else ""
+        return f"  (unconfirmed,{stale} {b:.2f}, via {via}{about})"
+    return f"  ({b:.2f}, via {via}{about})"
+
+
 def cmd_memory(args) -> int:
     from . import memory
     if args.action == "add":
         m = memory.remember(args.text or "", max_memories=Config.load().max_memories)
         print(f"remembered: {m.text}" if m else "nothing to remember")
     elif args.action == "recall":
+        mgr = memory.get_manager("root")
         hits = memory.recall(args.text or "", k=args.k)
         if not hits:
             print("(no relevant memories)")
         for m in hits:
-            print(f"- {m.text}")
+            print(f"- {m.text}{_standing(mgr, m)}")
     elif args.action == "list":
+        mgr = memory.get_manager("root")
         mems = memory.all_memories()
         print(f"{len(mems)} memory item(s):")
         for m in mems:
-            print(f"  [{m.kind[:4]}] [{m.id}] {m.text}")
+            print(f"  [{m.kind[:4]}] [{m.id}] {m.text}{_standing(mgr, m)}")
+    elif args.action == "disputed":
+        # AG does not quietly pick a winner between two stable claims that cannot both
+        # be true; it holds both in doubt and shows them here to be settled.
+        items = memory.disputed()
+        print(f"{len(items)} disputed memor(y/ies):" if items
+              else "(nothing disputed)")
+        for m in items:
+            other = m.meta.get("contradicts", "?")
+            print(f"  [{m.id}] {m.text}\n      contradicts [{other}]")
+    elif args.action == "stale":
+        items = memory.needs_verification(k=args.k)
+        print(f"{len(items)} belief(s) due a re-check:" if items
+              else "(nothing stale)")
+        mgr = memory.get_manager("root")
+        for m in items:
+            print(f"  [{m.id}] {m.text}{_standing(mgr, m)}")
+    elif args.action == "verify":
+        m = memory.verify(args.text or "", confirmed=not args.reject)
+        if m is None:
+            print("no such memory")
+        else:
+            print(f"{'rejected' if args.reject else 'confirmed'}: {m.text} "
+                  f"(confidence {m.confidence:.2f})")
     elif args.action == "clear":
         print(f"cleared {memory.clear()} memory item(s)")
     elif args.action == "stats":
@@ -704,10 +744,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ollama host URL (default http://127.0.0.1:11434)")
     so.set_defaults(func=cmd_setup_ollama)
 
-    mem = sub.add_parser("memory", help="AG's layered memory (add/recall/list/clear/stats/reflect)")
-    mem.add_argument("action", choices=["add", "recall", "list", "clear", "stats", "reflect"])
-    mem.add_argument("text", nargs="?", default="", help="fact to add, or recall query")
-    mem.add_argument("-k", type=int, default=5, help="recall: max items")
+    mem = sub.add_parser("memory", help="AG's layered memory (add/recall/list/clear/"
+                                        "stats/reflect/disputed/stale/verify)")
+    mem.add_argument("action", choices=["add", "recall", "list", "clear", "stats",
+                                        "reflect", "disputed", "stale", "verify"])
+    mem.add_argument("text", nargs="?", default="",
+                     help="fact to add, recall query, or memory id to verify")
+    mem.add_argument("-k", type=int, default=5, help="recall/stale: max items")
+    mem.add_argument("--reject", action="store_true",
+                     help="verify: mark the claim false instead of confirming it")
     mem.set_defaults(func=cmd_memory)
 
     sk = sub.add_parser("skills", help="acquired skills (list/enable/disable/remove)")

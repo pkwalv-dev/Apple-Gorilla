@@ -95,8 +95,18 @@ When in doubt, save nothing — a wrong or noisy memory is worse than none.
 Write each fact as a short, self-contained third-person statement (e.g.
 "User prefers metric units", "User is building a Rust game engine called Bolt").
 
+For each fact also report HOW YOU KNOW IT — this sets how much AG will believe it:
+- "basis": "stated" if the user said it themselves (directly or plainly implied by
+  their own words), or "inferred" if you concluded it from how the exchange went.
+  Be strict: if you are generalizing, guessing, or reading between the lines, it is
+  "inferred". A wrong "stated" makes AG confidently wrong later.
+- "volatile": true if this can change without anyone mentioning it (where they live,
+  what they are working on right now, which version they use); false for things that
+  are stable (who they are, a long-standing preference).
+
 Return ONLY a JSON object:
-{"facts": ["<durable fact>", ...]}
+{"facts": [{"fact": "<durable fact>", "basis": "stated"|"inferred",
+            "volatile": true|false}, ...]}
 Return {"facts": []} when nothing durable is present. Never return more than 3.
 """
 
@@ -152,9 +162,20 @@ generalizable lesson, skip it. Do NOT restate a single episode as a "fact"; only
 what generalizes across the batch. Never record anything sensitive (health, finances,
 credentials, private identifiers, other named people).
 
+CITE YOUR EVIDENCE. Every item must list "from": the indices of the episodes it is
+actually drawn from. This is what lets AG trace a belief back to what supports it and
+re-check it later; an uncited item is stored with no provenance at all. Cite only
+episodes that genuinely support the item — never pad the list.
+
+Everything you produce here is an INFERENCE, and AG will store it as an unconfirmed
+hypothesis until something independent corroborates it. So propose freely, but do not
+phrase a guess as if it were established.
+
 Return ONLY a JSON object:
-{"facts": ["<durable generalization>", ...],
- "procedures": [{"name": "...", "when": "...", "steps": ["...", "..."]}, ...]}
+{"facts": [{"fact": "<durable generalization>", "from": [<episode indices>],
+            "volatile": true|false}, ...],
+ "procedures": [{"name": "...", "when": "...", "steps": ["...", "..."],
+                 "from": [<episode indices>]}, ...]}
 Return empty lists when nothing generalizes. Facts <= 8, procedures <= 5.
 """
 
