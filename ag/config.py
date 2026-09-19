@@ -216,6 +216,13 @@ class Config:
     memory_inject_max_reported: int = 2          # max unconfirmed hypotheses auto-injected
     memory_inject_min_relevance: float = 0.55    # auto-inject only topically-relevant memory
                                                  # (shared word, or semantic cosine >= this)
+    # --- Working memory (A3): per-session buffer for conversational coherence -----
+    # Summary + verbatim recent turns + a pinned decision ledger, scoped to one session
+    # and kept structurally apart from the durable store (see ag/memory/working.py).
+    working_memory: bool = True                  # use the per-session working buffer
+    working_recent_turns: int = 6               # verbatim exchanges kept in the tail
+    working_summary_chars: int = 700            # rendered rolling-summary budget
+    working_idle_reset_min: int = 45            # CLI: silence longer than this -> new session
     max_snapshots: int = 20                    # cap on kept source snapshots
     max_runs: int = 100                        # cap on kept run telemetry logs
     evolve_branch: str = "ag/evolve"           # AG's self-commits land here, never main

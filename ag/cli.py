@@ -63,15 +63,28 @@ def cmd_run(args) -> int:
     trace = None
     if args.verbose:
         def trace(ev):  # surface tool/memory/web activity live on stderr
-            if ev.get("stage") in ("reason", "memory", "web") or ev.get("level") == "error":
+            if ev.get("stage") in ("reason", "memory", "web", "conversation") or ev.get("level") == "error":
                 print(f"[{ev['stage']}] {ev['msg']}", file=sys.stderr)
+    # Resolve which conversation this CLI run belongs to: consecutive `ag run`s chain
+    # into one working session, and a long silence starts a fresh one.
+    session_id = ""
+    if getattr(cfg, "working_memory", True):
+        try:
+            from .memory import working
+            session_id = working.resolve_session(
+                getattr(args, "session", "") or None,
+                idle_reset_min=getattr(cfg, "working_idle_reset_min", 45))
+        except Exception:
+            session_id = ""
     rec = run_pipeline(client, cfg, args.prompt, verbose=args.verbose,
-                       web=web_effective, broker=broker, emit=trace)
-    # Fill long-term memory from normal CLI use too (best-effort, gated by auto_memory).
+                       web=web_effective, broker=broker, emit=trace,
+                       session_id=session_id)
+    # Fill long-term memory from normal CLI use too (best-effort, gated by auto_memory),
+    # and advance the working buffer so the next `ag run` remembers this turn.
     try:
         from .pipeline import capture_memory
         saved = capture_memory(client, cfg, args.prompt, rec.answer, emit=trace,
-                               web_sources=rec.web_sources)
+                               session_id=session_id, web_sources=rec.web_sources)
         if saved and args.verbose:
             print(f"[memory] saved {len(saved)} durable fact(s)", file=sys.stderr)
     except Exception:
@@ -732,6 +745,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tools", action="store_true",
                    help="enable local tools (calc/file-read/python-exec/memory) + "
                         "the reasoning loop for this run")
+    r.add_argument("--session", default="",
+                   help="pin this run to a named working-memory session (default: "
+                        "continue the recent one, or start fresh after a long gap)")
     r.set_defaults(func=cmd_run)
 
     e = sub.add_parser("evolve",

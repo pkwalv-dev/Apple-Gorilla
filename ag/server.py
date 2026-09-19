@@ -378,6 +378,15 @@ function setStage(ai,ev){
 }
 function stopActivity(ai){ if(ai&&ai._timer){clearInterval(ai._timer); ai._timer=null;} }
 
+/* ---- per-tab working-memory session id ------------------------------- */
+const AG_SESSION=(function(){
+  try{let s=sessionStorage.getItem('ag_session');
+    if(!s){s='web-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
+      sessionStorage.setItem('ag_session',s);}
+    return s;
+  }catch(e){return 'web-'+Date.now().toString(36);}
+})();
+
 /* ---- context-in-use indicator ---------------------------------------- */
 let curCtx={history:0,profile:false,memory:[],saved:[],web:0,skills:0};
 function resetContext(){
@@ -388,9 +397,9 @@ function resetContext(){
 }
 function applyContext(ev,ai){
   if(ev.stage==='conversation'){
-    const m=/(\\d+)\\s+earlier/.exec(ev.msg||''); const n=m?+m[1]:0;
-    curCtx.history=n; $('chip-history').classList.add('active');
-    $('cc-history').textContent=n||'';
+    const m=/(\\d+)/.exec(ev.msg||''); const n=m?+m[1]:0;
+    curCtx.history=n||curCtx.history; $('chip-history').classList.add('active');
+    $('cc-history').textContent=(ev.data&&ev.data.turns)||n||'';
   }
   if(ev.stage==='optimize' && (/(profile)/i.test(ev.msg||'') || (ev.data&&ev.data.uses_profile))){
     curCtx.profile=true; $('chip-profile').classList.add('active');
@@ -459,7 +468,7 @@ async function go(){
       signal:ctrl.signal,
       body:JSON.stringify(Object.assign(ctlPayload(),
         {prompt:p,history:hist,model:($('model')?$('model').value:''),
-         run_id:runId}))});
+         run_id:runId,session_id:AG_SESSION}))});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done)break;
@@ -1718,11 +1727,13 @@ class _Handler(BaseHTTPRequestHandler):
         model = str(payload.get("model", "")).strip()[:100]
         verbose = bool(payload.get("verbose", False))
         run_id = str(payload.get("run_id", ""))[:64]
+        session_id = str(payload.get("session_id", ""))[:80]
         # Every declared run control, validated and reduced to the Config fields it
         # changes for this run only. A key that isn't sent keeps the standing config
         # value, so an older client or a bare `{"prompt": ...}` behaves as before.
         from . import controls
         self._stream_run(prompt, history, model, verbose, run_id,
+                         session_id=session_id,
                          overrides=controls.overrides_for(payload))
 
     def _ndjson_writer(self):
@@ -1961,7 +1972,7 @@ class _Handler(BaseHTTPRequestHandler):
         return {}
 
     def _stream_run(self, prompt: str, history=None, model="", verbose=False,
-                    run_id="", *, overrides=None):
+                    run_id="", *, session_id="", overrides=None):
         """Run the pipeline, streaming each stage event as one NDJSON line.
 
         `overrides` is the set of Config fields this request changes, already validated
@@ -1983,6 +1994,14 @@ class _Handler(BaseHTTPRequestHandler):
         cfg = dataclasses.replace(self.cfg, **merged)
         web_eff = bool(cfg.allow_web)
         broker = _build_broker(cfg, web=web_eff)
+        # Normalize the session id (a per-tab id from the client) so this run's working
+        # memory loads and saves under one key; empty falls back to a raw transcript.
+        if session_id and getattr(cfg, "working_memory", True):
+            try:
+                from .memory import working
+                session_id = working.resolve_session(session_id)
+            except Exception:
+                pass
 
         # A Canceller lets /stop close the upstream model connection at any point (even
         # during prompt-eval), so Stop is prompt and reliable — not only once tokens flow.
@@ -2011,7 +2030,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             client = make_client(cfg)
             rec = run_pipeline(client, cfg, prompt, web=web_eff, broker=broker,
-                               emit=write, history=history,
+                               emit=write, history=history, session_id=session_id,
                                on_delta=on_delta, cancel=canceller)
             write({"stage": "done", "level": "result", "msg": "done", "data": {
                 "answer": rec.answer, "scorecard": rec.scorecard,
@@ -2023,7 +2042,8 @@ class _Handler(BaseHTTPRequestHandler):
                 convo = format_history(history,
                                        max_turns=getattr(cfg, "max_history_turns", 12))
                 capture_memory(client, cfg, prompt, rec.answer,
-                               conversation=convo, emit=write,
+                               conversation=convo, session_id=session_id,
+                               history=history, emit=write,
                                web_sources=rec.web_sources)
             except Exception:
                 pass
