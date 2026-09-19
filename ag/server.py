@@ -96,8 +96,9 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <!-- ================= CHAT ================= -->
 <div class="tabpane active" id="pane-chat">
 
-<!-- Scrolls independently so the input below stays pinned and never slides off-screen
-     while an answer streams. -->
+<!-- Row: the message column scrolls independently, the reasoning sidebar streams the
+     model's thoughts and tool/trace in parallel, and the input below stays pinned. -->
+<div id="chatmain">
 <div id="chatscroll">
 <!-- context bar: lights up to show which sources feed the CURRENT answer -->
 <div id="ctxbar" title="What AG is drawing on for the current answer — each lights up as it is used">
@@ -120,10 +121,14 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <div class="card"><div class="n" id="spd">–</div><div class="l">speed (measured)</div>
     <div class="bar"><i id="spdb"></i></div></div>
 </div>
-
-<h2>Live trace · thoughts · tool &amp; internet calls · errors</h2>
-<div class="panel" style="padding:8px"><div id="log"></div></div>
 </div><!-- /chatscroll -->
+
+<aside id="reasonbar">
+  <div class="rb-head">Reasoning &amp; trace</div>
+  <pre id="reasonstream" title="the model's live reasoning (enable 'show reasoning')"></pre>
+  <div id="log"></div>
+</aside>
+</div><!-- /chatmain -->
 
 <div class="panel" id="inputpanel">
   <textarea id="p" placeholder="Ask Apple-Gorilla anything…  (Ctrl+Enter to send)"></textarea>
@@ -137,6 +142,15 @@ table.hist td.rat{color:#8b949e;font-style:italic}
     <span class="ctl-right">
 __CONTROLS__
     </span>
+    <!-- Extended controls, tucked to the side. Specific model selection here OVERRIDES
+         the automatic primary/specialist routing for a run. -->
+    <details class="advanced">
+      <summary title="model override and other advanced controls">Advanced</summary>
+      <div class="adv-body">
+__MODEL_PICKER__
+        <span class="adv-note">picking a model overrides automatic routing for this run</span>
+      </div>
+    </details>
   </div>
 </div>
 </div><!-- /pane-chat -->
@@ -339,15 +353,26 @@ function ctxFooter(c){
   }
   return h;
 }
-function bubble(m){
+// Per-answer actions: rate (teaches the routing doc), regenerate, and copy a distilled
+// prompt for Claude. prompt+model travel on the row so the handlers can attribute.
+function aiActions(prompt,model){
+  const dp=escapeHtml(prompt||''), dm=escapeHtml(model||'');
+  return '<div class="airow" data-prompt="'+dp+'" data-model="'+dm+'">'
+    +'<button class="ico" title="good answer" onclick="rate(this,&#39;rating_up&#39;)">&#128077;</button>'
+    +'<button class="ico" title="poor answer" onclick="rate(this,&#39;rating_down&#39;)">&#128078;</button>'
+    +'<button class="ico" title="regenerate this answer" onclick="regen(this)">&#8635;</button>'
+    +'<button class="ico wide" title="copy a distilled prompt to paste into Claude" onclick="toClaude(this)">Claude &#10697;</button>'
+    +'</div>';
+}
+function bubble(m,prev){
   const who=m.role==='user'?'you':'apple-gorilla';
   const t=m.ts?'<span class="ts">'+escapeHtml(m.ts)+'</span>':'';
   return '<div class="msg '+m.role+'"><div class="who">'+who+t+'</div>'
     +'<div class="body">'+escapeHtml(m.text)+'</div>'
-    +(m.role==='ai'?ctxFooter(m.ctx):'')+'</div>';
+    +(m.role==='ai'?ctxFooter(m.ctx)+aiActions(prev,(m.ctx&&m.ctx.model)||''):'')+'</div>';
 }
 function renderChat(){
-  $('chat').innerHTML=CHAT.map(bubble).join('');
+  $('chat').innerHTML=CHAT.map((m,i)=>bubble(m, i>0?CHAT[i-1].text:'')).join('');
   scrollChat(true);
 }
 function appendUser(text){
@@ -361,8 +386,6 @@ function appendAssistant(){
   el.innerHTML='<div class="who">apple-gorilla<span class="ts">'+nowStr()+'</span></div>'
     +'<div class="body pending"><span class="act-stage">…starting</span>'
     +'<span class="act-timer"></span></div>'
-    +'<details class="verbose" hidden><summary>reasoning &amp; live output</summary>'
-    +'<pre class="vbody"></pre></details>'
     +'<div class="live-ctx"></div>';
   $('chat').appendChild(el); scrollChat(true);
   return el;
@@ -466,6 +489,7 @@ async function go(){
   const p=$('p').value.trim(); if(!p)return;
   setRunning(true); $('status').textContent='running…';
   $('log').innerHTML=''; $('cards').style.display='none';
+  if($('reasonstream')) $('reasonstream').textContent='';
   ['spd'].forEach(x=>setCard(x,null));
   // prior turns become AG's working memory (the current prompt is sent separately)
   const hist=CHAT.slice(-20).map(m=>({role:m.role,text:m.text}));
@@ -513,12 +537,10 @@ async function go(){
   CURRENT_ABORT=null; CURRENT_RUNID=null; setRunning(false);
 }
 function handle(ev,ai){
-  if(ev.stage==='delta'){   // live streamed model output (verbose mode)
-    const det=ai.querySelector('.verbose');
-    if(det){ det.hidden=false; det.open=true;
-      const pre=det.querySelector('.vbody');
-      if(pre){ pre.textContent+=((ev.data&&ev.data.text)||''); } }
-    scrollChat(); return;
+  if(ev.stage==='delta'){   // live streamed model reasoning -> the sidebar, in parallel
+    const rs=$('reasonstream');
+    if(rs){ rs.textContent+=((ev.data&&ev.data.text)||''); rs.scrollTop=rs.scrollHeight; }
+    return;
   }
   if(ev.stage==='progress'){ return; }   // heartbeat only (keeps Stop responsive)
   if(ev.stage==='error'){   // terminal pipeline error — make it visible, don't hang
@@ -537,7 +559,8 @@ function handle(ev,ai){
     const ctx={history:curCtx.history,profile:curCtx.profile,memory:curCtx.memory,
                web:curCtx.web,saved:curCtx.saved,model:d.model_used||'',
                overall:(sc.overall!=null?sc.overall:null)};
-    ai.insertAdjacentHTML('beforeend',ctxFooter(ctx));
+    const prevPrompt=CHAT.length?CHAT[CHAT.length-1].text:'';
+    ai.insertAdjacentHTML('beforeend',ctxFooter(ctx)+aiActions(prevPrompt,ctx.model));
     const entry={role:'ai',text:d.answer||'(no answer)',ctx:ctx,ts:nowStr()};
     CHAT.push(entry); ai._entry=entry; ai._committed=true; saveChat();
     scrollChat();
@@ -1124,6 +1147,40 @@ function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
   if($('evogithub')) $('evogithub').checked=(v==='1'); }catch(e){}
   if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
 
+// Per-answer actions. Rating and escalation feed AG's model-routing doc; regenerate
+// re-asks. prompt+model ride on the .airow so each handler can attribute correctly.
+function _rowData(btn){ const r=btn.closest('.airow');
+  return r?{row:r,prompt:r.getAttribute('data-prompt')||'',model:r.getAttribute('data-model')||''}:null; }
+function _sendRate(prompt,model,signal){
+  fetch('/rate',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({prompt:prompt,model:model,signal:signal})}).catch(()=>{}); }
+function rate(btn,signal){ const d=_rowData(btn); if(!d) return;
+  _sendRate(d.prompt,d.model,signal);
+  // 👍 and 👎 are the first two icons; make them mutually exclusive and mark the choice.
+  const icos=d.row.querySelectorAll('.ico');
+  if(icos[0]) icos[0].classList.remove('on');
+  if(icos[1]) icos[1].classList.remove('on');
+  btn.classList.add('on'); }
+function regen(btn){ const d=_rowData(btn); if(!d||!d.prompt) return;
+  _sendRate(d.prompt,d.model,'rating_down');   // a regenerate = this wasn't good enough
+  $('p').value=d.prompt; go(); }
+function toClaude(btn){ const d=_rowData(btn); if(!d) return;
+  const msg=btn.closest('.msg'); const bodyEl=msg?msg.querySelector('.body'):null;
+  const answer=bodyEl?bodyEl.textContent:'';
+  const distilled='I asked my local AI assistant a question and want your help solving it well.\\n\\n'
+    +'=== PROBLEM ===\\n'+d.prompt+'\\n\\n'
+    +'=== LOCAL ASSISTANT ('+(d.model||'local')+') ANSWERED ===\\n'+answer+'\\n\\n'
+    +'=== WHAT I NEED ===\\nGive a correct, complete solution. If the local answer is wrong '
+    +'or incomplete, fix it and explain what it missed.';
+  const done=()=>{ const o=btn.innerHTML; btn.textContent='copied \\u2713';
+    setTimeout(()=>{btn.innerHTML=o;},1500); };
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(distilled).then(done).catch(()=>{ btn.textContent='copy failed'; });
+  } else { try{ const t=document.createElement('textarea'); t.value=distilled;
+    document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); done();
+  }catch(e){ btn.textContent='copy failed'; } }
+  _sendRate(d.prompt,d.model,'escalated');   // escalating = the local model fell short
+}
 restoreCtls(); restoreEvoGithub(); restoreTab(); loadModels(); loadChat(); renderWhere(); renderEvoStatus(); loadAuth(); loadImageStatus();
 // Ctrl/Cmd+Enter sends from the chat box (a plain Enter still inserts a newline, so
 // multi-line prompts are easy to write).
@@ -1148,7 +1205,8 @@ def _render_page() -> str:
     return (_PAGE_TEMPLATE
             .replace("__FONTS__", theme.FONT_LINK)
             .replace("__THEME__", theme.THEME_CSS)
-            .replace("__CONTROLS__", controls.render_html(extra_before=_MODEL_PICKER))
+            .replace("__CONTROLS__", controls.render_html())
+            .replace("__MODEL_PICKER__", _MODEL_PICKER)
             .replace("__CONTROLS_JSON__", controls.spec_json())
             .replace("__VERSION__", __version__))
 
@@ -1646,6 +1704,31 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({
                     "ok": True, "path": res.path, "seconds": res.seconds,
                     "width": res.width, "height": res.height}), "application/json")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+            return
+        if self.path == "/rate":
+            # An honest learning signal from the UI: 👍/👎, a regenerate, or a Claude
+            # escalation. The doc credits the model that produced the answer for the
+            # task's tags. Never fabricates a score — it only records what the user did.
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            except Exception:
+                payload = {}
+            prompt = str(payload.get("prompt", ""))[:4000]
+            model = str(payload.get("model", ""))[:100]
+            signal = str(payload.get("signal", ""))
+            if signal not in ("rating_up", "rating_down", "escalated"):
+                self._send(200, json.dumps({"ok": False, "error": "bad signal"}),
+                           "application/json")
+                return
+            try:
+                from . import routing
+                role = routing.role_for_model(self.cfg, model)
+                routing.record(self.cfg, role, routing.tags_for(prompt), signal)
+                self._send(200, json.dumps({"ok": True}), "application/json")
             except Exception as e:
                 self._send(200, json.dumps({"ok": False, "error": str(e)}),
                            "application/json")
@@ -2165,17 +2248,17 @@ def _models_data(cfg: Config) -> dict:
             return False
         return True
 
-    abl, chat = cfg.ollama_model, getattr(cfg, "chat_model", "")
+    primary, spec = cfg.ollama_model, getattr(cfg, "specialist_model", "")
 
     def _label(m: str) -> str:
-        if m == abl:
-            return f"{m} · local · uncensored (abliterated)"
-        if m == chat:
-            return f"{m} · local · chat (instruct)"
+        if m == primary:
+            return f"{m} · local · primary"
+        if m == spec:
+            return f"{m} · local · specialist (abliterated)"
         return f"{m} · local"
 
     def _rank(m: str) -> int:
-        return 0 if m == abl else 1 if m == chat else 2
+        return 0 if m == primary else 1 if m == spec else 2
 
     kept = sorted((m for m in models if _keep(m)), key=lambda m: (_rank(m), m.lower()))
     # Local models first so the offline default is the obvious top choice; the cloud
