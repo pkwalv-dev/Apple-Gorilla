@@ -692,14 +692,22 @@ def _format_example(tokenizer, instruction: str, output: str, max_seq: int) -> d
     cut here, and the cut answer then becomes the training target — the model learns to
     stop mid-sentence. The caller drops anything marked incomplete rather than teaching
     it a truncated answer."""
+    # enable_thinking=False matters for Qwen3-family bases: their chat template defaults
+    # to a reasoning turn, and AG's dataset is instruction->answer with no <think>
+    # trace, so leaving it on would train the model to emit empty <think></think>
+    # blocks. It is an extra template variable other models simply ignore, so it is safe
+    # to pass unconditionally. Fall back to the plain form if a tokenizer rejects it.
+    def _tmpl(msgs, **kw):
+        try:
+            return tokenizer.apply_chat_template(msgs, tokenize=False,
+                                                 enable_thinking=False, **kw)
+        except TypeError:
+            return tokenizer.apply_chat_template(msgs, tokenize=False, **kw)
     try:
-        full = tokenizer.apply_chat_template(
-            [{"role": "user", "content": instruction},
-             {"role": "assistant", "content": output}],
-            tokenize=False)
-        prompt = tokenizer.apply_chat_template(
-            [{"role": "user", "content": instruction}],
-            tokenize=False, add_generation_prompt=True)
+        full = _tmpl([{"role": "user", "content": instruction},
+                      {"role": "assistant", "content": output}])
+        prompt = _tmpl([{"role": "user", "content": instruction}],
+                       add_generation_prompt=True)
     except Exception:
         prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
         full = prompt + output

@@ -221,3 +221,37 @@ def test_merge_refuses_cleanly_without_stack(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
     res = lora.merge_to_gguf(Config(), "nonexistent-adapter")
     assert res.ok is False and res.reason
+
+
+def test_format_example_disables_thinking_for_qwen3_bases():
+    """Qwen3's chat template defaults to a reasoning turn; AG's pairs have no <think>
+    trace, so training must pass enable_thinking=False or the model learns to emit empty
+    think blocks. A tokenizer that doesn't accept the kwarg (older models) still works."""
+    seen = {}
+
+    class Qwen3Tok:
+        def apply_chat_template(self, msgs, tokenize=False, enable_thinking=None, **kw):
+            seen["enable_thinking"] = enable_thinking
+            body = " ".join(m["content"] for m in msgs)
+            return f"<t={enable_thinking}>{body}"
+
+        def __call__(self, text, truncation=False, max_length=None):
+            return {"input_ids": list(range(len(text.split())))}
+
+    out = lora._format_example(Qwen3Tok(), "hi", "there", max_seq=64)
+    assert seen["enable_thinking"] is False
+    assert "labels" in out and "input_ids" in out
+
+
+def test_format_example_falls_back_when_kwarg_unsupported():
+    class OldTok:
+        def apply_chat_template(self, msgs, tokenize=False, **kw):
+            if "enable_thinking" in kw:
+                raise TypeError("unexpected kwarg enable_thinking")
+            return " ".join(m["content"] for m in msgs)
+
+        def __call__(self, text, truncation=False, max_length=None):
+            return {"input_ids": list(range(len(text.split())))}
+
+    out = lora._format_example(OldTok(), "hi", "there", max_seq=64)
+    assert "labels" in out and "input_ids" in out
