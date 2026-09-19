@@ -10,6 +10,7 @@ state/archive/
 state/bench/
 state/skills/
 state/images/
+state/video/
 state/fleet/
 !state/versions/.gitkeep
 !state/runs/.gitkeep

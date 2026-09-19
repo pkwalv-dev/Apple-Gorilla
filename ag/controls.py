@@ -113,6 +113,14 @@ RUN_CONTROLS: Tuple[Control, ...] = (
               "complete end-to-end within this run's grants.",
     ),
     Control(
+        id="media", kind=TOGGLE, label="media", default=True,
+        sets=("allow_image_gen", "allow_video_gen"), requires="tools",
+        help="Lets AG generate images and video on this machine's GPU (Chroma1-HD "
+             "and Wan 2.2 under ComfyUI, or an Automatic1111 server for images). "
+             "Requires 'tools'. Nothing is sent anywhere: the prompt and the output "
+             "stay local. A clip takes minutes.",
+    ),
+    Control(
         id="memory", kind=TOGGLE, label="memory", default=True,
         sets=("use_memory", "auto_memory"),
         title="Recall durable facts from long-term memory into context, and distill "

@@ -17,6 +17,7 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from .config import Config
 from .model import make_client, Canceller, Cancelled
@@ -89,7 +90,7 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   <button class="tab" data-pane="evolve" onclick="switchTab('evolve')">&#8635; Evolve</button>
   <button class="tab" data-pane="lora" onclick="switchTab('lora')">&#9881; LoRA</button>
   <button class="tab" data-pane="bundle" onclick="switchTab('bundle')">&#10697; Bundle</button>
-  <button class="tab" data-pane="images" onclick="switchTab('images')">&#9638; Images</button>
+  <button class="tab" data-pane="images" onclick="switchTab('images')">&#9638; Media</button>
 </nav>
 
 <!-- ================= CHAT ================= -->
@@ -262,11 +263,17 @@ __CONTROLS__
 <!-- ================= IMAGES ================= -->
 <div class="tabpane" id="pane-images">
   <div class="panel" id="imagepanel">
-    <span class="grouplabel">Image generation — local Stable Diffusion <span class="cmd-note" id="imgnote"></span></span>
+    <span class="grouplabel">Media generation — on this machine's GPU <span class="cmd-note" id="imgnote"></span></span>
     <textarea id="imgprompt" class="directive" rows="2"
-      placeholder="Describe an image to generate. Needs a local Stable Diffusion server (Automatic1111/Forge) running with --api; prompts never leave your machine."></textarea>
+      placeholder="Describe an image or a clip to generate. Runs on your own GPU (ComfyUI, or an Automatic1111 server for images); the prompt never leaves your machine."></textarea>
     <div class="controls">
-      <button class="cmd" id="imgbtn" onclick="genImage()">Generate image</button>
+      <label class="ctl">make <select id="imgkind" class="ctl-select" onchange="syncMediaKind()">
+        <option value="image">an image</option><option value="video">a video clip</option>
+      </select></label>
+      <label class="ctl" id="imgsecs-wrap" hidden>seconds <select id="imgsecs" class="ctl-select">
+        <option value="2">2</option><option value="3" selected>3</option>
+        <option value="5">5</option></select></label>
+      <button class="cmd" id="imgbtn" onclick="genMedia()">Generate</button>
       <button class="cmd" id="imgstartbtn" onclick="startImageServer()" hidden>Start server</button>
     </div>
     <div id="imgout"></div>
@@ -822,16 +829,19 @@ async function saveKey(){
 }
 async function logoutClaude(){
   try{ await fetch('/logout',{method:'POST'}); }catch(e){}
-  loadAuth(); loadModels(); renderWhere();
+  loadAuth(); loadModels(); renderWhere(); syncMediaKind();
 }
 /* ---- local image generation ------------------------------------------ */
 async function loadImageStatus(){
   const n=$('imgnote'), sb=$('imgstartbtn'); if(!n) return;
   try{
     const s=await fetch('/image/status').then(r=>r.json());
+    const k=$('imgkind'); if(k && !s.video){ k.value='image'; k.disabled=true; syncMediaKind(); }
     if(!s.enabled){ n.textContent='· disabled in config'; if(sb) sb.hidden=true; }
-    else if(s.reachable){ n.textContent='· ready at '+escapeHtml(s.host); if(sb) sb.hidden=true; }
-    else { n.textContent='· no server at '+escapeHtml(s.host)+' — click Start server, or launch Automatic1111/Forge with --api';
+    else if(s.reachable){ n.textContent='· ready · '+escapeHtml(s.backend)+' at '+escapeHtml(s.host); if(sb) sb.hidden=true; }
+    else { n.textContent='· no '+escapeHtml(s.backend)+' server at '+escapeHtml(s.host)
+        +' — click Start server'
+        +(s.models&&s.models.length?' (needs: '+escapeHtml(s.models.join(', '))+')':'');
       if(sb) sb.hidden=false; }
   }catch(e){}
 }
@@ -845,15 +855,28 @@ async function startImageServer(){
   if(sb) sb.disabled=false;
   loadImageStatus();
 }
-async function genImage(){
+function mediaKind(){ return $('imgkind') ? $('imgkind').value : 'image'; }
+function syncMediaKind(){
+  const w=$('imgsecs-wrap'); if(w) w.hidden = mediaKind()!=='video';
+}
+async function genMedia(){
   const p=$('imgprompt')?$('imgprompt').value.trim():''; if(!p) return;
-  const btn=$('imgbtn'), out=$('imgout');
+  const kind=mediaKind(), btn=$('imgbtn'), out=$('imgout');
   if(btn) btn.disabled=true;
-  if(out) out.innerHTML='<div class="ct-hint">generating… (if the server is not running AG will start it first — the first image can take a few minutes)</div>';
+  if(out) out.innerHTML='<div class="ct-hint">generating'
+    +(kind==='video'?' a clip — this takes minutes, not seconds':'')
+    +'… (if the server is not running AG will start it first — the first run loads a multi-GB model)</div>';
   try{
-    const r=await fetch('/image',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt:p})}).then(r=>r.json());
-    if(r.ok){ out.innerHTML='<img src="'+r.data_url+'" alt="'+escapeHtml(p)
+    const body={prompt:p};
+    if(kind==='video' && $('imgsecs')) body.seconds=parseFloat($('imgsecs').value);
+    const r=await fetch(kind==='video'?'/video':'/image',
+      {method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify(body)}).then(r=>r.json());
+    if(r.ok && kind==='video'){
+      out.innerHTML='<video controls style="max-width:100%;border-radius:10px;margin-top:8px" '
+        +'src="/media?path='+encodeURIComponent(r.path)+'"></video>'
+        +'<div class="ct-hint">'+r.seconds+'s · saved to '+escapeHtml(r.path)+'</div>'; }
+    else if(r.ok){ out.innerHTML='<img src="'+r.data_url+'" alt="'+escapeHtml(p)
       +'" style="max-width:100%;border-radius:10px;margin-top:8px">'
       +'<div class="ct-hint">saved to '+escapeHtml(r.path)+'</div>'; }
     else { out.innerHTML='<div class="result bad">'+escapeHtml(r.error||'failed')+'</div>'; }
@@ -1123,6 +1146,33 @@ def _clean_history(raw, *, max_turns: int = 40, max_len: int = 4000) -> list:
             out.append({"role": role, "text": text[:max_len]})
     return out
 
+MEDIA_TYPES = {".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+               ".gif": "image/gif", ".webp": "image/webp", ".png": "image/png",
+               ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def media_type(path: Path) -> str:
+    return MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def media_file(want: str):
+    """Resolve a browser-supplied path to a generated file, or None.
+
+    This endpoint reads a file named by the page, so it is confined to the two
+    directories AG writes media into. A path outside them — or a symlink pointing
+    out of them, which is why this resolves before comparing — is not found.
+    """
+    from .config import STATE_DIR
+    roots = [(STATE_DIR / "video").resolve(), (STATE_DIR / "images").resolve()]
+    try:
+        target = Path(want).resolve()
+        if any(target.is_relative_to(r) for r in roots) and target.is_file():
+            return target
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _build_broker(cfg: Config, *, web=None):
     web = cfg.allow_web if web is None else web
     if not (web or cfg.allow_local_tools):
@@ -1180,6 +1230,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_bytes(self, code, data: bytes, ctype: str):
+        """Send raw bytes (a generated clip or image) rather than encoded text."""
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE)
@@ -1208,14 +1266,40 @@ class _Handler(BaseHTTPRequestHandler):
             st["model"] = self.cfg.model
             st["console_url"] = "https://console.anthropic.com/settings/keys"
             self._send(200, json.dumps(st), "application/json")
+        elif self.path.startswith("/media?"):
+            # Serve a generated clip back to the page. Confined to AG's own output
+            # directories: this endpoint takes a path from the browser, so anything
+            # outside them is refused rather than read.
+            import urllib.parse as _up
+            want = _up.parse_qs(self.path.split("?", 1)[1]).get("path", [""])[0]
+            target = media_file(want)
+            if target is None:
+                self._send(404, json.dumps({"error": "not found"}), "application/json")
+                return
+            self._send_bytes(200, target.read_bytes(), media_type(target))
         elif self.path == "/image/status":
-            from . import images
+            from . import comfy, images
             cfg = self.cfg
+            on = bool(getattr(cfg, "allow_image_gen", False))
+            backend = images.backend_for(cfg) if on else ""
+            up = False
+            host = cfg.sd_host
+            models = []
+            if on and backend == "comfy":
+                host = cfg.comfy_host
+                up = comfy.reachable(cfg)
+                try:
+                    models = comfy.describe(
+                        comfy.load_workflow(cfg.comfy_image_workflow))
+                except Exception:
+                    models = []
+            elif on:
+                up = images.sd_reachable(cfg)
             self._send(200, json.dumps({
-                "enabled": bool(getattr(cfg, "allow_image_gen", False)),
-                "reachable": images.sd_reachable(cfg) if getattr(
-                    cfg, "allow_image_gen", False) else False,
-                "host": cfg.sd_host}), "application/json")
+                "enabled": on, "reachable": up, "host": host, "backend": backend,
+                "models": models,
+                "video": bool(getattr(cfg, "allow_video_gen", False)),
+            }), "application/json")
         elif self.path == "/fleet":
             from . import fleet
             self._send(200, json.dumps({
@@ -1469,12 +1553,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False,
                            "error": "image generation is disabled"}), "application/json")
                 return
-            ok = images.ensure_sd_running(cfg)
-            self._send(200, json.dumps({
-                "ok": ok, "reachable": ok, "host": cfg.sd_host,
-                "error": "" if ok else "could not start a Stable Diffusion server "
-                "(none installed/found, or it did not come up). Set sd_cmd to your "
-                "launcher, or start it manually with --api."}), "application/json")
+            from . import comfy
+            if images.backend_for(cfg) == "comfy":
+                ok = comfy.ensure_running(cfg)
+                err = ("" if ok else "could not start ComfyUI (none found, or it did "
+                       "not come up). Install it, or set comfy_cmd to its launcher.")
+                host = cfg.comfy_host
+            else:
+                ok = images.ensure_sd_running(cfg)
+                err = ("" if ok else "could not start a Stable Diffusion server "
+                       "(none installed/found, or it did not come up). Set sd_cmd to "
+                       "your launcher, or start it manually with --api.")
+                host = cfg.sd_host
+            self._send(200, json.dumps({"ok": ok, "reachable": ok, "host": host,
+                                        "error": err}), "application/json")
             return
         if self.path == "/image":
             from . import images
@@ -1499,6 +1591,33 @@ class _Handler(BaseHTTPRequestHandler):
                                       negative_prompt=str(payload.get("negative", "")))
                 self._send(200, json.dumps({
                     "ok": True, "data_url": res.data_url, "path": res.path,
+                    "width": res.width, "height": res.height}), "application/json")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+            return
+        if self.path == "/video":
+            from . import video
+            cfg = self.cfg
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
+                prompt = str(payload.get("prompt", "")).strip()
+                if not prompt:
+                    raise ValueError("empty prompt")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)}),
+                           "application/json")
+                return
+            try:
+                secs = float(payload.get("seconds") or 0) or None
+            except (TypeError, ValueError):
+                secs = None
+            try:
+                res = video.generate(prompt, cfg, seconds=secs,
+                                     negative_prompt=str(payload.get("negative", "")))
+                self._send(200, json.dumps({
+                    "ok": True, "path": res.path, "seconds": res.seconds,
                     "width": res.width, "height": res.height}), "application/json")
             except Exception as e:
                 self._send(200, json.dumps({"ok": False, "error": str(e)}),

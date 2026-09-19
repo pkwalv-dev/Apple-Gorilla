@@ -1,11 +1,21 @@
-"""Local image generation via an Automatic1111/Forge-compatible Stable Diffusion API.
+"""Local image generation — keyless, offline, on your own GPU.
 
-Keyless and offline: AG POSTs to `{sd_host}/sdapi/v1/txt2img` on a Stable Diffusion
-web server you run yourself (Automatic1111, Forge, reForge, ...). No third-party API,
-no key, no per-image cost — the prompt never leaves your machine. Generated PNGs are
-saved under state/images/ and also returned as a base64 data URL for the web app.
+Two backends, chosen by `cfg.image_backend` (default "auto"):
 
-If no SD server is reachable the calls fail with a clear, actionable error rather than
+- **comfy**  — ComfyUI, running Chroma1-HD by default: 8.9B, Apache-2.0, a de-distilled
+  FLUX.1-schnell retrained with no safety filter, and unlike FLUX it honours real CFG
+  and negative prompts. The model is named by a workflow file, not by code (see
+  `ag/comfy.py`), so changing models is changing a JSON file.
+- **a1111** — an Automatic1111/Forge-compatible server: AG POSTs to
+  `{sd_host}/sdapi/v1/txt2img`. SD-family checkpoints only.
+
+"auto" prefers ComfyUI when it answers and falls back to A1111, so an existing Stable
+Diffusion install keeps working untouched. Either way no third-party API is involved,
+there is no key and no per-image cost, and the prompt never leaves your machine.
+Generated PNGs are saved under state/images/ and returned as a base64 data URL for the
+web app.
+
+If nothing can render, the call fails with a clear, actionable error rather than
 hanging — AG never pretends an image was made.
 """
 from __future__ import annotations
@@ -161,9 +171,79 @@ def _slug(text: str, n: int = 40) -> str:
     return (s[:n] or "image")
 
 
+def backend_for(cfg: Config) -> str:
+    """Which media backend this run uses: "comfy" or "a1111".
+
+    "auto" prefers ComfyUI when it answers, because that is where the unfiltered
+    open-weight models run — and falls back to A1111 so an existing Stable Diffusion
+    install keeps working exactly as before. An explicit setting is obeyed as given.
+    """
+    choice = (getattr(cfg, "image_backend", "auto") or "auto").lower()
+    if choice in ("comfy", "a1111"):
+        return choice
+    from . import comfy
+    if comfy.reachable(cfg):
+        return "comfy"
+    if sd_reachable(cfg):
+        return "a1111"
+    # Neither is up: prefer the one that is at least installed, else ComfyUI, whose
+    # error message names the model AG expects.
+    return "a1111" if _find_sd_launcher() else "comfy"
+
+
 def generate(prompt: str, cfg: Config, *, negative_prompt: str = "",
              steps: Optional[int] = None, width: Optional[int] = None,
-             height: Optional[int] = None) -> ImageResult:
+             height: Optional[int] = None,
+             seed: Optional[int] = None) -> ImageResult:
+    """Generate one image, via whichever local backend this machine has.
+
+    Raises RuntimeError with a helpful message if nothing can render it — callers
+    surface that instead of fabricating a result.
+    """
+    if backend_for(cfg) == "comfy":
+        return _generate_comfy(prompt, cfg, negative_prompt=negative_prompt,
+                               steps=steps, width=width, height=height, seed=seed)
+    return _generate_a1111(prompt, cfg, negative_prompt=negative_prompt,
+                           steps=steps, width=width, height=height)
+
+
+def _generate_comfy(prompt: str, cfg: Config, *, negative_prompt: str = "",
+                    steps: Optional[int] = None, width: Optional[int] = None,
+                    height: Optional[int] = None,
+                    seed: Optional[int] = None) -> ImageResult:
+    """Chroma1-HD (or whatever `comfy_image_workflow` names) through ComfyUI."""
+    import random
+    from . import comfy
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise ValueError("empty image prompt")
+    name = getattr(cfg, "comfy_image_workflow", "chroma1hd_txt2img")
+    graph = comfy.load_workflow(name)
+    if getattr(cfg, "comfy_autostart", True) and not comfy.reachable(cfg):
+        comfy.ensure_running(cfg)
+    w = int(width or cfg.sd_width)
+    h = int(height or cfg.sd_height)
+    st = int(steps or cfg.sd_steps)
+    filled = comfy.fill(graph, {
+        comfy.PROMPT: prompt, comfy.NEGATIVE: negative_prompt or "",
+        comfy.SEED: int(seed if seed is not None else random.randrange(2 ** 31)),
+        comfy.STEPS: st, comfy.WIDTH: w, comfy.HEIGHT: h,
+    })
+    outputs = comfy.run(filled, cfg)
+    fname, raw = outputs[0]
+    ensure_dirs()
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    path = IMAGES_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{_slug(prompt)}.png"
+    path.write_bytes(raw)
+    return ImageResult(path=str(path),
+                       data_url="data:image/png;base64," +
+                                base64.b64encode(raw).decode("ascii"),
+                       prompt=prompt, width=w, height=h, steps=st)
+
+
+def _generate_a1111(prompt: str, cfg: Config, *, negative_prompt: str = "",
+                    steps: Optional[int] = None, width: Optional[int] = None,
+                    height: Optional[int] = None) -> ImageResult:
     """Generate one image from a text prompt via the local SD server.
 
     Raises RuntimeError with a helpful message if the server is unreachable or returns
