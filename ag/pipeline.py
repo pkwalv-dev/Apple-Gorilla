@@ -35,6 +35,7 @@ class RunRecord:
     # capture can tell "the user told me this" from "a web page told me this" — the
     # taint is invisible by the time you are only looking at the finished answer.
     web_sources: List[str] = field(default_factory=list)
+    model_used: str = ""            # the model that actually produced the answer
 
 
 def _emit(emit, stage: str, msg: str, level: str = "info", **data) -> None:
@@ -445,9 +446,16 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
     # Route plain conversation to the instruct chat model, one-shot, with web + the tool
     # loop off. Task turns keep the abliterated model and its tools. Only applies to the
     # local Ollama backend; Claude needs no routing.
-    conversational = bool(getattr(cfg, "chat_routing", True)) and _conversational(raw_prompt)
+    # A conversational turn answers one-shot (no tool loop, no web) whatever the model.
+    # Routing to the instruct chat model happens only when chat routing is on AND the
+    # user is not in uncensored mode (which forces the abliterated model everywhere).
+    conversational = _conversational(raw_prompt)
+    uncensored = bool(getattr(cfg, "uncensored", False))
+    route_to_chat = (bool(getattr(cfg, "chat_routing", True)) and conversational
+                     and not uncensored)
     call_client, call_cfg, routed = client, cfg, False
-    if conversational and getattr(cfg, "chat_model", ""):
+    model_used = cfg.ollama_model if getattr(cfg, "backend", "") == "ollama" else cfg.model
+    if route_to_chat and getattr(cfg, "chat_model", ""):
         from .model import OllamaClient, make_client, ollama_has_model
         if isinstance(client, OllamaClient) and ollama_has_model(cfg, cfg.chat_model):
             import dataclasses
@@ -455,6 +463,7 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
                 call_cfg = dataclasses.replace(cfg, ollama_model=cfg.chat_model)
                 call_client = make_client(call_cfg, backend="ollama")
                 routed = True
+                model_used = cfg.chat_model
                 _emit(emit, "execute", f"conversational turn — using {cfg.chat_model}",
                       level="info")
             except Exception:
@@ -567,6 +576,7 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         run_id=time.strftime("%Y%m%d-%H%M%S"),
         scorecard=card.as_dict(),
         web_sources=_web_sources(web_ctx),
+        model_used=model_used,
     )
     _persist(rec)
     _prune_runs(cfg.max_runs)

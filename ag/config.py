@@ -38,8 +38,12 @@ class Config:
     # routed to a stronger local INSTRUCT model, while task/tool turns keep the
     # abliterated one. Set chat_model="" to disable routing (single-model). The chat
     # model must be pulled in Ollama; if it is missing, AG falls back to ollama_model.
-    chat_model: str = "qwen2.5:7b"            # instruct model for conversational turns
+    chat_model: str = "qwen3:8b"              # instruct model for conversational turns
     chat_routing: bool = True                 # route plain chat to chat_model, one-shot
+    # Uncensored mode: force the abliterated model for EVERY turn (no routing to the
+    # instruct chat model), for when the user wants raw, unfiltered output. Chat still
+    # answers one-shot, so it stays conversational rather than narrating tool steps.
+    uncensored: bool = False
     ollama_keep_alive: str = "30m"            # keep the model resident between calls
     ollama_options: dict = field(default_factory=dict)  # e.g. {"num_ctx": 8192}
     # When the local Ollama server isn't reachable, try to launch `ollama serve`
