@@ -64,6 +64,30 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
                             broker=broker, allowlist=allow,
                             ref=str(args.get("ref", "main")))
 
+    def _consult_specialist(args, broker):
+        """Delegate a subtask to the specialist model (the abliterated coder) — for code,
+        strict-format output, or a request the primary would refuse. Returns its reply."""
+        task = str(args.get("task", "")).strip()
+        if not task:
+            return "consult_specialist error: provide a 'task'"
+        spec = getattr(cfg, "specialist_model", "") if cfg else ""
+        if not spec:
+            return "consult_specialist error: no specialist model configured"
+        import dataclasses
+        from .model import make_client, ollama_has_model
+        if not ollama_has_model(cfg, spec):
+            return f"consult_specialist error: {spec} is not available locally"
+        try:
+            scfg = dataclasses.replace(cfg, ollama_model=spec)
+            sclient = make_client(scfg, backend="ollama")
+            r = sclient.complete(
+                system="You are a specialist model assisting the primary model. Do the "
+                       "task directly and completely; return only the result.",
+                user=task, cfg=scfg)
+            return (r.text or "(no output)").strip()
+        except Exception as e:
+            return f"consult_specialist error: {e}"
+
     def _generate_image(args, broker):
         from . import images
         prompt = str(args.get("prompt", "")).strip()
@@ -128,6 +152,16 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
              'e.g. {"tool":"github_fetch","args":{"repo":"ollama/ollama","path":"README.md"}}',
              _github),
     ]
+    # The specialist model, offered when routing is on and it's actually available.
+    if cfg is not None and getattr(cfg, "model_routing", True):
+        spec = getattr(cfg, "specialist_model", "")
+        if spec and spec != getattr(cfg, "ollama_model", ""):
+            reg.append(Tool(
+                "consult_specialist", "task", None,
+                "delegate a subtask to the specialist model (strong at code, strict "
+                "formats, and won't refuse), e.g. {\"tool\":\"consult_specialist\","
+                "\"args\":{\"task\":\"write a Python function that ...\"}}",
+                _consult_specialist))
     # Local media generation, each offered only when enabled in config.
     if cfg is None or getattr(cfg, "allow_image_gen", False):
         reg.append(Tool(
