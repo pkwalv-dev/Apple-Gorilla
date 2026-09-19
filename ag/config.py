@@ -132,7 +132,12 @@ class Config:
     lora_optimizer: str = "paged_adamw_8bit"   # paged 8-bit: small state, spills to RAM
     lora_r: int = 16                           # LoRA rank
     lora_alpha: int = 32                       # LoRA alpha
-    lora_dropout: float = 0.05
+    # 0, not the customary 0.05: Unsloth silently falls back off its fused LoRA kernels
+    # whenever dropout is non-zero, and on short runs (tens of steps) the regularisation
+    # that buys is negligible next to the throughput it costs. Raise it only for long
+    # runs on a large dataset, where overfitting is a real risk — the trade is reported
+    # at train time so it is never paid by accident.
+    lora_dropout: float = 0.0
     lora_epochs: float = 1.0
     lora_lr: float = 2e-4
     lora_warmup_ratio: float = 0.03            # ease into the LR; short runs need it most

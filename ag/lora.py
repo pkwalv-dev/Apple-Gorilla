@@ -728,6 +728,14 @@ def train(cfg: Config, *, emit=None) -> TrainResult:
                 model, tok = FastLanguageModel.from_pretrained(
                     model_name=cfg.lora_base_model, max_seq_length=max_seq,
                     load_in_4bit=bool(cfg.lora_4bit), dtype=None)
+                # Unsloth drops its fused LoRA kernels the moment dropout is non-zero,
+                # and says so only in a line buried in its banner. Say it here, where
+                # the cost is being incurred, so a slower run is always a choice.
+                if float(cfg.lora_dropout) > 0:
+                    _emit(emit, "lora", f"lora_dropout={cfg.lora_dropout} disables "
+                          f"Unsloth's fused LoRA kernels — steps will be slower; set "
+                          f"lora_dropout to 0 unless the run is long enough for the "
+                          f"regularisation to matter", level="info")
                 model = FastLanguageModel.get_peft_model(
                     model, r=cfg.lora_r, lora_alpha=cfg.lora_alpha,
                     lora_dropout=cfg.lora_dropout, bias="none",
