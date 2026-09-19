@@ -86,15 +86,45 @@ def format_history(history, *, max_turns: int = 12, max_chars: int = 4000) -> st
     return block
 
 
+def _update_working(client, cfg: Config, raw_prompt: str, answer: str,
+                    *, session_id: str, history=None, emit=None) -> None:
+    """Fold this finished exchange into the session's working buffer (best-effort).
+
+    Separate from durable capture and NOT gated by auto_memory: keeping the current
+    conversation coherent is a different job from deciding what to remember forever.
+    Skipped on the dry-run stub, whose answer is not a real turn."""
+    from .model import DryRunClient
+    if (not getattr(cfg, "working_memory", True) or not session_id
+            or isinstance(client, DryRunClient)):
+        return
+    try:
+        from .memory import working
+        wm = working.load(session_id)
+        if wm.is_empty():
+            working.seed_from_history(wm, history)
+        working.update(wm, raw_prompt, answer, client=client, cfg=cfg,
+                       recent_turns=getattr(cfg, "working_recent_turns", 6),
+                       summary_chars=getattr(cfg, "working_summary_chars", 700),
+                       emit=emit)
+        working.save(wm)
+    except Exception as e:
+        _emit(emit, "memory", f"working memory update skipped: {e}", level="info")
+
+
 def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
-                   *, conversation: str = "", emit=None,
-                   web_sources: Optional[List[str]] = None) -> list:
+                   *, conversation: str = "", session_id: str = "", history=None,
+                   emit=None, web_sources: Optional[List[str]] = None) -> list:
     """Distill durable facts from a finished exchange and store them (best-effort).
 
     This is what lets long-term memory actually FILL from normal use, so future
     sessions have something to recall. Gated by cfg.auto_memory; never raises into
     the caller and never runs on the dry-run stub (its output is uninformative).
+
+    Also advances the per-session working buffer, which is independent of auto_memory —
+    a user who turns off durable memory still gets a coherent conversation.
     """
+    _update_working(client, cfg, raw_prompt, answer, session_id=session_id,
+                    history=history, emit=emit)
     from .model import DryRunClient
     if not getattr(cfg, "auto_memory", True) or isinstance(client, DryRunClient):
         return []
@@ -319,7 +349,7 @@ def gather_web_context(query: str, broker, *, max_results: int = 3, candidates: 
 
 def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         web: bool = False, broker=None, emit=None, history=None,
-        on_delta=None, cancel=None) -> RunRecord:
+        session_id: str = "", on_delta=None, cancel=None) -> RunRecord:
     """Pipeline for a single request: execute with context, tools, and memory.
 
     One model path (no per-run self-review): AG answers directly, layering on
@@ -333,11 +363,31 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
     t0 = time.time()
     total_in = total_out = 0
 
-    convo = format_history(history, max_turns=getattr(cfg, "max_history_turns", 12))
+    # Working memory: the current conversation held as a rolling summary + verbatim
+    # recent turns + a pinned decision ledger, scoped to THIS session and kept apart
+    # from the durable store. Falls back to a raw transcript when the buffer is off or
+    # empty, so an older client (or a bare CLI run) behaves exactly as before.
+    convo, convo_kind, convo_turns = "", "conversation", 0
+    if getattr(cfg, "working_memory", True) and session_id:
+        try:
+            from .memory import working
+            wm = working.load(session_id)
+            if wm.is_empty():
+                working.seed_from_history(wm, history)
+            convo = working.render(
+                wm, summary_chars=getattr(cfg, "working_summary_chars", 700))
+            convo_kind = "working memory"
+            convo_turns = wm.turn_count or (len(wm.recent) + 1) // 2
+        except Exception as e:
+            _emit(emit, "memory", f"working memory unavailable: {e}", level="info")
+    if not convo:
+        convo = format_history(history, max_turns=getattr(cfg, "max_history_turns", 12))
+        convo_turns = len([h for h in (history or [])
+                           if isinstance(h, dict) and str(h.get("text", "")).strip()])
     if convo:
         _emit(emit, "conversation",
-              f"carrying {len([h for h in history if str(h.get('text','')).strip()])}"
-              " earlier turn(s) as working memory", level="tool")
+              f"carrying the current conversation as {convo_kind}", level="tool",
+              turns=convo_turns)
 
     web_ctx = ""
     if web and broker is not None:
