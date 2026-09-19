@@ -214,14 +214,24 @@ def test_image_generate_saves_png(tmp_path, monkeypatch):
 
 
 def test_image_generate_unreachable_raises(monkeypatch):
+    """No server, either backend: a clear error, never a fabricated image.
+
+    Autostart is off here on purpose. With it on, this test would launch a real
+    ComfyUI on a machine that has one installed and then block for the full startup
+    window, because the stubbed urlopen never lets the readiness poll succeed.
+    """
+    import dataclasses as _dc
     import urllib.request as _u, urllib.error as _e
     import pytest
     from ag import images
     from ag.config import Config as _Cfg
     def boom(*a, **k): raise _e.URLError("refused")
     monkeypatch.setattr(_u, "urlopen", boom)
-    with pytest.raises(RuntimeError):
-        images.generate("x", _Cfg())
+    for backend in ("a1111", "comfy"):
+        cfg = _dc.replace(_Cfg(), image_backend=backend, sd_autostart=False,
+                          comfy_autostart=False)
+        with pytest.raises(RuntimeError):
+            images.generate("x", cfg)
 
 
 def test_ensure_sd_running(monkeypatch):
