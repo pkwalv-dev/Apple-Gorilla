@@ -63,7 +63,7 @@
   "lora_dropout": 0.05,
   "lora_epochs": 3,
   "lora_lr": 0.0002,
-  "lora_max_seq": 384,
+  "lora_max_seq": 768,
   "lora_batch_size": 1,
   "lora_grad_accum": 8,
   "lora_min_examples": 16,

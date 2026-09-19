@@ -536,14 +536,47 @@ def _pairs_from_teacher(cfg: Config, *, client=None, extra_tasks: Optional[List[
     return pairs
 
 
+def _existing_teacher_pairs() -> List[dict]:
+    """Teacher rows already on disk from an earlier build."""
+    if not DATASET_FILE.exists():
+        return []
+    out: List[dict] = []
+    for ln in DATASET_FILE.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if r.get("source") == "teacher" and r.get("instruction") and r.get("output"):
+            out.append(r)
+    return out
+
+
 def build_dataset(cfg: Config, *, use_memory: bool = True, use_teacher: bool = True,
                   client=None, extra_tasks: Optional[List[str]] = None,
-                  emit=None) -> DatasetStats:
-    """Build the merged training set (memory + teacher) and write it as JSONL."""
+                  refresh_teacher: bool = False, emit=None) -> DatasetStats:
+    """Build the merged training set (memory + teacher) and write it as JSONL.
+
+    Memory rows are always rebuilt — they are free and they are what changes between
+    runs. Teacher rows are REUSED from the previous build unless `refresh_teacher` is
+    set, because regenerating them means one API call per task against whatever
+    `lora_teacher_backend` points at. A routine rebuild should cost nothing and should
+    never quietly discard a teacher set that has already been paid for.
+    """
     _ensure()
+    from .pipeline import _emit
     mem = _pairs_from_memory(cfg) if use_memory else []
-    teach = _pairs_from_teacher(cfg, client=client, extra_tasks=extra_tasks,
-                                emit=emit) if use_teacher else []
+    teach: List[dict] = []
+    if use_teacher:
+        teach = [] if refresh_teacher else _existing_teacher_pairs()
+        if teach:
+            _emit(emit, "lora", f"reusing {len(teach)} teacher pair(s) from the previous "
+                  f"build (pass refresh to regenerate)", level="info")
+        else:
+            teach = _pairs_from_teacher(cfg, client=client, extra_tasks=extra_tasks,
+                                        emit=emit)
     # De-dup on instruction+output.
     seen = set()
     rows = []
