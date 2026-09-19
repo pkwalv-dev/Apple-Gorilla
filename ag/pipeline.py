@@ -8,6 +8,7 @@ tools + memory + web), scored on measured speed.
 from __future__ import annotations
 
 import json
+import re as _re
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -156,6 +157,12 @@ def capture_memory(client, cfg: Config, raw_prompt: str, answer: str,
             text, origin, volatile = _unpack_fact(item)
             if not text:
                 continue
+            # Presentation feedback is not a durable fact — drop it before it can be
+            # stored and re-injected on every formatting-adjacent turn.
+            if _is_style_meta(text):
+                _emit(emit, "memory", "skipped a formatting-style note (not durable)",
+                      level="info")
+                continue
             # A backstop on the model's own honesty: USER origin is the top prior, and
             # it is earned only by the user's actual words. If the distiller calls a
             # fact "stated" but nothing in it appears in the user's message, it is
@@ -253,6 +260,25 @@ def _grounded_in(fact: str, prompt: str) -> bool:
     return False
 
 
+_STYLE_META = _re.compile(
+    r"\b(format|formatting|bold|asterisk|markdown|italic|font|emoji|capitaliz|"
+    r"punctuation|verbose|concise|tone|wording|phrasing|style)\b", _re.I)
+
+
+def _is_style_meta(text: str) -> bool:
+    """A fact that is really about how AG should WRITE, not about the user or their work.
+
+    The distiller is told to skip these, but the local model is weak and does not always
+    comply, so this is the backstop: presentation feedback ('prefers less bold') is a
+    transient instruction for the moment, and storing it durably is what had AG fixating
+    on formatting across unrelated turns instead of answering the question."""
+    low = (text or "").lower()
+    return bool(_STYLE_META.search(low)) and (
+        "user" in low or "prefer" in low or "wants" in low or "ag " in low
+        or "you " in low or "your " in low or "output" in low or "response" in low
+        or "answer" in low or "reply" in low or "message" in low)
+
+
 def _unpack_fact(item):
     """Read one distilled fact as (text, origin, volatile).
 
@@ -347,6 +373,33 @@ def gather_web_context(query: str, broker, *, max_results: int = 3, candidates: 
     return "\n\n".join(blocks)
 
 
+# Signals that a prompt is a TASK (wants tools, code, files, media, or the web) rather
+# than plain conversation. Deliberately about doing, not about topic: their presence
+# keeps the tool loop + abliterated model; their absence routes a short turn to the
+# instruct chat model, one-shot. Kept conservative — when unsure, treat as a task so a
+# real request never loses its tools.
+_TASK_SIGNALS = _re.compile(
+    r"\b(file|files|read|write|edit|open|save|code|run|execute|python|script|calc|"
+    r"calculate|compute|generate|image|video|render|draw|fetch|download|scrape|"
+    r"search|http|https|repo|repository|git|commit|install|build|debug|refactor|"
+    r"implement|deploy|api|json|sql|database|acquire|evolve|skill|screenshot|browse|"
+    r"url|directory|folder|path|\.py|\.js|\.json|\.md|\.txt)\b", _re.I)
+
+
+def _conversational(prompt: str, *, max_chars: int = 400) -> bool:
+    """True when a prompt is plain conversation — chat, opinion, or a general question
+    with no task to execute. Such turns are answered one-shot by the instruct chat model
+    with the tool loop and web off: it converses well, and the abliterated coder model's
+    action/observation scaffolding (and web noise) is exactly what makes chat feel dumb.
+    A long prompt or any task signal falls through to the full tool-using path."""
+    p = (prompt or "").strip()
+    if not p:
+        return True
+    if len(p) > max_chars:
+        return False
+    return _TASK_SIGNALS.search(p) is None
+
+
 def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         web: bool = False, broker=None, emit=None, history=None,
         session_id: str = "", on_delta=None, cancel=None) -> RunRecord:
@@ -388,6 +441,24 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
         _emit(emit, "conversation",
               f"carrying the current conversation as {convo_kind}", level="tool",
               turns=convo_turns)
+
+    # Route plain conversation to the instruct chat model, one-shot, with web + the tool
+    # loop off. Task turns keep the abliterated model and its tools. Only applies to the
+    # local Ollama backend; Claude needs no routing.
+    conversational = bool(getattr(cfg, "chat_routing", True)) and _conversational(raw_prompt)
+    call_client, call_cfg, routed = client, cfg, False
+    if conversational and getattr(cfg, "chat_model", ""):
+        from .model import OllamaClient, make_client, ollama_has_model
+        if isinstance(client, OllamaClient) and ollama_has_model(cfg, cfg.chat_model):
+            import dataclasses
+            try:
+                call_cfg = dataclasses.replace(cfg, ollama_model=cfg.chat_model)
+                call_client = make_client(call_cfg, backend="ollama")
+                routed = True
+                _emit(emit, "execute", f"conversational turn — using {cfg.chat_model}",
+                      level="info")
+            except Exception:
+                call_client, call_cfg, routed = client, cfg, False
 
     web_ctx = ""
     if web and broker is not None:
@@ -452,7 +523,9 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
     _emit(emit, "execute", "generating the answer", level="tool")
     from .model import DryRunClient
     dry_run = isinstance(client, DryRunClient)
-    if cfg.allow_local_tools and broker is not None:
+    # A conversational turn answers one-shot (no tool loop): the chat model converses,
+    # and the tool preamble is what pushes a weak model into narrating fake tool steps.
+    if cfg.allow_local_tools and broker is not None and not conversational:
         from . import reason
         rr = reason.solve(client, cfg, system=exec_sys, user=eng_user,
                           broker=broker, emit=emit, on_delta=on_delta, cancel=cancel)
@@ -467,7 +540,8 @@ def run(client, cfg: Config, raw_prompt: str, *, verbose: bool = False,
             _kw["on_delta"] = on_delta
         if cancel is not None:
             _kw["cancel"] = cancel
-        exec_res = client.complete(system=exec_sys, user=eng_user, cfg=cfg, **_kw)
+        exec_res = call_client.complete(system=exec_sys, user=eng_user, cfg=call_cfg,
+                                        **_kw)
         answer = exec_res.text
         total_in += exec_res.input_tokens
         total_out += exec_res.output_tokens
