@@ -30,7 +30,7 @@ from . import prompts
 from .config import Config
 from .model import extract_json
 from .permissions import PermissionBroker
-from .skills import Skill, get_registry
+from .skills import Skill, contract, get_registry
 
 TEST_TIMEOUT = 60
 
@@ -85,15 +85,23 @@ def author_skill(client, cfg: Config, spec: str, *, broker: PermissionBroker,
     if not (name and isinstance(code, str) and isinstance(test, str) and code and test):
         return AcquireResult(True, False, reason="author returned no usable skill")
 
+    # The call contract comes from the code, not from what the author said about it.
+    # A skill whose advertised args key is a sentence ("celsius (float): the …") is
+    # born green — its own test calls run() directly — and fails every real call.
+    primary, keys, cerr = contract.reconcile(str(data.get("arg", "")), code)
+    if cerr:
+        return AcquireResult(True, False, name=name,
+                             reason=f"unusable calling contract: {cerr}")
+    required = contract.required_keys(code)
     skill = Skill(
         name=name, description=str(data.get("description", "")) or name,
-        arg=str(data.get("arg", "input")) or "input",
+        arg=primary, args=keys, optional=[k for k in keys if k not in required],
         capabilities=[str(c) for c in (data.get("capabilities") or [])],
         deps=[str(d) for d in (data.get("deps") or [])], agent=agent, source="authored",
     )
     plan = {"name": name, "description": skill.description, "arg": skill.arg,
-            "capabilities": skill.capabilities, "deps": skill.deps,
-            "code_preview": code[:400]}
+            "args": skill.keys(), "capabilities": skill.capabilities,
+            "deps": skill.deps, "code_preview": code[:400]}
 
     # 2) Static validation before anything executes.
     err = _compile_error(code) or _compile_error(test)

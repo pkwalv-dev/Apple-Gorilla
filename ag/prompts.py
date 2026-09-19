@@ -136,7 +136,9 @@ It must pass offline and deterministically (stub/skip anything needing the netwo
 Return ONLY a JSON object:
 {"name": "snake_case_name",
  "description": "one line: what it does and when to use it",
- "arg": "the single primary args key run() reads (e.g. \\"url\\")",
+ "arg": "the primary args key run() reads",   // a BARE identifier, e.g. "url" —
+                                             // never a type or description
+                                             // ("url (str): the page" is wrong)
  "capabilities": ["network", ...],      // broker grants run() needs (may be empty)
  "deps": ["package==x.y", ...],         // pip deps, or []
  "code": "def run(args, broker=None):\\n    ...",

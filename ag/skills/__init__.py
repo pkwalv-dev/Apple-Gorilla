@@ -9,10 +9,13 @@ Public surface:
 - Skill, SkillRegistry            — the data model and the store
 - get_registry(agent, parents)    — a namespaced registry (own + inherited skills)
 - load_tools(broker, agent)       — acquired skills as reason-loop Tools (gated)
+- contract                        — what a skill's run() actually reads from args
 """
 from __future__ import annotations
 
+from . import contract
 from .registry import (Skill, SkillRegistry, SHARED_AGENT, get_registry,
                        load_tools)
 
-__all__ = ["Skill", "SkillRegistry", "SHARED_AGENT", "get_registry", "load_tools"]
+__all__ = ["Skill", "SkillRegistry", "SHARED_AGENT", "get_registry", "load_tools",
+           "contract"]
