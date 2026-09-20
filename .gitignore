@@ -12,6 +12,7 @@ state/skills/
 state/images/
 state/video/
 state/fleet/
+state/cluster/
 state/sessions/
 state/routing/
 !state/versions/.gitkeep

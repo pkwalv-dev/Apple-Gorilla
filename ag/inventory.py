@@ -145,6 +145,28 @@ def _report_subagents(cfg: Config) -> ToolReport:
                       "'spawn_agent' and expose the 'delegate' tool.")
 
 
+def _report_cluster(cfg: Config) -> ToolReport:
+    if not getattr(cfg, "net_cluster", False):
+        return ToolReport("household cluster", "agent", "degraded", 7, 6,
+                          "Wired but off: set net_cluster=true to discover other devices "
+                          "on your LAN and place sub-agents on them.")
+    try:
+        from .net import cluster
+        nodes = cluster.list_nodes(cfg)
+        stale = float(getattr(cfg, "net_node_stale_s", 20.0) or 20.0)
+        usable = [n for n in nodes if n.approved and n.online(stale) and not n.self_node]
+    except Exception:
+        usable = []
+    if usable:
+        return ToolReport("household cluster", "agent", "available", 8, 8,
+                          f"{len(usable)} approved node(s) online. Sub-agents are placed "
+                          "on other devices by CPU/GPU/RAM. Discovery: stdlib UDP beacon; "
+                          "runs gated by UI approval, then full local tools on the node.")
+    return ToolReport("household cluster", "agent", "degraded", 8, 6,
+                      "On, but no approved+online worker nodes yet. Run `ag node` on "
+                      "another device and approve it in the Cluster tab.")
+
+
 def _report_host(cfg: Config) -> ToolReport:
     return ToolReport("host introspection", "host", "available", 9, 10,
                       "Read-only CPU/RAM/GPU/disk/connectivity probe used to size "
@@ -220,6 +242,7 @@ def inventory(cfg: Optional[Config] = None) -> List[ToolReport]:
         _report_dry(cfg),
         _report_web(cfg),
         _report_subagents(cfg),
+        _report_cluster(cfg),
         _report_images(cfg),
         _report_local_tools(cfg),
         _report_memory(cfg),

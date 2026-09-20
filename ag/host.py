@@ -2,8 +2,10 @@
 
 AG inspects the machine it runs on and adapts to it: scale parallelism to the CPU,
 size the local model to the GPU, confirm it has outbound connectivity. This is
-*use* of the host's own resources for AG's legitimate work — it does not touch other
-devices, network infrastructure, or anything AG doesn't own on this box.
+*use* of the host's own resources for AG's legitimate work. Reaching your OTHER devices
+is a separate, opt-in feature (ag/net/): each device you own runs a cooperative `ag
+node` worker and is used only after you approve it — AG never probes or seizes a device
+that has not volunteered itself.
 
 Network: AG makes outbound requests for its work. `ag serve` optionally opens a local
 web UI (an inbound port) for your own use. AG emits no telemetry — it only makes the
