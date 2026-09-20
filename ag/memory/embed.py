@@ -127,12 +127,31 @@ class OllamaEmbedder(Embedder):
         return bool(v)
 
     def embed(self, texts: Sequence[str]) -> List[List[float]]:
+        """Embed each text, memoising on the exact string.
+
+        Every miss is an HTTP round trip to Ollama, and a single recall embeds the
+        same query more than once (scoring, then duplicate detection, then
+        contradiction detection all embed it). Those calls pass *identical* strings,
+        so an exact-match LRU converts them into one network call. A failed embed is
+        deliberately NOT cached: the next call should retry rather than inherit a
+        zero vector from a transient outage for the rest of the process's life.
+        """
+        from ..cache import EMBEDDINGS
         out: List[List[float]] = []
         for t in texts:
+            key = f"{self.name}:{self.model}:{t}"
+            hit = EMBEDDINGS.get(key)
+            if hit is not None:
+                out.append(list(hit))
+                continue
             try:
-                out.append(self._post(t))
+                vec = self._post(t)
             except Exception:
                 out.append([0.0] * (self.dim or _HASH_DIM))  # don't sink the batch
+                continue
+            if vec:
+                EMBEDDINGS.put(key, list(vec))
+            out.append(vec)
         return out
 
 

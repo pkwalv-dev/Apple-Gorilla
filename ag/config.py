@@ -121,6 +121,22 @@ class Config:
     # bench_samples=1 to fall back to the cheap single-shot (tolerance-only) gate.
     bench_samples: int = 3                      # benchmark repeats per fitness estimate
     fitness_k: float = 1.0                      # required margin in standard errors
+    # --- the benchmark as a PROCESS, not a constant (ag/benchgen.py) ---------
+    # 14 fixed tasks cap evolution at "passes those 14", and a fixed suite is
+    # memorizable — a LoRA run over AG's history can learn the answers without the
+    # capability. Generated tasks are unbounded, reproducible from a seed, and split
+    # into train/validation so adoption can be confirmed on items evolution never
+    # optimised against. A curated state/bench/tasks.jsonl still overrides this.
+    bench_generated: bool = False               # use generated tasks as the suite
+    bench_generated_n: int = 40                 # how many tasks per suite
+    bench_seed: int = 1337                      # suite seed (same seed = same suite)
+    bench_tier: int = 2                         # 1 easy | 2 normal | 3 hard | 0 mixed
+    bench_validate: bool = True                 # re-check an adopted edit on held-out tasks
+    # Tasks are independent, so they can run concurrently. 1 by default: a single
+    # local GPU serialises anyway and concurrency would only add queueing. Raise it
+    # for an API backend, where it is close to a linear wall-clock win on the
+    # dominant cost of an evolve cycle.
+    bench_workers: int = 1
     allow_external_tools: bool = False        # default-deny for Chrome/browser/etc.
     allow_web: bool = True                     # AG's standing internet access
     # The agentic reason->act->observe loop with the SAFE tools on by default: exact
@@ -188,6 +204,10 @@ class Config:
     # GGUF so the fine-tuned model becomes a selectable Ollama backend.
     lora_gguf_quant: str = "q4_k_m"            # quantization for the exported GGUF
     gguf_convert_script: str = ""              # path to llama.cpp convert_hf_to_gguf.py (auto-found if empty)
+    # Inject a short briefing about THIS machine (OS, shell, package manager, path
+    # conventions) into the executor prompt. Cheap, and it removes a whole class of
+    # confidently-wrong platform-specific answers.
+    os_context: bool = True
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory

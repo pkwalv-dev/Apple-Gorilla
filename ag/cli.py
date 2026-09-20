@@ -201,10 +201,25 @@ def cmd_bench(args) -> int:
     client = _client(args, cfg)
     mode = getattr(args, "mode", None) or cfg.bench_mode
     n = max(1, getattr(args, "samples", 1) or 1)
+    workers = getattr(args, "workers", None)
+
+    # An explicitly generated suite is built here and passed through, so --split
+    # validation scores AG on tasks the evolve loop has never optimised against.
+    tasks = None
+    if getattr(args, "generated", False) or getattr(args, "split", "train") != "train":
+        tasks = bench.load_generated(
+            cfg, split=getattr(args, "split", "train") or "train",
+            n=(getattr(args, "tasks", 0) or None),
+            seed=getattr(args, "seed", None), tier=getattr(args, "tier", None))
+        print(f"generated suite: {len(tasks)} tasks "
+              f"(split={getattr(args, 'split', 'train')}, "
+              f"seed={getattr(args, 'seed', None) or cfg.bench_seed})",
+              file=sys.stderr)
     # Multiple samples surface the nondeterminism the evolve gate reasons about:
     # report the mean fitness and its standard error, not a single noisy draw.
     if n > 1:
-        runs = [bench.run_benchmark(client, cfg, mode=mode) for _ in range(n)]
+        runs = [bench.run_benchmark(client, cfg, mode=mode, tasks=tasks,
+                                    workers=workers) for _ in range(n)]
         stat = bench.summarize([r.fitness for r in runs])
         res = runs[-1]
         if getattr(args, "json", False):
@@ -214,7 +229,8 @@ def cmd_bench(args) -> int:
               f"stdev={stat.stdev})   mode={mode}")
         print("  per-run: " + ", ".join(str(r.fitness) for r in runs))
         return 0
-    res = bench.run_benchmark(client, cfg, mode=mode)
+    res = bench.run_benchmark(client, cfg, mode=mode, tasks=tasks,
+                              workers=workers)
     # --json emits ONLY the JSON, so machine callers (the evolve fitness gate shells
     # out to this) can parse stdout cleanly.
     if getattr(args, "json", False):
@@ -222,6 +238,15 @@ def cmd_bench(args) -> int:
         return 0
     print(f"fitness: {res.fitness}/10   ({res.passed}/{res.n} passed, "
           f"pass_rate={res.pass_rate})   mode={res.mode}   {res.elapsed_s}s")
+    if res.by_category:
+        # Where AG is weak is more actionable than the average it rolls up into.
+        parts = [f"{c} {d['passed']}/{d['n']}"
+                 for c, d in sorted(res.by_category.items())]
+        print("  by category: " + "  ".join(parts))
+        weak = res.weakest_category
+        if weak and res.by_category[weak]["pass_rate"] < 1.0:
+            print(f"  weakest: {weak} "
+                  f"({res.by_category[weak]['pass_rate']:.0%} pass)")
     if getattr(args, "verbose", False):
         for t in res.per_task:
             flag = "PASS" if t["passed"] else "FAIL"
@@ -294,7 +319,7 @@ def cmd_doctor(args) -> int:
     gate = "ready" if gate_available() else "UNAVAILABLE (pip install pytest)"
     print(f"evolve gate:      {gate}")
     from . import bench, archive
-    n_tasks = len(bench.load_tasks())
+    n_tasks = len(bench.load_tasks(cfg=cfg))
     fgate = "ON (keep-if-better)" if cfg.fitness_gate else "off"
     print(f"fitness gate:     {fgate} — {n_tasks} benchmark tasks ({cfg.bench_mode})")
     if cfg.evolver_backend:
@@ -357,8 +382,116 @@ def cmd_tools(args) -> int:
 
 def cmd_serve(args) -> int:
     from . import server
-    server.serve(host=args.host, port=args.port, open_browser=args.open)
+    server.serve(host=args.host, port=args.port, open_browser=args.open,
+                 token=getattr(args, "token", "") or "",
+                 no_auth=bool(getattr(args, "no_auth", False)))
     return 0
+
+
+def cmd_read(args) -> int:
+    """Read any file, in any format, with AG's interpretation of it."""
+    from . import formats
+    from .osadapt import detect
+    interp = formats.read_path(detect().normalize_path(args.path))
+    if getattr(args, "json", False):
+        print(json.dumps(interp.as_dict(), indent=2, default=str))
+        return 0
+    print(f"{interp.label}  [{interp.kind}]  confidence {interp.confidence:.2f}  "
+          f"{interp.n_bytes} bytes  (handler: {interp.handler})")
+    for n in interp.notes:
+        print(f"  note: {n}")
+    print("-" * 70)
+    print(interp.text)
+    return 0 if interp.kind != "error" else 1
+
+
+def cmd_inspect(args) -> int:
+    """Identify a file's format and structure without dumping its contents."""
+    from . import formats
+    from .osadapt import detect
+    interp = formats.read_path(detect().normalize_path(args.path))
+    out = {"kind": interp.kind, "label": interp.label,
+           "confidence": interp.confidence, "bytes": interp.n_bytes,
+           "handler": interp.handler, "truncated": interp.truncated,
+           "notes": interp.notes, "structure": interp.structured}
+    if getattr(args, "json", False):
+        print(json.dumps(out, indent=2, default=str))
+        return 0
+    print(f"path:       {args.path}")
+    print(f"format:     {interp.label}  [{interp.kind}]")
+    print(f"confidence: {interp.confidence:.2f}   handler: {interp.handler}")
+    print(f"size:       {interp.n_bytes} bytes"
+          + ("  (truncated)" if interp.truncated else ""))
+    for n in interp.notes:
+        print(f"note:       {n}")
+    if interp.structured:
+        print("structure:")
+        print("  " + json.dumps(interp.structured, indent=2,
+                                default=str)[:2000].replace("\n", "\n  "))
+    return 0
+
+
+def cmd_osinfo(args) -> int:
+    from . import osadapt
+    if getattr(args, "json", False):
+        print(json.dumps(osadapt.detect().as_dict(), indent=2, default=str))
+        return 0
+    print(osadapt.report())
+    return 0
+
+
+def cmd_guidance(args) -> int:
+    """The escalation queue: what AG asked, and answering it."""
+    from . import guidance
+    action = getattr(args, "action", "list")
+    if action == "list":
+        items = guidance.pending()
+        if not items:
+            print("(no pending guidance requests)")
+            return 0
+        print(f"{len(items)} pending request(s):\n")
+        for i, r in enumerate(items, 1):
+            print(r.render(index=i))
+            print()
+        return 0
+    if action == "answer":
+        if not args.target or not args.text:
+            print("usage: ag guidance answer <id> \"your answer\"", file=sys.stderr)
+            return 2
+        r = guidance.answer(args.target, args.text)
+        if r is None:
+            print(f"no pending request matching {args.target!r}", file=sys.stderr)
+            return 1
+        print(f"answered {r.id[:8]}: {r.answer}")
+        # An answer is durable knowledge: store it so the same question, asked by a
+        # later run, is already settled rather than escalated a second time.
+        try:
+            from . import memory
+            memory.remember(f"Guidance: {r.question} -> {r.answer}",
+                            origin=memory.Origin.USER)
+            print("(stored as a durable memory)")
+        except Exception:
+            pass
+        return 0
+    if action == "answered":
+        for r in guidance.answered(limit=args.k or 20):
+            print(r.render())
+            print()
+        return 0
+    if action == "clear":
+        print(f"cleared {guidance.clear()} pending request(s)")
+        return 0
+    if action == "stats":
+        print(json.dumps(guidance.stats(), indent=2))
+        return 0
+    return 2
+
+
+def cmd_mcp(args) -> int:
+    """Serve AG over MCP (stdio JSON-RPC) so other agents can drive it."""
+    from . import mcp_server
+    cfg = Config.load()
+    return mcp_server.serve(cfg)
 
 
 def cmd_host(args) -> int:
@@ -783,6 +916,19 @@ def build_parser() -> argparse.ArgumentParser:
     bn.add_argument("--verbose", "-v", action="store_true",
                     help="show every task's pass/fail and answer")
     bn.add_argument("--json", action="store_true", help="emit the raw result JSON")
+    bn.add_argument("--generated", action="store_true",
+                    help="use the generated, unbounded suite (ag/benchgen.py) "
+                         "instead of the fixed seed tasks")
+    bn.add_argument("--split", choices=["train", "validation"], default="train",
+                    help="generated suite split (validation = held out from evolve)")
+    bn.add_argument("--tasks", type=int, default=0,
+                    help="how many generated tasks (default: config bench_generated_n)")
+    bn.add_argument("--tier", type=int, default=None,
+                    help="generated difficulty: 1 easy, 2 normal, 3 hard, 0 mixed")
+    bn.add_argument("--seed", type=int, default=None,
+                    help="generated suite seed (same seed = same tasks)")
+    bn.add_argument("--workers", type=int, default=None,
+                    help="run tasks concurrently (default: config bench_workers)")
     bn.set_defaults(func=cmd_bench)
 
     sub.add_parser("versions", help="list source snapshots").set_defaults(
@@ -805,11 +951,46 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("host", help="inspect host resources + network posture").set_defaults(
         func=cmd_host)
 
+    rd = sub.add_parser("read", help="read ANY file format (pdf/docx/xlsx/sqlite/"
+                                     "zip/binary) with AG's interpretation")
+    rd.add_argument("path")
+    rd.add_argument("--json", action="store_true", help="emit the raw interpretation")
+    rd.set_defaults(func=cmd_read)
+
+    ins = sub.add_parser("inspect", help="identify a file's format + structure "
+                                         "without dumping its contents")
+    ins.add_argument("path")
+    ins.add_argument("--json", action="store_true")
+    ins.set_defaults(func=cmd_inspect)
+
+    osi = sub.add_parser("osinfo", help="how AG adapts to THIS machine "
+                                        "(shell, package manager, paths)")
+    osi.add_argument("--json", action="store_true")
+    osi.set_defaults(func=cmd_osinfo)
+
+    gd = sub.add_parser("guidance", help="questions AG raised for you "
+                                         "(list/answer/answered/clear/stats)")
+    gd.add_argument("action", nargs="?", default="list",
+                    choices=["list", "answer", "answered", "clear", "stats"])
+    gd.add_argument("target", nargs="?", default="", help="request id (for answer)")
+    gd.add_argument("text", nargs="?", default="", help="your answer")
+    gd.add_argument("-k", type=int, default=20, help="how many to show")
+    gd.set_defaults(func=cmd_guidance)
+
+    sub.add_parser("mcp", help="serve AG over MCP (stdio) so other agents can use it"
+                   ).set_defaults(func=cmd_mcp)
+
     sv = sub.add_parser("serve", help="run the browser web app (any OS / phone)")
     sv.add_argument("--host", default="127.0.0.1",
                     help="127.0.0.1 (local only) or 0.0.0.0 (reachable from phone/LAN)")
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--open", action="store_true", help="open a browser on start")
+    sv.add_argument("--token", default="",
+                    help="access token required on non-loopback binds "
+                         "(auto-generated when omitted)")
+    sv.add_argument("--no-auth", dest="no_auth", action="store_true",
+                    help="disable the token on a network bind (NOT recommended: "
+                         "anyone who can reach the port can run this instance)")
     sv.set_defaults(func=cmd_serve)
 
     lg = sub.add_parser("login",
