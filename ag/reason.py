@@ -253,13 +253,26 @@ def _is_not_an_answer(text: str, names) -> bool:
 
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None, on_delta=None,
-          cancel=None, agent: str = "root", parents=(), depth: int = 0) -> ReasonResult:
+          cancel=None, agent: str = "root", parents=(), depth: int = 0,
+          stop_check=None, on_step=None) -> ReasonResult:
     """Run the reason→act→observe loop and return the final answer + trace.
 
     `on_delta(text)` streams each model call's output live; `cancel` (a Canceller) lets
     a run be stopped at any point. Both are optional. `agent`/`parents`/`depth` scope
     the skill namespace and bound sub-agent recursion.
+
+    `stop_check()` is consulted between steps and lets the operator halt THIS agent
+    specifically (the swarm UI's per-agent kill, or a remote node checking back with the
+    coordinator). It defaults to the fleet's own signal for this agent. `on_step()` is
+    called each step so a running agent can heartbeat its liveness.
     """
+    from . import fleet
+    if stop_check is None:
+        def stop_check():
+            try:
+                return fleet.should_stop(agent)
+            except Exception:
+                return False
     from .pipeline import _emit  # reuse the pipeline's safe emitter
     # Only forward these when set, so stub clients that don't accept them still work.
     dkw = {}
@@ -280,12 +293,13 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     tin = tout = 0
 
     for _ in range(max(1, max_steps)):
-        try:
-            from . import fleet
-            if fleet.kill_active():
-                return ReasonResult("(halted: fleet kill switch engaged)", steps, tin, tout)
-        except Exception:
-            pass
+        if stop_check():
+            return ReasonResult("(halted: agent stopped by operator)", steps, tin, tout)
+        if on_step is not None:
+            try:
+                on_step()
+            except Exception:
+                pass
         res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg,
                               **dkw)
         tin += res.input_tokens
