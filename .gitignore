@@ -8,6 +8,7 @@ state/versions/*/
 state/memory/
 state/archive/
 state/bench/
+state/guidance/
 state/skills/
 state/images/
 state/video/

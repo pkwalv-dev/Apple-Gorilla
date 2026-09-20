@@ -125,7 +125,19 @@ def _fitness_verdict(incumbent: Optional[float], candidate: Optional[float], *,
     return "neutral"
 
 
-def _bench_once(client, cfg: Config) -> dict:
+def _validation_enabled(cfg: Config) -> bool:
+    """Whether a held-out split exists to judge adoption on.
+
+    Only meaningful with the generated suite: the 14 curated tasks are a fixed set
+    with nothing to hold out. When enabled, `benchgen` partitions the *seed space*
+    so validation tasks are provably disjoint from anything evolution optimises
+    against.
+    """
+    return bool(getattr(cfg, "bench_validate", False)
+                and getattr(cfg, "bench_generated", False))
+
+
+def _bench_once(client, cfg: Config, *, split: str = "train") -> dict:
     """One benchmark run of the CURRENT on-disk source, in a SUBPROCESS.
 
     The subprocess is essential, not incidental: `evolve` patches files like
@@ -140,6 +152,8 @@ def _bench_once(client, cfg: Config) -> dict:
     if backend:
         cmd += ["--backend", backend]
     cmd += ["bench", "--json", "--mode", getattr(cfg, "bench_mode", "optimize_execute")]
+    if split == "validation":
+        cmd += ["--generated", "--split", "validation"]
     try:
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
         return extract_json(r.stdout) or {}
@@ -147,7 +161,8 @@ def _bench_once(client, cfg: Config) -> dict:
         return {}
 
 
-def _measure_fitness(client, cfg: Config, *, samples: Optional[int] = None, emit=None):
+def _measure_fitness(client, cfg: Config, *, samples: Optional[int] = None, emit=None,
+                     split: str = "train"):
     """Estimate fitness by repeating the benchmark, since one run is a noisy draw.
 
     Runs the benchmark `samples` (default `cfg.bench_samples`) times and reduces the
@@ -166,7 +181,7 @@ def _measure_fitness(client, cfg: Config, *, samples: Optional[int] = None, emit
     fits: List[float] = []
     last: dict = {}
     for i in range(n):
-        data = _bench_once(client, cfg)
+        data = _bench_once(client, cfg, split=split)
         fits.append(float(data.get("fitness", 0.0) or 0.0))
         last = data or last
         if n > 1:
@@ -176,7 +191,7 @@ def _measure_fitness(client, cfg: Config, *, samples: Optional[int] = None, emit
     return SimpleNamespace(
         fitness=stat.mean, stdev=stat.stdev, sem=stat.sem, n=stat.n, samples=fits,
         pass_rate=float(last.get("pass_rate", 0.0) or 0.0),
-        per_task=list(last.get("per_task", []) or []),
+        per_task=list(last.get("per_task", []) or []), split=split,
     )
 
 
@@ -358,6 +373,11 @@ def evolve(client, cfg: Config, *, apply: bool = False,
     incumbent = None
     incumbent_sem = None      # known only when we measure the incumbent fresh
     bench_res = None
+    # Gate 3 uses a split the proposer never sees results from, so a change that
+    # merely memorises the scored tasks cannot buy adoption with it.
+    use_validation = do_fitness and _validation_enabled(cfg)
+    incumbent_val = None
+    incumbent_val_sem = None
     if do_fitness:
         incumbent = archive.get_cached_fitness(parent_hash)
         if incumbent is None:
@@ -365,6 +385,15 @@ def evolve(client, cfg: Config, *, apply: bool = False,
             incumbent = bench_res.fitness
             incumbent_sem = bench_res.sem
             archive.set_cached_fitness(parent_hash, incumbent)
+    if use_validation:
+        incumbent_val = archive.get_cached_fitness(parent_hash + ":validation")
+        if incumbent_val is None:
+            val_res = _measure_fitness(client, cfg, emit=emit, split="validation")
+            incumbent_val = val_res.fitness
+            incumbent_val_sem = val_res.sem
+            archive.set_cached_fitness(parent_hash + ":validation", incumbent_val)
+            _emit(emit, "bench", f"incumbent held-out fitness: {incumbent_val}/10",
+                  level="result")
 
     briefing = _direction(cfg, telemetry, bench_res=bench_res)
     directive = (directive or "").strip()
@@ -493,7 +522,47 @@ def evolve(client, cfg: Config, *, apply: bool = False,
                 fitness_delta=delta, verdict=verdict, candidate_stdev=cand_stdev,
                 samples=cand_n, margin=margin)
 
-    # Passing candidate (both gates cleared).
+    # 5) Gate 3 (GENERALISATION): the candidate must also not regress on tasks that
+    # were held out of the optimisation target. Gate 2 alone can be satisfied by a
+    # change that fits the scored tasks; overfitting is the characteristic failure of
+    # any keep-if-better loop, and the only honest detector is a split the loop does
+    # not optimise against. Only a *significant* drop rejects, same statistics as
+    # Gate 2 — noise must not veto a real improvement.
+    val_fitness = None
+    val_verdict = ""
+    if use_validation:
+        cand_val = _measure_fitness(client, cfg, emit=emit, split="validation")
+        val_fitness = cand_val.fitness
+        archive.set_cached_fitness(candidate_hash + ":validation", val_fitness)
+        inc_val_sem = incumbent_val_sem if incumbent_val_sem is not None else cand_val.sem
+        val_sem = math.hypot(inc_val_sem or 0.0, cand_val.sem or 0.0)
+        val_verdict = _fitness_verdict(
+            incumbent_val, val_fitness,
+            tol=float(getattr(cfg, "fitness_tol", 0.05)),
+            sem=val_sem, k=float(getattr(cfg, "fitness_k", 1.0)))
+        _emit(emit, "bench",
+              f"held-out fitness: {incumbent_val} -> {val_fitness} ({val_verdict})",
+              level="result")
+        if val_verdict == "regressed":
+            backup.restore(snap)
+            archive.record(archive.Entry(
+                ts=archive.now_ts(), parent_hash=parent_hash,
+                candidate_hash=candidate_hash, incumbent_fitness=incumbent,
+                candidate_fitness=candidate, delta=delta, tests_passed=True,
+                adopted=False, verdict="overfit", rationale=rationale,
+                changed=changed, snapshot_id=snap.id, candidate_stdev=cand_stdev,
+                samples=cand_n, margin=margin))
+            return EvolveResult(
+                True, False, True, rationale=rationale, changed=changed,
+                test_output=output, snapshot_id=snap.id,
+                reason=(f"held-out fitness regressed ({incumbent_val}->{val_fitness}) "
+                        f"— change improved the scored tasks but not the held-out "
+                        f"ones, so it was rolled back as overfitting"),
+                incumbent_fitness=incumbent, candidate_fitness=candidate,
+                fitness_delta=delta, verdict="overfit", candidate_stdev=cand_stdev,
+                samples=cand_n, margin=margin)
+
+    # Passing candidate (all gates cleared).
     if cfg.autonomy_level == "manual" and not apply:
         # Leave the passing change in place for human review, but do not commit.
         return EvolveResult(

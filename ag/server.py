@@ -1323,8 +1323,69 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    # --- access control ----------------------------------------------------
+    # Empty = loopback-only, no auth (unchanged local behaviour). Set by serve()
+    # whenever the bind address is reachable from the network, because that turns
+    # AG into an unauthenticated endpoint that runs your model, reads your files,
+    # and can trigger evolve. MODALITY.md flagged exactly this; the fix is a token.
+    auth_token: str = ""
+
+    def _authorized(self) -> bool:
+        if not self.auth_token:
+            return True
+        supplied = ""
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            supplied = header[7:].strip()
+        if not supplied:
+            from urllib.parse import urlparse, parse_qs
+            supplied = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
+        if not supplied:
+            cookie = self.headers.get("Cookie", "")
+            for part in cookie.split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == "ag_token":
+                    supplied = v.strip()
+                    break
+        import hmac
+        # compare_digest: a plain == leaks the token's prefix through timing.
+        return hmac.compare_digest(supplied, self.auth_token)
+
+    def _deny(self) -> None:
+        body = ("<!doctype html><meta charset=utf-8><title>Apple-Gorilla</title>"
+                "<body style='font-family:system-ui;padding:2rem;max-width:34rem'>"
+                "<h2>Access token required</h2><p>This Apple-Gorilla instance is "
+                "bound to a network address, so it requires the access token printed "
+                "in the terminal when it started.</p>"
+                "<p>Open it as <code>http://HOST:PORT/?token=YOUR_TOKEN</code>.</p>")
+        self._send(401, body)
+
+    def _guard(self) -> bool:
+        """True if the request may proceed; sends 401 and returns False if not."""
+        if self._authorized():
+            return True
+        self._deny()
+        return False
+
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        if not self._guard():
+            return
+        # The token arrives as `/?token=...`, so the root route has to be matched
+        # on the path alone. Only the root is normalised here: /media? carries a
+        # meaningful query string, and every other route is an exact literal.
+        if self.path.split("?", 1)[0] in ("/", "/index.html"):
+            # Set the token as a cookie once, so the page's own fetch() calls (which
+            # cannot carry the query string) authenticate for the rest of the session.
+            if self.auth_token:
+                body = PAGE.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Set-Cookie",
+                                 f"ag_token={self.auth_token}; Path=/; SameSite=Strict")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             self._send(200, PAGE)
         elif self.path == "/tools":
             from . import inventory
@@ -1622,6 +1683,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, "not found", "text/plain")
 
     def do_POST(self):
+        if not self._guard():
+            return
         if self.path in ("/fleet/act", "/skills/act", "/skills/acquire", "/bundle/export",
                          "/lora/build", "/lora/train", "/lora/set-base", "/lora/merge"):
             try:
@@ -2205,7 +2268,7 @@ def _doctor_data(cfg: Config) -> dict:
         "ollama_models": models, "api_key": has_key, "oauth": oauth,
         "oauth_token": oauth_token_status() if oauth else "none",
         "autonomy": cfg.autonomy_level, "evolver_backend": cfg.evolver_backend,
-        "fitness_gate": cfg.fitness_gate, "bench_tasks": len(bench.load_tasks()),
+        "fitness_gate": cfg.fitness_gate, "bench_tasks": len(bench.load_tasks(cfg=cfg)),
         "bench_mode": cfg.bench_mode, "bench_samples": cfg.bench_samples,
         "evolve_gate": "ready" if gate_available() else "unavailable (pip install pytest)",
         "snapshots": len(backup.list_snapshots()),
@@ -2303,18 +2366,46 @@ def _lan_ip() -> str:
     except Exception:
         return "127.0.0.1"
 
-def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False):
+def _is_loopback(host: str) -> bool:
+    """Only these bind addresses are unreachable from the network."""
+    return host in ("127.0.0.1", "::1", "localhost", "")
+
+
+def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
+          token: str = "", no_auth: bool = False):
     _Handler.cfg = Config.load()
     _Handler.bind_host = host
     _Handler.bind_port = port
+
+    # Binding off-loopback publishes an endpoint that runs the model, reads files
+    # through the tool layer, and can start an evolve cycle. Requiring a token there
+    # — and generating one automatically, so it cannot be skipped by forgetting —
+    # makes the safe path the default path. Loopback is untouched: a personal tool
+    # on your own machine should not ask you to log in.
+    if _is_loopback(host) or no_auth:
+        _Handler.auth_token = ""
+    else:
+        import secrets
+        _Handler.auth_token = token or secrets.token_urlsafe(24)
+
     httpd = ThreadingHTTPServer((host, port), _Handler)
-    local = f"http://127.0.0.1:{port}"
+    tok = _Handler.auth_token
+    qs = f"/?token={tok}" if tok else "/"
+    local = f"http://127.0.0.1:{port}{qs}"
     print(f"Apple-Gorilla web app running:")
     print(f"  this machine : {local}")
-    if host == "0.0.0.0":
-        print(f"  on your phone: http://{_lan_ip()}:{port}  (same wifi)")
+    if not _is_loopback(host):
+        print(f"  on your phone: http://{_lan_ip()}:{port}{qs}  (same wifi)")
     else:
         print(f"  (localhost only; use --host 0.0.0.0 to reach it from your phone)")
+    if tok:
+        print(f"\n  ACCESS TOKEN: {tok}")
+        print("  This instance is reachable from the network, so requests without "
+              "the token are refused.")
+        print("  Open the link above (the token is set as a cookie on first load).")
+    elif not _is_loopback(host):
+        print("\n  WARNING: --no-auth on a network address. Anyone who can reach "
+              f"port {port} can run this instance.")
     print("Ctrl+C to stop.")
     if open_browser:
         try:

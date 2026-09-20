@@ -36,7 +36,7 @@ class Tool:
 
 
 def _registry(client=None, cfg=None, agent: str = "root", parents=(),
-              depth: int = 0) -> List[Tool]:
+              depth: int = 0, task: str = "") -> List[Tool]:
     def _delegate(args, broker):
         from . import agents
         role = str(args.get("role", "worker"))
@@ -63,6 +63,39 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
         return github.fetch(str(args.get("repo", "")), str(args.get("path", "")),
                             broker=broker, allowlist=allow,
                             ref=str(args.get("ref", "main")))
+
+    def _ask_guidance(args, broker):
+        """Escalate to the human — the third option besides guessing and refusing.
+
+        Deliberately non-blocking. The request is queued for the operator and the
+        loop is told to continue with its best option and to SAY that it assumed.
+        A blocking ask would hang every unattended run; an unmarked guess is how
+        agents mislead people. This is the honest middle.
+        """
+        question = str(args.get("question", "")).strip()
+        if not question:
+            return "ask_guidance error: provide a 'question'"
+        raw_opts = args.get("options") or []
+        if isinstance(raw_opts, str):
+            raw_opts = [o.strip() for o in raw_opts.split("|") if o.strip()]
+        tried = args.get("tried") or []
+        if isinstance(tried, str):
+            tried = [tried]
+        from . import guidance
+        req = guidance.ask(
+            question,
+            blocked_on=str(args.get("blocked_on", "")),
+            tried=tried, options=raw_opts,
+            recommendation=str(args.get("recommendation", "")),
+            urgency=str(args.get("urgency", "soon")),
+            confidence=args.get("confidence", 0.5),
+            context=task[:600], agent=agent)
+        return req.fallback_note()
+
+    def _os_info(args, broker):
+        """What machine am I on, and what commands are valid here."""
+        from . import osadapt
+        return osadapt.report()
 
     def _consult_specialist(args, broker):
         """Delegate a subtask to the specialist model (the abliterated coder) — for code,
@@ -133,8 +166,22 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
              'save a durable fact, e.g. {"tool":"remember","args":{"text":"User prefers metric units"}}',
              lambda args, broker: local.memory_remember(str(args.get("text", "")))),
         Tool("read_file", "path", "filesystem_read",
-             'read a local file, e.g. {"tool":"read_file","args":{"path":"./README.md"}}',
+             'read a local TEXT file, e.g. {"tool":"read_file","args":{"path":"./README.md"}}',
              lambda args, broker: local.read_file(str(args.get("path", "")), broker=broker)),
+        Tool("read_any", "path", "filesystem_read",
+             'read a file of ANY format — PDF, Word/Excel/PowerPoint, SQLite, zip, '
+             'CSV, JSON, image, binary. Use this instead of read_file whenever the '
+             'file is not plain text. '
+             'e.g. {"tool":"read_any","args":{"path":"./report.pdf"}}',
+             lambda args, broker: local.read_any(str(args.get("path", "")),
+                                                 broker=broker)),
+        Tool("inspect_format", "path", "filesystem_read",
+             'identify what a file IS (format, structure, confidence) without '
+             'reading all of it — cheap, use it before read_any on a large or '
+             'unknown file. '
+             'e.g. {"tool":"inspect_format","args":{"path":"./mystery.bin"}}',
+             lambda args, broker: local.inspect_format(str(args.get("path", "")),
+                                                       broker=broker)),
         Tool("list_dir", "path", "filesystem_read",
              'list a directory, e.g. {"tool":"list_dir","args":{"path":"."}}',
              lambda args, broker: local.list_dir(str(args.get("path", ".")), broker=broker)),
@@ -151,6 +198,21 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
              'read a file from an allowlisted repo (reference code), '
              'e.g. {"tool":"github_fetch","args":{"repo":"ollama/ollama","path":"README.md"}}',
              _github),
+        Tool("ask_guidance", "question", None,
+             'ASK THE USER when you genuinely cannot decide — an ambiguous '
+             'instruction, a destructive action needing sign-off, or a choice only '
+             'they can make. You will NOT be blocked: continue with your best '
+             'option and say that you assumed it. '
+             'e.g. {"tool":"ask_guidance","args":{"question":"Which database '
+             'should I export to?","options":["prod postgres","local sqlite"],'
+             '"recommendation":"local sqlite","urgency":"blocking",'
+             '"confidence":0.3}}',
+             _ask_guidance),
+        Tool("os_info", "", None,
+             'report THIS machine: OS, shell, package manager, paths, privileges — '
+             'check before suggesting or running any system command. '
+             'e.g. {"tool":"os_info","args":{}}',
+             _os_info),
     ]
     # The specialist model, offered when routing is on and it's actually available.
     if cfg is not None and getattr(cfg, "model_routing", True):
@@ -180,13 +242,13 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
 
 
 def available_tools(broker, client=None, cfg=None, *, agent: str = "root",
-                    parents=(), depth: int = 0) -> List[Tool]:
+                    parents=(), depth: int = 0, task: str = "") -> List[Tool]:
     """Only tools whose grant is held (or that need none) are offered this run.
 
     Built-in tools plus every acquired skill this agent has inherited whose declared
     capabilities are all granted — so AG's toolset grows as it acquires skills."""
     out = []
-    for t in _registry(client, cfg, agent, parents, depth):
+    for t in _registry(client, cfg, agent, parents, depth, task):
         if t.grant is None or (broker is not None and broker.check(t.grant)):
             out.append(t)
     try:
@@ -267,7 +329,8 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
         dkw["on_delta"] = on_delta
     if cancel is not None:
         dkw["cancel"] = cancel
-    tools = available_tools(broker, client, cfg, agent=agent, parents=parents, depth=depth)
+    tools = available_tools(broker, client, cfg, agent=agent, parents=parents,
+                            depth=depth, task=user)
     if not tools:  # nothing to use — behave like a normal single call
         res = client.complete(system=system, user=user, cfg=cfg, **dkw)
         return ReasonResult(res.text, [], res.input_tokens, res.output_tokens)
@@ -321,7 +384,7 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
         # the new tool is offered on the next step of THIS run.
         if tool.name == "acquire_skill" and "registered skill" in observation:
             tools = available_tools(broker, client, cfg, agent=agent,
-                                    parents=parents, depth=depth)
+                                    parents=parents, depth=depth, task=user)
             by_name = {t.name: t for t in tools}
             sys_p = _tools_system(system, tools)
 

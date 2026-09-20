@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .config import Config
 
@@ -584,39 +584,52 @@ def oauth_token_status() -> str:
     return "valid" if exp_s > _time.time() else "expired"
 
 
-_OLLAMA_TAGS_CACHE: dict = {}
+_OLLAMA_TAGS_CACHE: dict = {}   # retained: external callers may import it
 
 
-def ollama_has_model(cfg: Config, name: str, *, timeout: float = 1.5) -> bool:
-    """Whether `name` is pulled locally, so routing can fall back gracefully instead of
-    erroring mid-run on a model the user hasn't downloaded. Cached per host+name for the
-    process; a missing model is not re-probed on every turn."""
-    name = (name or "").strip()
-    if not name:
-        return False
-    host = cfg.ollama_host.rstrip("/")
-    key = (host, name)
-    if key in _OLLAMA_TAGS_CACHE:
-        return _OLLAMA_TAGS_CACHE[key]
+def _ollama_tags(host: str, timeout: float) -> Optional[List[str]]:
+    """The tag list for one host, TTL-cached.
+
+    Cached per HOST, not per (host, name): one HTTP round trip answers every
+    model question during routing instead of one probe per candidate. A TTL
+    (not a permanent cache) means a model you pull — or delete — while AG is
+    running is noticed within `PROBES.ttl`, which the old positive-only cache
+    could never do. None means "the probe failed", which is deliberately NOT
+    cached: a momentarily-down Ollama must not disable routing for the session.
+    """
+    from .cache import PROBES
+    key = f"ollama_tags:{host}"
+    hit = PROBES.get(key)
+    if hit is not None:
+        return list(hit)
     import json as _json
     import urllib.request
-    ok = False
     try:
         with urllib.request.urlopen(host + "/api/tags", timeout=timeout) as r:
             tags = [m.get("name", "") for m in
                     _json.loads(r.read().decode("utf-8")).get("models", [])]
-        # Exact match, tolerating an implicit ":latest". A bare repo name (no tag) also
-        # matches any pulled tag of that repo. NOT a loose prefix match: "qwen2.5:7b"
-        # must not be reported as "qwen2.5:7b-instruct", or the call errors at run time.
-        if ":" in name:
-            ok = name in tags or (name + ":latest") in tags
-        else:
-            ok = any(t == name or t.split(":")[0] == name for t in tags)
     except Exception:
-        ok = False
-    if ok:                       # only cache a positive; a transient probe failure
-        _OLLAMA_TAGS_CACHE[key] = True   # shouldn't disable routing for the whole run
-    return ok
+        return None
+    PROBES.put(key, list(tags))
+    return tags
+
+
+def ollama_has_model(cfg: Config, name: str, *, timeout: float = 1.5) -> bool:
+    """Whether `name` is pulled locally, so routing can fall back gracefully instead of
+    erroring mid-run on a model the user hasn't downloaded."""
+    name = (name or "").strip()
+    if not name:
+        return False
+    host = cfg.ollama_host.rstrip("/")
+    tags = _ollama_tags(host, timeout)
+    if tags is None:
+        return False
+    # Exact match, tolerating an implicit ":latest". A bare repo name (no tag) also
+    # matches any pulled tag of that repo. NOT a loose prefix match: "qwen2.5:7b"
+    # must not be reported as "qwen2.5:7b-instruct", or the call errors at run time.
+    if ":" in name:
+        return name in tags or (name + ":latest") in tags
+    return any(t == name or t.split(":")[0] == name for t in tags)
 
 
 def make_client(cfg: Optional[Config] = None, *, backend: Optional[str] = None,

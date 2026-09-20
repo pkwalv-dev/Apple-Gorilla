@@ -57,19 +57,65 @@ def _iter_core_py() -> List[Path]:
             if "__pycache__" not in p.parts]
 
 
-def _third_party_imports(path: Path) -> set:
+def _guarded_import_nodes(tree: ast.AST) -> set:
+    """Import nodes that sit inside a `try:` with an ImportError handler.
+
+    The portability constraint is "AG must RUN on a machine with nothing installed",
+    not "AG must never mention a third-party name". An import wrapped in
+    `try: import x / except ImportError: <fallback>` cannot break that: on a bare
+    machine the except branch runs. Treating those as violations would push the
+    codebase into `importlib.import_module` calls that hide the same dependency from
+    the audit — strictly worse, because then the auditor cannot see it at all.
+
+    So we distinguish the two cases, and only HARD imports fail the check. Guarded
+    ones are still reported, as optional accelerators.
+    """
+    guarded = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        catches_import_error = False
+        for handler in node.handlers:
+            exc = handler.type
+            names = []
+            if isinstance(exc, ast.Name):
+                names = [exc.id]
+            elif isinstance(exc, ast.Tuple):
+                names = [e.id for e in exc.elts if isinstance(e, ast.Name)]
+            elif exc is None:
+                names = ["BaseException"]     # bare except also catches ImportError
+            if any(n in ("ImportError", "ModuleNotFoundError", "Exception",
+                         "BaseException") for n in names):
+                catches_import_error = True
+        if not catches_import_error:
+            continue
+        for stmt in node.body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    guarded.add(id(sub))
+    return guarded
+
+
+def _third_party_imports(path: Path, *, include_guarded: bool = False) -> set:
     """Top-level module roots imported by a file that aren't stdlib/first-party.
 
     Uses the AST (no execution). We approximate "stdlib" via
     sys.stdlib_module_names (Python 3.10+), so anything not stdlib, not first-party,
-    and not relative is treated as third-party."""
+    and not relative is treated as third-party.
+
+    By default, imports guarded by an ImportError handler are excluded: they have a
+    fallback path and therefore cannot make AG unrunnable on a bare machine. Pass
+    include_guarded=True to see them (the audit reports them separately)."""
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
     found = set()
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except Exception:
         return found
+    guarded = set() if include_guarded else _guarded_import_nodes(tree)
     for node in ast.walk(tree):
+        if id(node) in guarded:
+            continue
         if isinstance(node, ast.Import):
             for a in node.names:
                 root = a.name.split(".")[0]
@@ -81,6 +127,53 @@ def _third_party_imports(path: Path) -> set:
                 found.add(node.module.split(".")[0])
     return {m for m in found
             if m and m not in stdlib and m not in _FIRST_PARTY_ROOTS}
+
+
+def _code_string_literals(path: Path) -> List[str]:
+    """Every string literal in a file that is NOT a docstring.
+
+    Docstrings are the module/class/function-level bare string expressions; the AST
+    marks them by position, so we can drop exactly those and keep every literal
+    that actually participates in execution. Comments never reach the AST at all.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", [])
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+    out: List[str] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings):
+            out.append(node.value)
+    return out
+
+
+def optional_dependencies() -> dict:
+    """Third-party packages the core can USE but does not NEED, per file.
+
+    Surfacing these keeps the guarantee honest: "stdlib-only" means AG runs without
+    them, not that they are never touched. A reader can see exactly which optional
+    accelerators exist and what each one buys.
+    """
+    out: dict = {}
+    for p in _iter_core_py():
+        if p.name == "lora.py":
+            continue
+        hard = _third_party_imports(p)
+        everything = _third_party_imports(p, include_guarded=True)
+        soft = sorted(everything - hard - _ALLOWED_THIRD_PARTY)
+        if soft:
+            out[str(p.relative_to(ROOT))] = soft
+    return out
 
 
 def check() -> List[Check]:
@@ -103,18 +196,21 @@ def check() -> List[Check]:
                                             for k, v in list(offenders.items())[:6])))
 
     # 2) no hard-coded absolute/home paths.
+    #    Scanned through the AST rather than by grepping the raw text: a path inside
+    #    a comment or a docstring is documentation (e.g. explaining that WSL maps
+    #    C:\ to /mnt/c), and cannot affect where AG reads or writes. Only a real
+    #    string literal in executable code can. Grepping the source text conflates
+    #    the two and pushes authors to obfuscate examples in prose, which makes the
+    #    code less clear without making it more portable.
     bad_paths = []
-    needles = ("C:\\\\", "C:/Users", "/Users/", "/home/")
+    needles = ("C:\\", "C:/Users", "/Users/", "/home/")
     for p in _iter_core_py():
         if p.name == "bundle.py":
             continue  # this module holds the detection literals themselves, as data
-        try:
-            txt = p.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for n in needles:
-            if n in txt:
-                bad_paths.append(f"{p.relative_to(ROOT)} ({n})")
+        for literal in _code_string_literals(p):
+            hit = next((n for n in needles if n in literal), "")
+            if hit:
+                bad_paths.append(f"{p.relative_to(ROOT)} ({hit})")
                 break
     checks.append(Check("no hard-coded absolute paths", not bad_paths,
                         "; ".join(bad_paths[:6])))

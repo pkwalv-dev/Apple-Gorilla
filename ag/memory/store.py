@@ -70,17 +70,39 @@ class JsonlStore(MemoryStore):
 
     # --- reads -------------------------------------------------------------
     def _load_file(self, path: Path) -> List[Memory]:
+        """Parse a layer file, with the read + JSON decode served from a cache.
+
+        Recall touches the same layer several times per query (scoring, then graph
+        expansion, then a `get` per linked id), and each touch was previously a full
+        re-read and re-parse of every line. The cache is keyed on (mtime_ns, size),
+        so any write — by AG or by anything else — invalidates it.
+
+        What is cached is the decoded *dicts*, not the `Memory` objects. That
+        distinction is load-bearing: callers mutate the records they get back
+        (`_touch` bumps `use_count`, conflict resolution appends to `links`), so
+        handing out shared instances would let one caller's un-persisted mutation
+        appear in another caller's read. Rebuilding from the cached dicts keeps the
+        expensive part (I/O + JSON decode) cached while every caller still gets
+        objects it owns.
+        """
+        from ..cache import MEMORY_FILES
+        return [Memory.from_dict(d) for d in MEMORY_FILES.get(path, self._parse_file)]
+
+    @staticmethod
+    def _parse_file(path: Path) -> List[dict]:
         if not path.exists():
             return []
-        out: List[Memory] = []
+        out: List[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(Memory.from_dict(json.loads(line)))
+                obj = json.loads(line)
             except Exception:
                 continue  # tolerate a corrupt line rather than losing the whole store
+            if isinstance(obj, dict):
+                out.append(obj)
         return out
 
     def all(self, agent: str, kinds: Optional[Iterable[str]] = None) -> List[Memory]:
@@ -102,10 +124,25 @@ class JsonlStore(MemoryStore):
         return sorted(p.name for p in self.base.iterdir() if p.is_dir())
 
     # --- writes ------------------------------------------------------------
+    @staticmethod
+    def _invalidate(path: Path) -> None:
+        """Drop this file's cache entry immediately after writing it.
+
+        The (mtime_ns, size) key already prevents a stale read on any filesystem
+        with sub-second timestamps, but two writes inside the same coarse tick on a
+        filesystem that lacks them (some network and FAT mounts) could produce an
+        identical stamp. Invalidating on the write path removes that dependency on
+        the filesystem's clock resolution entirely — correctness should not rest on
+        a timing assumption when an explicit invalidation is one line.
+        """
+        from ..cache import MEMORY_FILES
+        MEMORY_FILES.invalidate(path)
+
     def add(self, mem: Memory) -> Memory:
         path = self._file(mem.agent, mem.kind)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(mem.to_dict(), ensure_ascii=False) + "\n")
+        self._invalidate(path)
         return mem
 
     def write_all(self, agent: str, kind: str, mems: List[Memory]) -> None:
@@ -114,6 +151,7 @@ class JsonlStore(MemoryStore):
             "".join(json.dumps(m.to_dict(), ensure_ascii=False) + "\n" for m in mems),
             encoding="utf-8",
         )
+        self._invalidate(path)
 
     def update(self, mem: Memory) -> None:
         mems = self._load_file(self._file(mem.agent, mem.kind))

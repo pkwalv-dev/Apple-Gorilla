@@ -177,13 +177,42 @@ _CHECKERS: Dict[str, Callable[[Task, str], float]] = {
 
 # --- task loading ----------------------------------------------------------
 
-def load_tasks(limit: Optional[int] = None) -> List[Task]:
-    """Return the benchmark tasks: JSONL override if present, else the seed set.
+def load_generated(cfg: Optional[Config] = None, *, split: str = "train",
+                   n: Optional[int] = None, seed: Optional[int] = None,
+                   tier: Optional[int] = None) -> List[Task]:
+    """Build a suite from `ag/benchgen.py` — unbounded and non-memorizable.
 
-    A `state/bench/tasks.jsonl` file (one task-dict per line) fully replaces the
-    defaults, so the suite can be curated or grown without editing code.
+    The hand-written `DEFAULT_TASKS` are a fixed 14 items: once AG passes them the
+    fitness signal is saturated and evolution has nothing to climb. Generated tasks
+    keep the signal alive indefinitely, and the `validation` split gives adoption a
+    check that evolution never optimised against.
+    """
+    from . import benchgen
+    spec = benchgen.SuiteSpec(
+        seed=int(seed if seed is not None
+                 else getattr(cfg, "bench_seed", 1337) if cfg else 1337),
+        n=int(n if n is not None
+              else getattr(cfg, "bench_generated_n", 40) if cfg else 40),
+        tier=int(tier if tier is not None
+                 else getattr(cfg, "bench_tier", 2) if cfg else 2),
+        split=split)
+    return [Task.from_dict(d) for d in benchgen.generate(spec)]
+
+
+def load_tasks(limit: Optional[int] = None,
+               cfg: Optional[Config] = None) -> List[Task]:
+    """Return the benchmark tasks.
+
+    Precedence: an explicit `state/bench/tasks.jsonl` (curated by a human) wins over
+    everything; otherwise `bench_generated` selects the unbounded generated suite;
+    otherwise the seed set. The curated file staying on top is deliberate — a human
+    who wrote a task list meant it.
     """
     tasks = DEFAULT_TASKS
+    if cfg is not None and getattr(cfg, "bench_generated", False) \
+            and not TASKS_FILE.exists():
+        gen = load_generated(cfg)
+        return gen[:limit] if limit else gen
     try:
         if TASKS_FILE.exists():
             loaded: List[Task] = []
@@ -220,6 +249,10 @@ class BenchResult:
     elapsed_s: float = 0.0
     tasks_hash: str = ""
     per_task: List[dict] = field(default_factory=list)
+    # Per-category pass rates. An aggregate score hides *where* AG is weak, and
+    # "where" is exactly what the evolve briefing needs to aim a patch at something
+    # specific rather than at the average.
+    by_category: Dict[str, dict] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -227,6 +260,14 @@ class BenchResult:
     @property
     def failed_ids(self) -> List[str]:
         return [t["id"] for t in self.per_task if not t["passed"]]
+
+    @property
+    def weakest_category(self) -> Optional[str]:
+        """The category with the lowest pass rate — the sharpest evolution target."""
+        if not self.by_category:
+            return None
+        return min(self.by_category.items(),
+                   key=lambda kv: (kv[1]["pass_rate"], -kv[1]["n"]))[0]
 
 
 def _answer_for(client, cfg: Config, task: Task, mode: str) -> str:
@@ -252,7 +293,7 @@ def _answer_for(client, cfg: Config, task: Task, mode: str) -> str:
 
 def run_benchmark(client, cfg: Config, *, tasks: Optional[List[Task]] = None,
                   mode: Optional[str] = None, limit: Optional[int] = None,
-                  emit=None) -> BenchResult:
+                  emit=None, workers: Optional[int] = None) -> BenchResult:
     """Run the suite and return an aggregate fitness score (0..10).
 
     Fitness is the weighted mean of per-task pass scores, scaled to 0..10 to match
@@ -263,18 +304,46 @@ def run_benchmark(client, cfg: Config, *, tasks: Optional[List[Task]] = None,
     ensure_dirs()
     mode = mode or getattr(cfg, "bench_mode", "optimize_execute")
     limit = limit if limit is not None else getattr(cfg, "bench_max_tasks", 0) or None
-    tasks = tasks if tasks is not None else load_tasks(limit=limit)
+    tasks = tasks if tasks is not None else load_tasks(limit=limit, cfg=cfg)
+    if workers is None:
+        workers = int(getattr(cfg, "bench_workers", 1) or 1)
     t0 = time.time()
     per_task: List[dict] = []
     total_w = 0.0
     got_w = 0.0
     passed = 0
-    for i, task in enumerate(tasks):
-        _emit(emit, "bench", f"task {i + 1}/{len(tasks)}: {task.id}", level="tool")
+
+    def _run_one(idx_task):
+        i, task = idx_task
         try:
             answer = _answer_for(client, cfg, task, mode)
         except Exception as e:  # a backend hiccup fails the task, never the run
             answer = f"(error: {e})"
+        return i, task, answer
+
+    # The benchmark is the dominant cost of an evolve cycle: bench_samples runs ×
+    # tasks × (1-2 model calls each), all of them independent. Running them
+    # concurrently is a pure wall-clock win — the tasks share no state, scoring is a
+    # pure function, and the backend (Ollama or the Anthropic API) handles
+    # concurrent requests. Kept at 1 by default because a single local GPU
+    # serialises anyway and would only add queueing; raise it for an API backend or
+    # a machine that can hold several requests in flight.
+    results: List[tuple] = []
+    if workers and workers > 1 and len(tasks) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        _emit(emit, "bench", f"running {len(tasks)} tasks on {workers} workers",
+              level="tool")
+        with ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
+            for i, task, answer in pool.map(_run_one, enumerate(tasks)):
+                results.append((i, task, answer))
+    else:
+        for i, task in enumerate(tasks):
+            _emit(emit, "bench", f"task {i + 1}/{len(tasks)}: {task.id}", level="tool")
+            results.append(_run_one((i, task)))
+
+    # Score in task order regardless of completion order, so per_task is stable and
+    # two runs of the same suite are directly comparable line by line.
+    for i, task, answer in sorted(results, key=lambda r: r[0]):
         s = score_answer(task, answer)
         total_w += task.weight
         got_w += task.weight * s
@@ -285,10 +354,17 @@ def run_benchmark(client, cfg: Config, *, tasks: Optional[List[Task]] = None,
     n = len(tasks)
     fitness = round(10.0 * (got_w / total_w), 3) if total_w else 0.0
     pass_rate = round(passed / n, 3) if n else 0.0
+    cats: Dict[str, dict] = {}
+    for t in per_task:
+        c = cats.setdefault(t["category"], {"n": 0, "passed": 0, "pass_rate": 0.0})
+        c["n"] += 1
+        c["passed"] += 1 if t["passed"] else 0
+    for c in cats.values():
+        c["pass_rate"] = round(c["passed"] / c["n"], 3) if c["n"] else 0.0
     result = BenchResult(
         fitness=fitness, pass_rate=pass_rate, n=n, passed=passed, mode=mode,
         elapsed_s=round(time.time() - t0, 3), tasks_hash=tasks_hash(tasks),
-        per_task=per_task,
+        per_task=per_task, by_category=cats,
     )
     _emit(emit, "bench",
           f"fitness={fitness}/10  ({passed}/{n} passed) in {result.elapsed_s}s",
