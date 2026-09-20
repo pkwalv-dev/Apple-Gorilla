@@ -44,6 +44,119 @@ from .model import extract_json
 from .pipeline import recent_runs, _emit
 
 
+# --- verifier integrity -------------------------------------------------------
+# The gates only protect AG while the thing they judge cannot edit the gates.
+# config.json IS an evolvable file and cfg.evolvable_paths lives IN it, so without
+# the checks below a candidate could (a) declare the gate files evolvable and edit
+# them next cycle, (b) soften the safety knobs directly (`fitness_gate: false`,
+# `fitness_k: 0`), or (c) change the measuring instrument the fitness subprocess
+# reads from config.json (fewer bench tasks, a different model, an easier mode).
+# These lists are literal code precisely so they sit OUTSIDE the reach of the
+# system they constrain — configuration about safety is itself unsafe to evolve.
+
+# Files that implement adoption, measurement, or authority. A candidate patch may
+# never touch them, even if a (human- or candidate-written) evolvable_paths says so.
+PROTECTED_FILES = frozenset({
+    "ag/evolve.py", "ag/bench.py", "ag/benchgen.py", "ag/scoring.py",
+    "ag/permissions.py", "ag/archive.py", "ag/backup.py", "conftest.py",
+})
+
+# config.json keys an evolve candidate may not change. Two families: the gate
+# settings themselves, and every knob of the instrument the gate measures with —
+# the bench subprocess reloads config.json, so a candidate that altered these
+# would be re-grading itself on a different ruler.
+SAFETY_CONFIG_KEYS = frozenset({
+    # the gates
+    "autonomy_level", "evolvable_paths", "fitness_gate", "bench_validate",
+    "fitness_tol", "fitness_k", "bench_samples",
+    # the measuring instrument
+    "bench_mode", "bench_max_tasks", "bench_generated", "bench_generated_n",
+    "bench_generated_tier", "bench_seed", "bench_workers",
+    # which model answers / is measured
+    "backend", "offline_backend", "model", "ollama_model", "ollama_host",
+    "specialist_model", "ollama_options", "think", "effort",
+    "max_output_tokens", "meta_output_tokens", "model_routing",
+    # authority boundaries
+    "allow_code_exec", "allow_external_tools", "allow_web", "allow_local_tools",
+    "allow_acquire", "acquisition_autonomy", "skill_test_gate",
+    "skill_full_suite_gate", "max_acquire_per_run", "github_allowlist",
+})
+
+REGRESSIONS_FILE = None  # resolved lazily from STATE_DIR (tests relocate state)
+
+
+def _regressions_path():
+    global REGRESSIONS_FILE
+    if REGRESSIONS_FILE is None:
+        from .config import STATE_DIR
+        REGRESSIONS_FILE = STATE_DIR / "evolve" / "regressions.jsonl"
+    return REGRESSIONS_FILE
+
+
+def _gate_hashes() -> dict:
+    """sha256 of every verifier file, for the pin-check across a candidate cycle."""
+    import hashlib
+    out = {}
+    for rel in sorted(PROTECTED_FILES):
+        p = ROOT / rel
+        if p.exists():
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def _record_regression(gate: str, *, reason: str, changed=(), rationale: str = "",
+                       incumbent=None, candidate=None) -> None:
+    """Append one lived failure to the regression corpus.
+
+    This corpus is how the loop LEARNS from its own rejections instead of
+    re-proposing them: `_direction` feeds the most recent entries back into the
+    proposer's briefing, so a gate failure becomes a lesson rather than a dead end.
+    """
+    try:
+        path = _regressions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"when": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"),
+               "gate": gate, "reason": reason[:400], "changed": list(changed)[:8],
+               "rationale": rationale[:300],
+               "incumbent_fitness": incumbent, "candidate_fitness": candidate}
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass  # the corpus must never break the loop it observes
+
+
+def regressions(limit: int = 20) -> List[dict]:
+    """Most recent regression-corpus entries (newest last)."""
+    try:
+        path = _regressions_path()
+        if not path.exists():
+            return []
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        return [json.loads(l) for l in lines[-limit:] if l.strip()]
+    except Exception:
+        return []
+
+
+def _validate_config_patch(content: str) -> Optional[str]:
+    """A candidate's config.json may not move the gates, the instrument, or the
+    authority boundaries. Returns a rejection reason or None."""
+    try:
+        candidate = json.loads(content)
+    except json.JSONDecodeError as e:
+        return f"invalid JSON: {e}"
+    try:
+        incumbent = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        incumbent = {}
+    moved = sorted(k for k in SAFETY_CONFIG_KEYS
+                   if k in candidate and candidate.get(k) != incumbent.get(k))
+    if moved:
+        return ("config change refused: " + ", ".join(moved) +
+                " — these keys define the gate or the authority boundary and are "
+                "human-set, not evolvable")
+    return None
+
+
 @dataclass
 class EvolveResult:
     attempted: bool
@@ -235,6 +348,18 @@ def _direction(cfg: Config, telemetry: list, bench_res=None) -> dict:
             "without breaking a passing one. Target the failing categories above via "
             "sharper executor/optimizer guidance in the evolvable prompt files."
         )
+    # The regression corpus is the loop's memory of what DIDN'T work — feeding it
+    # back stops the proposer from re-attempting the same rejected edits cycle after
+    # cycle. Failures become lessons, not dead ends.
+    recent_failures = regressions(limit=4)
+    if recent_failures:
+        briefing["recent_rejected_proposals"] = [
+            {"gate": r["gate"], "reason": r["reason"][:160]} for r in recent_failures
+        ]
+        briefing["regression_hint"] = (
+            "These recent proposals were REJECTED by the gates. Do not re-propose "
+            "them or close variants; aim somewhere the gates have not already vetoed."
+        )
     return briefing
 
 
@@ -322,7 +447,14 @@ def run_tests() -> tuple[bool, str]:
 
 def _validate_patch(rel: str, content: str) -> Optional[str]:
     """Cheap static validation before writing to disk. Returns error or None."""
-    if rel.endswith(".json"):
+    if rel in PROTECTED_FILES:
+        return ("rejected: this file implements the verification gates themselves "
+                "and sits outside the evolvable surface")
+    if rel == "config.json":
+        err = _validate_config_patch(content)
+        if err:
+            return err
+    elif rel.endswith(".json"):
         try:
             json.loads(content)
         except json.JSONDecodeError as e:
@@ -364,6 +496,11 @@ def evolve(client, cfg: Config, *, apply: bool = False,
     evolvable = _read_evolvable(cfg)
     parent_hash = archive.evolvable_hash(evolvable)
     telemetry = recent_runs(limit=5)
+    # Pin the verifier: capture the gate files' hashes now and re-verify after the
+    # candidate is applied. A proposal cannot name these files (filtered above) and
+    # cannot smuggle them in through config.json (checked in _validate_patch), so a
+    # mismatch here means something outside the intended channel touched the gates.
+    gate_hashes = _gate_hashes()
 
     # Fitness Gate, part 1 — measure the INCUMBENT before we touch anything, so the
     # candidate has a real bar to clear. Cached by the evolvable-files hash, so an
@@ -425,9 +562,16 @@ def evolve(client, cfg: Config, *, apply: bool = False,
            else "make a failing benchmark task pass (or lift the weakest axis) ")
         + "without breaking anything, per your rules."
     )
-    res = proposer.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
-                            max_tokens=cfg.meta_output_tokens)
-    data = extract_json(res.text) or {}
+    # The proposer owes us JSON. A weak instruction-follower (the local abliterated
+    # coder is a legitimate evolver backend) often wraps it in prose or drops the
+    # contract entirely — so this call is verified-and-repaired, not assumed. If it
+    # still can't comply, `data` is None and the cycle ends as "no patches", which
+    # is an honest non-answer rather than a silently mis-parsed one.
+    from .model import complete_json
+    data, _raw, _attempts = complete_json(proposer, system=prompts.EVOLVER_SYSTEM,
+                                          user=user, cfg=cfg, attempts=2,
+                                          max_tokens=cfg.meta_output_tokens)
+    data = data or {}
     patches = data.get("patches", []) or []
     rationale = str(data.get("rationale", ""))
 
@@ -464,10 +608,29 @@ def evolve(client, cfg: Config, *, apply: bool = False,
         (ROOT / rel).write_text(content, encoding="utf-8")
         changed.append(rel)
 
+    # 2b) Verifier pin: the gate files must be byte-identical to the pre-candidate
+    # capture, or the gates below would be vouching for a ruler that moved.
+    if _gate_hashes() != gate_hashes:
+        backup.restore(snap)
+        moved = sorted(set(_gate_hashes()) ^ set(gate_hashes) |
+                       {k for k in gate_hashes
+                        if _gate_hashes().get(k) != gate_hashes[k]})
+        _record_regression("integrity", reason=f"verifier files changed: {moved}",
+                           changed=changed, rationale=rationale)
+        return EvolveResult(True, False, True, rationale=rationale, changed=changed,
+                            snapshot_id=snap.id,
+                            reason="verifier files changed during the candidate "
+                                   "cycle -> rolled back",
+                            incumbent_fitness=incumbent)
+
     # 3) Gate 1 (SAFETY): the change must keep the test suite green.
     passed, output = run_tests()
     if not passed:
         backup.restore(snap)  # instant rollback
+        _record_regression("tests",
+                           reason="tests failed -> rolled back: " + output[-300:],
+                           changed=changed, rationale=rationale,
+                           incumbent=incumbent)
         archive.record(archive.Entry(
             ts=archive.now_ts(), parent_hash=parent_hash, candidate_hash="",
             incumbent_fitness=incumbent, candidate_fitness=None, delta=None,
@@ -506,6 +669,10 @@ def evolve(client, cfg: Config, *, apply: bool = False,
                                    sem=combined_sem, k=k)
         if verdict == "regressed":
             backup.restore(snap)  # instant rollback — never adopt a real regression
+            _record_regression("fitness", changed=changed, rationale=rationale,
+                               incumbent=incumbent, candidate=candidate,
+                               reason=f"fitness regressed ({incumbent}->{candidate}, "
+                                      f"margin {margin}) -> rolled back")
             archive.record(archive.Entry(
                 ts=archive.now_ts(), parent_hash=parent_hash,
                 candidate_hash=candidate_hash, incumbent_fitness=incumbent,
@@ -545,6 +712,11 @@ def evolve(client, cfg: Config, *, apply: bool = False,
               level="result")
         if val_verdict == "regressed":
             backup.restore(snap)
+            _record_regression("overfit", changed=changed, rationale=rationale,
+                               incumbent=incumbent_val, candidate=val_fitness,
+                               reason=f"held-out fitness regressed "
+                                      f"({incumbent_val}->{val_fitness}) while the "
+                                      f"scored split passed — overfitting")
             archive.record(archive.Entry(
                 ts=archive.now_ts(), parent_hash=parent_hash,
                 candidate_hash=candidate_hash, incumbent_fitness=incumbent,
@@ -673,9 +845,11 @@ def propose(client, cfg: Config, *, evolver_client=None, directive: str = "",
     _emit(emit, "evolve", "asking the proposer for candidate change(s)…", level="tool")
 
     user = _evolver_prompt(cfg, directive)
-    res = proposer.complete(system=prompts.EVOLVER_SYSTEM, user=user, cfg=cfg,
-                            max_tokens=cfg.meta_output_tokens)
-    data = extract_json(res.text) or {}
+    from .model import complete_json
+    data, _raw, _attempts = complete_json(proposer, system=prompts.EVOLVER_SYSTEM,
+                                          user=user, cfg=cfg, attempts=2,
+                                          max_tokens=cfg.meta_output_tokens)
+    data = data or {}
     raw_patches = data.get("patches", []) or []
     rationale = str(data.get("rationale", ""))
 

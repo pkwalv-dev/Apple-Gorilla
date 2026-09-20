@@ -692,3 +692,81 @@ def extract_json(text: str) -> Optional[dict]:
         return json.loads(candidate)
     except json.JSONDecodeError:
         return None
+
+
+# --- instruction-following compensation ------------------------------------- #
+#
+# Abliterated and merged models are deliberately run here (the specialist coder),
+# and their known failure mode is DISCIPLINE, not knowledge: empty replies,
+# repetition loops, prose-wrapped JSON, or ignoring an output contract. The harness
+# cannot fix the weights, so it compensates at the call site: detect degenerate
+# output, repair the prompt, retry, and fall back to a more reliable model. This
+# is the runtime half of the instruction category in benchgen.py — that measures
+# the weakness; this keeps a run working in spite of it.
+
+
+def looks_degenerate(text: str) -> Optional[str]:
+    """Detect output no user should ever see. Returns a reason string, or None.
+
+    Deliberately narrow — a short or odd answer is fine; only patterns that are
+    never legitimate qualify, so nothing interesting is ever second-guessed:
+
+    - the reply is empty/whitespace;
+    - the tail is one chunk repeated (a decoding repetition loop). The PERIOD is
+      discovered from the text, not guessed: a 37-char loop must be caught just as
+      surely as a 30- or 120-char one.
+    """
+    t = (text or "").strip()
+    if not t:
+        return "empty"
+    tail = t[-600:]
+    # Periodic check: is the tail just 3+ copies of a shorter unit? The period is
+    # discovered, not guessed — a 37-char loop must be caught as surely as a neat
+    # 120-char one. Right-anchored at the tail end, where a decoding loop shows.
+    for period in range(24, len(tail) // 3 + 1):
+        unit = tail[-period:]
+        repeats = (unit * (len(tail) // period + 1))[-len(tail):]
+        if repeats == tail:
+            return f"repetition loop ({period}-char unit x{len(tail) // period}+)"
+    return None
+
+
+# Appended on a retry when a structured reply failed to parse. Plain imperative
+# phrasing, and it goes AFTER the task: recency is what a weak instruction-follower
+# attends to, so the output contract is the last thing it reads.
+REPAIR_NOTE = (
+    "\n\nIMPORTANT — your previous reply could not be used: {why}. Respond again "
+    "and follow the output contract EXACTLY. No explanations, no markdown fences, "
+    "no repetition."
+)
+
+_JSON_CONTRACT = (
+    'Output ONLY a single JSON object. No prose before or after it, no markdown '
+    'code fences.'
+)
+
+
+def complete_json(client, *, system: str, user: str, cfg: Config,
+                  attempts: int = 2, budget=None, **complete_kw) -> tuple:
+    """Call the model demanding a parseable JSON object, repairing as needed.
+
+    Returns (obj, raw_text, attempts_used): obj is the parsed dict (or None if the
+    model never produced one), raw_text its last reply, attempts_used how many
+    calls were spent. The caller decides what None means (fall back, skip, ask) —
+    this function's only job is to make 'the model must emit JSON' a verified
+    property of the run instead of an assumption. Extra kwargs (e.g. max_tokens)
+    pass through to the client.
+    """
+    last_text = ""
+    for i in range(1, max(1, attempts) + 1):
+        prompt = user if i == 1 else user + REPAIR_NOTE.format(why=why)
+        res = client.complete(system=system, user=prompt, cfg=cfg, **complete_kw)
+        if budget is not None:
+            budget.charge_model_call(res.input_tokens, res.output_tokens)
+        last_text = res.text or ""
+        deg = looks_degenerate(last_text)
+        obj = extract_json(last_text)
+        if obj is not None and deg is None:
+            return obj, last_text, i
+        why = deg or "it was not a parseable JSON object"
+    return None, last_text, max(1, attempts)

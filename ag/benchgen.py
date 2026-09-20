@@ -358,6 +358,58 @@ def _gen_list_format(rng: random.Random, tier: int) -> Generated:
             "equals", ",".join(map(str, nums)), "instruction")
 
 
+# The next four measure STRICT compliance — not getting the right answer, but
+# expressing it under a tight output contract. That distinction matters because it
+# is exactly where abliterated / merged models drift: they know the answer but wrap
+# it in prose, echo the prompt, or ignore a case/quoting constraint. These tasks are
+# trivially winnable (the oracle scores 10/10 on them), so a low category score is
+# unambiguous evidence of an instruction-following problem, not a knowledge gap.
+
+@generator("echo_exactly")
+def _gen_echo_exactly(rng: random.Random, tier: int) -> Generated:
+    words = rng.sample(["orbit", "lantern", "copper", "willow", "harbor", "cinder",
+                        "meadow", "quartz", "sable", "tundra"], rng.randint(2, 4))
+    n = rng.randint(100, 999)
+    text = " ".join(words) + f" {n}"
+    return (f"Reply with exactly this text, character for character, and nothing "
+            f"else — no quotes, no commentary:\n{text}", "equals", text,
+            "instruction")
+
+
+@generator("json_only")
+def _gen_json_only(rng: random.Random, tier: int) -> Generated:
+    name = rng.choice(["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"])
+    a, b = rng.randint(2, 30), rng.randint(2, 30)
+    canonical = json.dumps({"name": name, "total": a + b},
+                           separators=(", ", ": "))
+    return (f"Output ONLY a JSON object on one line, no prose and no code fences, "
+            f"with exactly these keys: \"name\": the string \"{name}\", and "
+            f"\"total\": the number {a} + {b}.", "equals", canonical, "instruction")
+
+
+@generator("all_caps")
+def _gen_all_caps(rng: random.Random, tier: int) -> Generated:
+    words = rng.sample(["steady", "signal", "north", "bridge", "silent", "copper",
+                        "harbor", "window", "anchor", "spruce"], rng.randint(3, 5))
+    text = " ".join(words)
+    return (f"Rewrite the following in ALL CAPITAL LETTERS, and output nothing "
+            f"else:\n{text}", "equals", text.upper(), "instruction")
+
+
+@generator("single_word")
+def _gen_single_word(rng: random.Random, tier: int) -> Generated:
+    q, ans = rng.choice([
+        ("What is the capital of France?", "Paris"),
+        ("What color do you get by mixing blue and yellow paint?", "green"),
+        ("How many legs does a spider have? Answer with the digit.", "8"),
+        ("What is the opposite of the word 'hot'?", "cold"),
+        ("Which planet is known as the red planet?", "Mars"),
+        ("What is 15 minus 6? Answer with the digit.", "9"),
+    ])
+    return (f"{q} Reply with exactly ONE word and no punctuation.",
+            "equals", ans, "instruction")
+
+
 # --------------------------------------------------------------------------- #
 # Logic
 # --------------------------------------------------------------------------- #

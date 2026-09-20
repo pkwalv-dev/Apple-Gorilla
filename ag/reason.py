@@ -43,8 +43,13 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
         task = str(args.get("task", "")).strip()
         if not task:
             return "delegate error: provide a 'task' for the sub-agent"
+        # Optional model override: "specialist" runs this sub-agent on the
+        # abliterated coder (long code, security tooling), anything else a model name.
+        # A model choice changes WHO thinks, never WHAT is permitted — the child
+        # broker is derived from the parent's grants either way.
+        model = str(args.get("model", "")).strip()
         return agents.spawn(client, cfg, broker, role=role, task=task,
-                            parent_agent=agent, depth=depth).output
+                            parent_agent=agent, depth=depth, model=model).output
 
     def _acquire(args, broker):
         spec = str(args.get("spec", "")).strip()
@@ -99,7 +104,13 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
 
     def _consult_specialist(args, broker):
         """Delegate a subtask to the specialist model (the abliterated coder) — for code,
-        strict-format output, or a request the primary would refuse. Returns its reply."""
+        strict-format output, or a request the primary would refuse. Returns its reply.
+
+        The specialist's known weakness is discipline, not knowledge — so its answer
+        is checked for degenerate output (empty / repetition loop) and retried once
+        under a tighter contract before anything reaches the primary's transcript.
+        An unusable reply is never passed off as a usable one.
+        """
         task = str(args.get("task", "")).strip()
         if not task:
             return "consult_specialist error: provide a 'task'"
@@ -107,17 +118,32 @@ def _registry(client=None, cfg=None, agent: str = "root", parents=(),
         if not spec:
             return "consult_specialist error: no specialist model configured"
         import dataclasses
-        from .model import make_client, ollama_has_model
+        from .model import looks_degenerate, make_client, ollama_has_model
         if not ollama_has_model(cfg, spec):
             return f"consult_specialist error: {spec} is not available locally"
+        scfg = dataclasses.replace(cfg, ollama_model=spec)
+        system = ("You are a specialist model assisting the primary model. Do the "
+                  "task directly and completely; return only the result.")
         try:
-            scfg = dataclasses.replace(cfg, ollama_model=spec)
             sclient = make_client(scfg, backend="ollama")
-            r = sclient.complete(
-                system="You are a specialist model assisting the primary model. Do the "
-                       "task directly and completely; return only the result.",
-                user=task, cfg=scfg)
-            return (r.text or "(no output)").strip()
+            r = sclient.complete(system=system, user=task, cfg=scfg)
+            text = (r.text or "").strip()
+            deg = looks_degenerate(text)
+            if deg:
+                r = sclient.complete(
+                    system=system,
+                    user=task + "\n\nAnswer in under 150 words. No repetition, no "
+                                "scaffolding — start with the answer itself.",
+                    cfg=scfg)
+                retry_text = (r.text or "").strip()
+                if not looks_degenerate(retry_text):
+                    return retry_text
+                # Still degenerate: hand back the salvageable head with the caveat
+                # FIRST, so the primary reads the warning before the content (and the
+                # caveat survives being truncated in a run trace).
+                return (f"[specialist output truncated: {deg}; use with care]\n"
+                        + text[:700])
+            return text or "(no output)"
         except Exception as e:
             return f"consult_specialist error: {e}"
 
@@ -292,6 +318,37 @@ def _parse_action(text: str, tools: List[Tool]) -> Optional[dict]:
     return None
 
 
+_ATTEMPT_HINT = re.compile(r'\{|"tool"|\btool\s*:', re.I)
+
+
+def _attempted_tool_call(text: str, names) -> bool:
+    """True when the reply LOOKS like a tool call that failed to parse.
+
+    This is the compensation for a model with weak instruction-following (the
+    specialist coder's known failure mode): it tries to call a tool but wraps the
+    JSON in prose, breaks the quoting, or writes `tool: calc` instead of JSON.
+    Treating that as a final answer would discard the whole loop's observations and
+    hand the user protocol garbage — so the loop repairs instead of accepting.
+    Kept conservative: a prose answer that merely mentions the word 'tool' in a
+    sentence does NOT trigger it (requires braces or the protocol marker).
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if "{" not in t and '"tool"' not in t and "tool:" not in t.lower():
+        return False
+    if not _ATTEMPT_HINT.search(t):
+        return False
+    # A brace alone in a prose answer is not an attempt; the protocol marker or a
+    # known tool name must also be present.
+    if '"tool"' in t or "tool:" in t.lower():
+        return True
+    return any(re.search(rf"\b{re.escape(n)}\b", t) for n in names)
+
+
+_MAX_CONSECUTIVE_REPAIRS = 2
+
+
 @dataclass
 class ReasonResult:
     answer: str
@@ -315,20 +372,35 @@ def _is_not_an_answer(text: str, names) -> bool:
 
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None, on_delta=None,
-          cancel=None, agent: str = "root", parents=(), depth: int = 0) -> ReasonResult:
+          cancel=None, agent: str = "root", parents=(), depth: int = 0,
+          budget=None) -> ReasonResult:
     """Run the reason→act→observe loop and return the final answer + trace.
 
     `on_delta(text)` streams each model call's output live; `cancel` (a Canceller) lets
     a run be stopped at any point. Both are optional. `agent`/`parents`/`depth` scope
-    the skill namespace and bound sub-agent recursion.
+    the skill namespace and bound sub-agent recursion. `budget` (ag/budget.py) caps
+    what the run may spend; when omitted it is built from the cfg.budget_* fields, and
+    exhausting it returns the best answer so far WITH the stop declared in the text —
+    a truncated result is never presented as a complete one.
     """
+    from .budget import Budget, BudgetExceeded
     from .pipeline import _emit  # reuse the pipeline's safe emitter
+    if budget is None:
+        budget = Budget.from_config(cfg)
     # Only forward these when set, so stub clients that don't accept them still work.
     dkw = {}
     if on_delta is not None:
         dkw["on_delta"] = on_delta
     if cancel is not None:
         dkw["cancel"] = cancel
+
+    def _stopped(reason: str, last_text: str, steps: List[dict]) -> ReasonResult:
+        base = (last_text or "").strip()
+        note = f"(stopped: {reason})"
+        answer = f"{base}\n\n{note}" if base else f"{note} before producing an answer."
+        _emit(emit, "budget", note, level="info")
+        return ReasonResult(answer, steps, tin, tout)
+
     tools = available_tools(broker, client, cfg, agent=agent, parents=parents,
                             depth=depth, task=user)
     if not tools:  # nothing to use — behave like a normal single call
@@ -341,6 +413,7 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     transcript = f"# Task\n{user}\n"
     steps: List[dict] = []
     tin = tout = 0
+    repairs = 0
 
     for _ in range(max(1, max_steps)):
         try:
@@ -349,31 +422,66 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
                 return ReasonResult("(halted: fleet kill switch engaged)", steps, tin, tout)
         except Exception:
             pass
-        res = client.complete(system=sys_p, user=transcript + "\nYour move:", cfg=cfg,
-                              **dkw)
-        tin += res.input_tokens
-        tout += res.output_tokens
+        try:
+            if budget is not None:
+                budget.check_wall()
+            res = client.complete(system=sys_p, user=transcript + "\nYour move:",
+                                  cfg=cfg, **dkw)
+            tin += res.input_tokens
+            tout += res.output_tokens
+            if budget is not None:
+                budget.charge_model_call(res.input_tokens, res.output_tokens)
+        except BudgetExceeded as e:
+            return _stopped(e.reason, "", steps)
         action = _parse_action(res.text, tools)
         if not action:
+            if _attempted_tool_call(res.text, by_name) and repairs < _MAX_CONSECUTIVE_REPAIRS:
+                # A weak instruction-follower TRIED to call a tool and produced
+                # unparseable output. Replying as-is would hand the user protocol
+                # garbage, so the loop names the problem and asks again — same
+                # transcript, explicit contract. Capped, so a model that cannot
+                # comply still ends the loop with its prose answer.
+                repairs += 1
+                _emit(emit, "reason", "malformed tool call — asking for it again",
+                      level="tool")
+                transcript += (
+                    f"\nASSISTANT (unusable): {res.text[:300]}\n"
+                    "OBSERVATION (system): that looked like a tool call but was not "
+                    'valid JSON of the form {"tool": "<name>", "args": {...}}. Reply '
+                    "with EXACTLY one such JSON object and nothing else, or give your "
+                    "final answer as plain prose with no JSON in it.\n")
+                continue
+            repairs = 0
             if steps and _is_not_an_answer(res.text, by_name):
                 # It gathered what it needed and then said nothing usable. Ask once
                 # more from the same transcript rather than handing that on.
                 _emit(emit, "reason", "no usable answer — asking once more",
                       level="tool")
-                retry = client.complete(
-                    system=system,
-                    user=transcript + "\nUsing the observations above, give your "
-                                      "final answer as plain text.", cfg=cfg, **dkw)
-                tin += retry.input_tokens
-                tout += retry.output_tokens
+                try:
+                    retry = client.complete(
+                        system=system,
+                        user=transcript + "\nUsing the observations above, give your "
+                                          "final answer as plain text.", cfg=cfg, **dkw)
+                    tin += retry.input_tokens
+                    tout += retry.output_tokens
+                    if budget is not None:
+                        budget.charge_model_call(retry.input_tokens,
+                                                 retry.output_tokens)
+                except BudgetExceeded as e:
+                    return _stopped(e.reason, "", steps)
                 if not _is_not_an_answer(retry.text, by_name):
                     return ReasonResult(retry.text.strip(), steps, tin, tout)
             return ReasonResult(res.text.strip(), steps, tin, tout)  # final answer
+        repairs = 0
         tool = by_name[action["tool"]]
         _emit(emit, "reason", f"tool: {tool.name}({_short(action['args'])})",
               level="tool")
         try:
+            if budget is not None:
+                budget.charge_tool_call(tool.name)
             observation = tool.run(action["args"], broker)
+        except BudgetExceeded as e:
+            return _stopped(e.reason, "", steps)
         except Exception as e:  # a denied/failed tool must not kill the loop
             observation = f"{tool.name} error: {e}"
         _emit(emit, "reason", f"observation: {_short(observation)}", level="result")
@@ -388,11 +496,17 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
             by_name = {t.name: t for t in tools}
             sys_p = _tools_system(system, tools)
 
-    # Steps exhausted — force a final answer from what we've gathered.
-    res = client.complete(
-        system=system,
-        user=transcript + "\nUsing the observations above, give your final answer.",
-        cfg=cfg, **dkw)
+    # Steps exhausted — force a final answer from what we've gathered. This call is
+    # also charged: a budget that stops the loop must not be bypassed by its cleanup.
+    try:
+        res = client.complete(
+            system=system,
+            user=transcript + "\nUsing the observations above, give your final answer.",
+            cfg=cfg, **dkw)
+        if budget is not None:
+            budget.charge_model_call(res.input_tokens, res.output_tokens)
+    except BudgetExceeded as e:
+        return _stopped(e.reason, "", steps)
     return ReasonResult(res.text.strip(), steps, tin + res.input_tokens,
                         tout + res.output_tokens)
 

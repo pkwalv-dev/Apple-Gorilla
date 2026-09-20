@@ -41,7 +41,7 @@ def _child_broker(parent: PermissionBroker, *, can_spawn: bool) -> PermissionBro
 
 def spawn(client, cfg: Config, broker: PermissionBroker, *, role: str, task: str,
           max_tokens: int = 8000, parent_agent: str = "root", depth: int = 0,
-          emit=None) -> SubAgentResult:
+          emit=None, model: str = "") -> SubAgentResult:
     broker.require("spawn_agent")
     from . import fleet, reason
 
@@ -49,6 +49,14 @@ def spawn(client, cfg: Config, broker: PermissionBroker, *, role: str, task: str
     if fleet.kill_active():
         return SubAgentResult(role=role, task=task,
                               output="(fleet kill switch engaged — spawning halted)")
+
+    # Optional model override: this sub-agent thinks on another local model — the
+    # supported case is "specialist", the abliterated coder, for code/security
+    # subtasks. Authority is UNTOUCHED: the child broker below is derived from the
+    # parent's grants regardless of which model reads the task.
+    note = ""
+    if model:
+        client, note = _model_client(cfg, model, client)
 
     child_depth = depth + 1
     max_depth = int(getattr(cfg, "max_subagent_depth", 2) or 2)
@@ -72,7 +80,36 @@ def spawn(client, cfg: Config, broker: PermissionBroker, *, role: str, task: str
     if n_promoted:
         fleet.note_skill_acquired(child_agent, n_promoted)
     fleet.set_status(child_agent, "done")
-    return SubAgentResult(role=role, task=task, output=res.answer, agent=child_agent)
+    return SubAgentResult(role=role, task=task, output=note + res.answer,
+                          agent=child_agent)
+
+
+def _model_client(cfg: Config, model: str, default_client):
+    """Resolve a sub-agent model override to (client, note).
+
+    "specialist" (or "coder") names cfg.specialist_model; any other value is taken
+    as a literal Ollama model name. Only the local backend can honour an override —
+    on a remote/dry backend the request is acknowledged in the note and the default
+    client is used, because silently swapping backends would change what the run
+    COSTS, which is an operator decision, not an agent one.
+    """
+    backend = (getattr(cfg, "backend", "") or "").lower()
+    name = (cfg.specialist_model if model in ("specialist", "coder") else model)
+    if backend in ("dry", "anthropic"):
+        return default_client, ""
+    if not name or name == getattr(cfg, "ollama_model", ""):
+        return default_client, ""
+    try:
+        import dataclasses
+        from .model import make_client, ollama_has_model
+        if not ollama_has_model(cfg, name):
+            return default_client, (f"[requested model '{name}' is not available "
+                                    f"locally — answered by the primary model]\n")
+        mcfg = dataclasses.replace(cfg, ollama_model=name)
+        return make_client(mcfg, backend="ollama"), f"[sub-agent model: {name}]\n"
+    except Exception:
+        return default_client, (f"[requested model '{name}' could not be initialised "
+                                f"— answered by the primary model]\n")
 
 
 def _promote_new_skills(child_agent: str) -> int:
