@@ -147,6 +147,15 @@ class Config:
     # the one local tool that can change the machine, so it is never granted by default.
     allow_code_exec: bool = False
     max_tool_steps: int = 4                    # reason->act->observe loop bound
+    # --- Run budget (ag/budget.py) -------------------------------------------
+    # An explicit ceiling on what ONE run may spend, enforced by the loop, not the
+    # model. All default 0 = unlimited (existing behaviour); set them for unattended
+    # or autonomous runs, where an unbounded loop is the one guaranteed way to burn
+    # GPU-hours or API money on a task that will never converge.
+    budget_model_calls: int = 0                # max model calls per run (0 = unlimited)
+    budget_tool_calls: int = 0                 # max tool invocations per run
+    budget_tokens: int = 0                     # max in+out tokens per run
+    budget_wall_s: float = 0.0                 # max wall seconds per run
     # --- Directed capability acquisition (ag/acquire.py, ag/skills/) ---------
     # When AG lacks a capability a prompt needs, it can AUTHOR a new skill (a tested
     # tool), install its Python deps, or pull vetted code — then use it. Acquired

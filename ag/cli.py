@@ -53,7 +53,14 @@ def _make_broker(cfg, *, web: bool, tools: bool):
 def cmd_run(args) -> int:
     cfg = Config.load()
     if args.model:
-        cfg.model = args.model
+        # Route --model to the field the chosen backend actually reads: the local
+        # brain is cfg.ollama_model, the anthropic one cfg.model. Before this check,
+        # --model on the default local backend silently asked for nothing.
+        backend = getattr(args, "backend", None) or cfg.backend
+        if backend in ("ollama", "dry"):
+            cfg.ollama_model = args.model
+        else:
+            cfg.model = args.model
     client = _client(args, cfg)
     # Permanent internet is on via cfg.allow_web; --web / --no-web override per run.
     # With neither flag, ambient web fires only for research-type prompts that need
@@ -198,6 +205,13 @@ def _print_evolve_history() -> int:
 def cmd_bench(args) -> int:
     from . import bench
     cfg = Config.load()
+    # --model benches a specific LOCAL model (e.g. the specialist) without touching
+    # config.json — the operator may want the abliterated coder's real numbers, and
+    # `--record` folds them into the routing doc as measured evidence.
+    bench_model = getattr(args, "model", None)
+    if bench_model:
+        import dataclasses
+        cfg = dataclasses.replace(cfg, ollama_model=bench_model, backend="ollama")
     client = _client(args, cfg)
     mode = getattr(args, "mode", None) or cfg.bench_mode
     n = max(1, getattr(args, "samples", 1) or 1)
@@ -236,6 +250,11 @@ def cmd_bench(args) -> int:
     if getattr(args, "json", False):
         print(json.dumps(res.as_dict()))
         return 0
+    if getattr(args, "record", False):
+        from . import routing
+        role = routing.record_bench(cfg, bench_model or cfg.ollama_model,
+                                    fitness=res.fitness, by_category=res.by_category)
+        print(f"recorded in the routing capability doc as: {role}")
     print(f"fitness: {res.fitness}/10   ({res.passed}/{res.n} passed, "
           f"pass_rate={res.pass_rate})   mode={res.mode}   {res.elapsed_s}s")
     if res.by_category:
@@ -304,16 +323,37 @@ def cmd_doctor(args) -> int:
         print("anthropic SDK:    NOT installed (pip install -r requirements.txt)")
     # Probe Ollama without hard-failing.
     ollama_status = "not reachable"
+    installed = []
     try:
         import urllib.request
         with urllib.request.urlopen(cfg.ollama_host.rstrip("/") + "/api/tags",
                                     timeout=1.5) as r:
             tags = json.loads(r.read().decode("utf-8")).get("models", [])
-            names = ", ".join(m.get("name", "?") for m in tags) or "(no models pulled)"
+            installed = [m.get("name", "?") for m in tags]
+            names = ", ".join(installed) or "(no models pulled)"
             ollama_status = f"reachable — {names}"
     except Exception:
         pass
     print(f"ollama:           {ollama_status}")
+    # The dual-model pair is the deployment's load-bearing configuration: report
+    # both halves, with measured instruction-following when a bench --record run
+    # has produced it. An abliterated specialist that is configured but absent is
+    # the classic silent-degradation case, so absence is said plainly.
+    if cfg.specialist_model:
+        if not installed:
+            spec_status = "unknown (ollama not reachable)"
+        elif cfg.specialist_model in installed or any(
+                n.startswith(cfg.specialist_model.split(":")[0]) for n in installed):
+            spec_status = "installed"
+        else:
+            spec_status = "NOT INSTALLED (routing/fallback degrade silently — " \
+                          "pull it or clear specialist_model)"
+        extra = ""
+        from . import routing
+        rate = routing.instruction_pass_rate(routing.load(cfg), "specialist")
+        if rate is not None:
+            extra = f", measured strict-instruction {rate:.0%}"
+        print(f"specialist:       {cfg.specialist_model} — {spec_status}{extra}")
     print(f"snapshots:        {len(backup.list_snapshots())}")
     from .evolve import gate_available
     gate = "ready" if gate_available() else "UNAVAILABLE (pip install pytest)"
@@ -348,6 +388,59 @@ def cmd_doctor(args) -> int:
 
 def cmd_profile(args) -> int:
     print(load_principles())
+    return 0
+
+
+def cmd_models(args) -> int:
+    """The dual-model control panel: which brain does what, what's actually
+    installed, and what the evidence says each is good at."""
+    from . import routing
+    from .model import ollama_has_model
+    cfg = Config.load()
+    doc = routing.summary(cfg)
+    data = {"backend": cfg.backend, "primary": cfg.ollama_model,
+            "specialist": cfg.specialist_model, "routing": cfg.model_routing,
+            "doc": doc}
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+        return 0
+    print("AG dual-model setup  (primary reasons + orchestrates; the specialist is "
+          "consulted for code/security and is the refusal fallback)\n")
+    for role, name in (("primary", cfg.ollama_model),
+                       ("specialist", cfg.specialist_model)):
+        if not name:
+            print(f"  {role:<11} (not configured)")
+            continue
+        avail = "?" if cfg.backend != "ollama" else (
+            "installed" if ollama_has_model(cfg, name) else "NOT INSTALLED")
+        print(f"  {role:<11} {name}  [{avail}]")
+        strengths = doc["roles"].get(role, {}).get("strengths", [])
+        if strengths:
+            print(f"  {'':<11} strengths: {', '.join(strengths)}")
+        b = (doc.get("bench") or {}).get(role)
+        if b:
+            print(f"  {'':<11} measured {b['when']}: fitness {b['fitness']}/10")
+            cats = b.get("by_category") or {}
+            if cats:
+                parts = [f"{c} {d['pass_rate']:.0%}" for c, d in sorted(cats.items())]
+                print(f"  {'':<11}   by category: " + "  ".join(parts))
+        rate = routing.instruction_pass_rate(doc, role)
+        if rate is not None:
+            print(f"  {'':<11} strict-instruction pass rate: {rate:.0%}")
+    # What the doc currently favours, seed + learning + measurement.
+    prefs = {t: (doc.get("stats", {}).get(t) or {}) for t in routing.TAGS
+             if t != "general"}
+    learned = {t: routing._learned_preference(doc, t) for t in prefs}
+    lines = []
+    for t in prefs:
+        pref = learned[t] or doc["seed_preference"].get(t, "primary")
+        src = "learned" if learned[t] else "seed"
+        lines.append(f"{t}->{pref} ({src})")
+    print(f"\n  routing: {'on' if cfg.model_routing else 'OFF'}; preferences: "
+          + ", ".join(lines))
+    print("  measure a model:  ag bench --model <name> --record")
+    print("  force a model:    ag run --model <name> ...   (config: ollama_model / "
+          "specialist_model)")
     return 0
 
 
@@ -929,6 +1022,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="generated suite seed (same seed = same tasks)")
     bn.add_argument("--workers", type=int, default=None,
                     help="run tasks concurrently (default: config bench_workers)")
+    bn.add_argument("--model", default=None,
+                    help="bench a specific local model (e.g. the abliterated "
+                         "specialist) — does not change config.json")
+    bn.add_argument("--record", action="store_true",
+                    help="fold this run's scores into the routing capability doc as "
+                         "measured per-role evidence")
     bn.set_defaults(func=cmd_bench)
 
     sub.add_parser("versions", help="list source snapshots").set_defaults(
@@ -942,6 +1041,11 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_doctor)
     sub.add_parser("profile", help="show loaded intelligence principles").set_defaults(
         func=cmd_profile)
+
+    mo = sub.add_parser("models", help="dual-model panel: primary + abliterated "
+                                       "specialist, availability, measured strengths")
+    mo.add_argument("--json", action="store_true")
+    mo.set_defaults(func=cmd_models)
 
     tl = sub.add_parser("tools",
                         help="inventory tools/apps AG can use + integration/friction")

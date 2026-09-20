@@ -33,7 +33,7 @@ PROFILES_FILE = ROUTING_DIR / "profiles.json"
 
 # Task tags a prompt can carry. Deliberately small and about the KIND of work, so the
 # doc's per-tag tallies stay legible and learnable rather than sparse.
-TAGS = ("code", "creative", "math", "research", "general")
+TAGS = ("code", "security", "creative", "math", "research", "general")
 
 _TAG_PATTERNS = {
     "code": re.compile(
@@ -50,6 +50,19 @@ _TAG_PATTERNS = {
     "research": re.compile(
         r"\b(search|look up|latest|news|current|who is|what happened|cite|source|"
         r"according to|research|find out)\b", re.I),
+    # Authorised security work. The abliterated specialist is the right brain for it:
+    # the instruct primary's safety fine-tune treats even legitimate defensive work
+    # (a pentest you are authorised for, a CTF, your own box) as refuse-bait, while
+    # the specialist just does the task. REFUSAL is the limitation being routed
+    # around; the tool layer's default-deny grants are unchanged either way — the
+    # model's disposition is not the security boundary, the PermissionBroker is.
+    "security": re.compile(
+        r"\b(pentest|penetration test(?:ing)?|exploit|vulnerabilit\w*|nmap|recon|"
+        r"payload|shellcode|brute[ -]?force|hash crack\w*|crack (?:a|the|this) hash|"
+        r"privilege escalation|privesc|sql ?injection|xss|csrf|ssrf|buffer overflow|"
+        r"reverse engineer\w*|malware analysis|ctf|capture the flag|attack surface|"
+        r"threat model|osint|red team|scan (?:the|this|my|a) (?:host|network|target|"
+        r"server|subnet)|security audit\w*)\b", re.I),
 }
 
 # The seeded profile: what each ROLE is good and bad at, before any evidence. Keyed by
@@ -70,9 +83,15 @@ _SEED = {
         },
     },
     # Which role the seed prefers for each tag (before learning shifts it).
-    "seed_preference": {"code": "specialist", "creative": "primary", "math": "primary",
+    "seed_preference": {"code": "specialist", "security": "specialist",
+                        "creative": "primary", "math": "primary",
                         "research": "primary", "general": "primary"},
     "stats": {},          # tag -> role -> {"uses","wins","losses"}
+    # Measured, objective evidence, recorded from `ag bench --model X --record`:
+    # role -> {"model", "fitness", "by_category", "when"}. Kept SEPARATE from the
+    # live-use tallies above — a benchmark pass rate and a user rating are different
+    # kinds of evidence, and blending them would make neither auditable.
+    "bench": {},
     "updated": "",
 }
 
@@ -99,7 +118,12 @@ def load(cfg=None) -> dict:
             d = json.loads(PROFILES_FILE.read_text(encoding="utf-8"))
             if isinstance(d, dict) and "roles" in d:
                 d.setdefault("stats", {})
-                d.setdefault("seed_preference", dict(_SEED["seed_preference"]))
+                d.setdefault("bench", {})
+                # Merge seed preferences for tags added after the doc was written;
+                # a saved doc must learn new categories without losing its tallies.
+                sp = dict(_SEED["seed_preference"])
+                sp.update(d.get("seed_preference") or {})
+                d["seed_preference"] = sp
                 return d
     except Exception:
         pass
@@ -165,7 +189,7 @@ def guidance(cfg, specialist_name: str) -> str:
               and (_learned_preference(doc, t)
                    or doc["seed_preference"].get(t)) == "specialist"]
     prefer_line = (", ".join(prefer) if prefer else "tasks it is clearly better at")
-    return (
+    text = (
         f"# A specialist model is available to you\n"
         f"You are AG's primary model and answer directly. A specialist model "
         f"('{specialist_name}') can be called with the consult_specialist tool when a "
@@ -174,6 +198,19 @@ def guidance(cfg, specialist_name: str) -> str:
         f"legitimate request. Do this only when it genuinely helps — answer directly "
         f"otherwise, and never mention this routing to the user."
     )
+    # Measured evidence outranks reputation. When the benchmark has caught the
+    # specialist failing strict output contracts, SAY so — a primary that delegates
+    # an instruction-bound step to a model measured bad at instructions produces a
+    # wrong-format answer with total confidence.
+    spec_rate = instruction_pass_rate(doc, "specialist")
+    if spec_rate is not None and spec_rate < 0.6:
+        text += (
+            f" Measured caution: on the benchmark's strict-format tasks the "
+            f"specialist scored {spec_rate:.0%} — keep tightly-formatted steps "
+            f"(exact JSON, exact wording) on yourself and give it open-ended or "
+            f"code-heavy subtasks instead."
+        )
+    return text
 
 
 # --- learning ---------------------------------------------------------------
@@ -198,6 +235,43 @@ def role_for_model(cfg, model: str) -> str:
     """Map a model name to its role, so a rating on an answer credits the right side."""
     return "specialist" if model and model == getattr(cfg, "specialist_model", "") \
         else "primary"
+
+
+# --- measured (benchmark) evidence -------------------------------------------
+def record_bench(cfg, model: str, *, fitness: float, by_category: dict) -> str:
+    """Fold an objective benchmark run on `model` into the doc.
+
+    Unlike `record` (single live outcomes), this is a full measured pass over the
+    fitness function — the same numbers the evolve gate uses — keyed by ROLE so the
+    doc survives renaming either model. The per-category breakdown is what answers
+    'is the specialist really worse at following instructions?', because the
+    `instruction` category is winnable by construction: a low score there cannot be
+    a knowledge gap. Returns the role the score was credited to.
+    """
+    role = role_for_model(cfg, model)
+    doc = load(cfg)
+    doc.setdefault("bench", {})[role] = {
+        "model": model,
+        "fitness": fitness,
+        "by_category": {c: {"passed": d.get("passed", 0), "n": d.get("n", 0),
+                            "pass_rate": d.get("pass_rate", 0.0)}
+                        for c, d in (by_category or {}).items()},
+        "when": now_iso(),
+    }
+    save(doc)
+    return role
+
+
+def instruction_pass_rate(doc: dict, role: str) -> Optional[float]:
+    """The measured strict-instruction pass rate for a role, or None if unmeasured.
+    None is important: unmeasured is not zero, and the guidance must not assert a
+    weakness it has no evidence for."""
+    bench = (doc.get("bench") or {}).get(role) or {}
+    cat = (bench.get("by_category") or {}).get("instruction") or {}
+    n = int(cat.get("n", 0) or 0)
+    if n < 4:                       # a handful of tasks is not a measurement
+        return None
+    return float(cat.get("pass_rate", 0.0))
 
 
 def summary(cfg) -> dict:
