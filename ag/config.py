@@ -156,6 +156,12 @@ class Config:
     budget_tool_calls: int = 0                 # max tool invocations per run
     budget_tokens: int = 0                     # max in+out tokens per run
     budget_wall_s: float = 0.0                 # max wall seconds per run
+    # Char budget for the CONTEXT blocks layered onto the system prompt (memory,
+    # web, conversation, briefings) — the base instructions are never packed. When
+    # the budget is exceeded, low-priority blocks are clipped/dropped WITH A MARKER
+    # rather than silently truncating the front of the prompt at the backend.
+    # 0 = unlimited. For an 8k-token model ~12000 chars is a sane starting point.
+    context_budget_chars: int = 0
     # --- Directed capability acquisition (ag/acquire.py, ag/skills/) ---------
     # When AG lacks a capability a prompt needs, it can AUTHOR a new skill (a tested
     # tool), install its Python deps, or pull vetted code — then use it. Acquired

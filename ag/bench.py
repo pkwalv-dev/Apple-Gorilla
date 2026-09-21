@@ -404,3 +404,159 @@ def summarize(samples: List[float]) -> FitnessStat:
     sem = stdev / (n ** 0.5) if n >= 2 else 0.0
     return FitnessStat(mean=round(mean, 3), stdev=round(stdev, 3), n=n,
                        sem=round(sem, 3))
+
+
+# --- proposed tasks (the co-evolution seed) ------------------------------------
+# The benchmark sets the ceiling of everything the evolve loop can become, so the
+# loop should be able to GROW it — but a model-proposed task has an UNVERIFIED
+# expected answer, and a wrong `expect` would poison the fitness function in the
+# one direction that matters (confidently wrong grading). The deal:
+#   - the model may PROPOSE (validated for shape: known checker, well-typed
+#     expect, regex that compiles, a non-trivial prompt nobody already asks);
+#   - only a HUMAN may ACCEPT — `ag bench --accept <id>` moves a proposal into
+#     the curated tasks.jsonl, which outranks everything else by design;
+#   - proposed rows carry proposed=True so their provenance is never ambiguous.
+# AG may suggest new measurement. It may never install it alone.
+
+PROPOSALS_FILE = BENCH_DIR / "proposals.jsonl"
+
+
+def validate_proposal(d: dict, existing_prompts: Optional[set] = None) -> Optional[str]:
+    """Shape-check one proposed task dict. Returns a rejection reason or None."""
+    if not isinstance(d, dict):
+        return "not an object"
+    tid = str(d.get("id", "")).strip()
+    if not re.match(r"^[a-z0-9][a-z0-9_\-\.]{2,39}$", tid):
+        return f"bad id {tid!r} (3-40 chars, lowercase slug)"
+    prompt = str(d.get("prompt", "")).strip()
+    if len(prompt) < 12:
+        return "prompt too short to measure anything"
+    check = str(d.get("check", ""))
+    if check not in _CHECKERS:
+        return f"unknown checker {check!r} (have: {', '.join(sorted(_CHECKERS))})"
+    expect = d.get("expect")
+    if expect is None or (isinstance(expect, str) and not expect.strip()):
+        return "expect is empty — an answer with no target measures nothing"
+    if check == "numeric":
+        try:
+            float(expect)
+        except (TypeError, ValueError):
+            return f"numeric checker needs a numeric expect, got {expect!r}"
+    if check == "contains_all" and not (isinstance(expect, list) and expect):
+        return "contains_all needs a non-empty list expect"
+    if check == "regex":
+        try:
+            re.compile(str(expect))
+        except re.error as e:
+            return f"regex expect does not compile: {e}"
+    if existing_prompts and prompt.strip().lower() in existing_prompts:
+        return "duplicates an existing task prompt"
+    return None
+
+
+def _existing_prompts() -> set:
+    try:
+        return {t.prompt.strip().lower() for t in load_tasks()}
+    except Exception:
+        return set()
+
+
+def list_proposals() -> List[dict]:
+    if not PROPOSALS_FILE.exists():
+        return []
+    out = []
+    for line in PROPOSALS_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
+
+
+def _save_proposals(props: List[dict]) -> None:
+    BENCH_DIR.mkdir(parents=True, exist_ok=True)
+    PROPOSALS_FILE.write_text(
+        "".join(json.dumps(p) + "\n" for p in props), encoding="utf-8")
+
+
+def propose_tasks(client, cfg: Optional[Config] = None, *, n: int = 3,
+                  focus: str = "", emit=None) -> List[dict]:
+    """Ask the model for new benchmark tasks; validate shape; save as PENDING.
+
+    Returns the proposals that survived validation (also written to
+    proposals.jsonl). Each is a candidate ruler, not a ruler — see the module
+    note above for why acceptance is a human act.
+    """
+    from .model import complete_json
+    from .pipeline import _emit
+    cfg = cfg or Config.load()
+    existing = _existing_prompts()
+    known_cats = sorted({t.category for t in load_tasks()} | set(
+        __import__("ag.benchgen", fromlist=["categories"]).categories()))
+    focus_line = (f"\nFocus especially on the category: {focus}." if focus else "")
+    user = (
+        "Propose exactly %d NEW benchmark tasks for an agent's objective fitness "
+        "function. Rules: each task must have ONE precise, objectively-checkable "
+        "answer (no essays, no opinions); the answer must be computable or common "
+        "knowledge; cover these categories or invent a sharper one: %s.%s\n"
+        "Do NOT duplicate existing tasks' prompts. Return ONLY JSON:\n"
+        '{"tasks": [{"id": "slug-name", "prompt": "...", '
+        '"check": "equals|numeric|contains_all|regex|json_key", '
+        '"expect": <target>, "category": "..."}]}'
+    ) % (n, ", ".join(known_cats), focus_line)
+    data, _raw, _att = complete_json(
+        client, system="You design precise, objectively-scorable benchmark tasks.",
+        user=user, cfg=cfg, attempts=2, max_tokens=cfg.meta_output_tokens)
+    raw = (data or {}).get("tasks") or []
+    good, rejected = [], []
+    for d in raw[:max(1, n)]:
+        err = validate_proposal(d, existing_prompts=existing)
+        if err:
+            rejected.append((str(d.get("id", "?"))[:30], err))
+            continue
+        prop = {"id": str(d["id"]), "prompt": str(d["prompt"]).strip(),
+                "check": str(d["check"]), "expect": d["expect"],
+                "category": str(d.get("category", "proposed") or "proposed"),
+                "proposed": True,
+                "when": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        good.append(prop)
+        existing.add(prop["prompt"].strip().lower())
+    if rejected:
+        _emit(emit, "bench",
+              f"rejected {len(rejected)} malformed proposal(s): "
+              + "; ".join(f"{i}: {e}" for i, e in rejected[:3]), level="info")
+    if good:
+        props = list_proposals() + good
+        _save_proposals(props)
+    return good
+
+
+def accept_proposal(pid: str) -> Optional[dict]:
+    """Move a pending proposal into the curated tasks file (the human arming step).
+    Returns the accepted task dict, or None if not found/invalid."""
+    props = list_proposals()
+    hit = next((p for p in props if p.get("id") == pid), None)
+    if hit is None:
+        return None
+    err = validate_proposal(hit, existing_prompts=_existing_prompts())
+    if err:
+        return None
+    task_row = {"id": hit["id"], "prompt": hit["prompt"], "check": hit["check"],
+                "expect": hit["expect"], "category": hit.get("category", "general"),
+                "accepted_from_proposal": True}
+    BENCH_DIR.mkdir(parents=True, exist_ok=True)
+    with TASKS_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(task_row) + "\n")
+    _save_proposals([p for p in props if p.get("id") != pid])
+    return task_row
+
+
+def reject_proposal(pid: str) -> bool:
+    props = list_proposals()
+    kept = [p for p in props if p.get("id") != pid]
+    if len(kept) == len(props):
+        return False
+    _save_proposals(kept)
+    return True
