@@ -60,6 +60,48 @@ def _authorized_auto(cfg: Config, broker: Optional[PermissionBroker], approve: b
     return bool(broker is not None and "acquire_auto" in getattr(broker, "grants", set()))
 
 
+_ACQ_STOP = frozenset(
+    "the a an to of for and or with in on by is it me my your you this that from "
+    "into how what make get use using convert create write read give".split())
+
+
+def _spec_tokens(text: str) -> set:
+    import re
+    return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(t) > 2 and t not in _ACQ_STOP}
+
+
+_REUSE_COVERAGE = 0.6        # share of the request's distinctive words the skill covers
+_REUSE_MIN_SHARED = 2        # …with at least this many, so one lucky word can't match
+
+
+def find_reusable(reg, spec: str) -> Optional[Skill]:
+    """An existing skill that already covers `spec`, or None.
+
+    Coverage, not similarity: the question is whether the skill's vocabulary covers
+    the request's distinctive words, because that's what predicts same-capability.
+    Only correctly-registered, enabled skills are considered.
+    """
+    want = _spec_tokens(spec)
+    if len(want) < 3:
+        return None
+    best, best_cov = None, 0.0
+    try:
+        skills = reg.list(include_disabled=False)
+    except Exception:
+        return None
+    for sk in skills:
+        have = _spec_tokens(str(sk.name).replace("_", " ") + " " +
+                            str(getattr(sk, "description", "")))
+        shared = want & have
+        if len(shared) < _REUSE_MIN_SHARED:
+            continue
+        cov = len(shared) / len(want)
+        if cov > best_cov:
+            best, best_cov = sk, cov
+    return best if best_cov >= _REUSE_COVERAGE else None
+
+
 def author_skill(client, cfg: Config, spec: str, *, broker: PermissionBroker,
                  agent: str = "root", parents=(), approve: bool = False,
                  emit=None) -> AcquireResult:
@@ -72,6 +114,22 @@ def author_skill(client, cfg: Config, spec: str, *, broker: PermissionBroker,
                              reason="write_skill not granted — cannot author a skill")
 
     reg = get_registry(agent, parents=parents)
+
+    # 0) Reuse-first: authoring costs a (possibly billed) model call, a test run,
+    # and another permanent file in the registry the retriever must search. If a
+    # skill ALREADY covers the request, using it is strictly better on every axis —
+    # so check before spending anything. The honest failure this prevents is the
+    # skill-registry equivalent of NIH: three near-identical CSV converters, each
+    # authored because nobody looked.
+    reuse = find_reusable(reg, spec)
+    if reuse is not None:
+        _emit(emit, "acquire",
+              f"reusing existing skill '{reuse.name}' instead of authoring",
+              level="info")
+        return AcquireResult(True, True, name=reuse.name,
+                             reason=f"reusing existing skill '{reuse.name}' — "
+                                    f"{reuse.description}")
+
     _emit(emit, "acquire", f"authoring a skill for: {spec[:100]}", level="tool")
 
     # 1) Ask the model for a skill (code + test) targeting the requested capability.

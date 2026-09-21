@@ -25,6 +25,11 @@ FLEET_DIR = STATE_DIR / "fleet"
 AGENTS_FILE = FLEET_DIR / "agents.jsonl"
 STOP_FILE = FLEET_DIR / "STOP"          # presence = kill switch engaged
 
+# agents.jsonl is load-modify-write shared state. Serial spawns made that safe by
+# accident; parallel spawn_many makes it a real lost-update race, so every mutation
+# below holds this lock. Reads stay lock-free (last writer wins, self-healing).
+_LOCK = __import__("threading").Lock()
+
 
 @dataclass
 class AgentRecord:
@@ -82,35 +87,38 @@ def _now() -> str:
 
 # --- registry --------------------------------------------------------------
 def record_spawn(agent: str, *, role: str, parent: str = "root", depth: int = 0) -> AgentRecord:
-    recs = _load()
-    rec = recs.get(agent) or AgentRecord(agent=agent, role=role, parent=parent,
-                                         depth=depth, created=_now())
-    rec.role, rec.parent, rec.depth = role, parent, depth
-    rec.status = "active"
-    rec.last_active = _now()
-    recs[agent] = rec
-    # bump the parent's spawn count
-    if parent in recs:
-        recs[parent].spawns += 1
-    _save(recs)
-    return rec
+    with _LOCK:
+        recs = _load()
+        rec = recs.get(agent) or AgentRecord(agent=agent, role=role, parent=parent,
+                                             depth=depth, created=_now())
+        rec.role, rec.parent, rec.depth = role, parent, depth
+        rec.status = "active"
+        rec.last_active = _now()
+        recs[agent] = rec
+        # bump the parent's spawn count
+        if parent in recs:
+            recs[parent].spawns += 1
+        _save(recs)
+        return rec
 
 
 def set_status(agent: str, status: str) -> bool:
-    recs = _load()
-    if agent not in recs:
-        return False
-    recs[agent].status = status
-    recs[agent].last_active = _now()
-    _save(recs)
-    return True
+    with _LOCK:
+        recs = _load()
+        if agent not in recs:
+            return False
+        recs[agent].status = status
+        recs[agent].last_active = _now()
+        _save(recs)
+        return True
 
 
 def note_skill_acquired(agent: str, n: int = 1) -> None:
-    recs = _load()
-    if agent in recs:
-        recs[agent].skills_acquired += n
-        _save(recs)
+    with _LOCK:
+        recs = _load()
+        if agent in recs:
+            recs[agent].skills_acquired += n
+            _save(recs)
 
 
 def is_disabled(agent: str) -> bool:

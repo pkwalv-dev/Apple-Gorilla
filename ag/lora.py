@@ -513,11 +513,30 @@ TEACHER_TASKS = [
 ]
 
 
+def _teacher_row_ok(ans: str) -> Optional[str]:
+    """Why a teacher answer must NOT become a training row, or None if it's clean.
+
+    A LoRA pair trains behaviour, so an unverified one is worse than none at all:
+    a refusal teaches the adapter to refuse, a repetition loop teaches it to loop.
+    The detectors are the same two the runtime uses (`_is_failure`,
+    `looks_degenerate`) — one definition of 'unusable' shared by serving and
+    training, so the model is never taught output the harness itself would reject.
+    """
+    from .model import looks_degenerate
+    from .pipeline import _is_failure
+    a = (ans or "").strip()
+    if _is_failure(a):
+        return "refusal-or-empty"
+    return looks_degenerate(a)
+
+
 def _pairs_from_teacher(cfg: Config, *, client=None, extra_tasks: Optional[List[str]] = None,
                         emit=None) -> List[dict]:
     """Generate instruction/output pairs by asking a strong model (the teacher) to
     answer a task set — classic teacher→student distillation. Best-effort; returns []
-    if no capable client is available."""
+    if no capable client is available. Only VERIFIED rows are kept (see
+    _teacher_row_ok): distilling garbage produces a garbage adapter with extra steps.
+    """
     pairs: List[dict] = []
     if client is None:
         try:
@@ -531,14 +550,24 @@ def _pairs_from_teacher(cfg: Config, *, client=None, extra_tasks: Optional[List[
     tasks = list(TEACHER_TASKS) + list(extra_tasks or [])
     from . import prompts
     sys = getattr(prompts, "EXECUTOR_SYSTEM_DEFAULT", "You are a helpful, precise assistant.")
+    dropped = 0
     for t in tasks:
         try:
             res = client.complete(system=sys, user=t, cfg=cfg, max_tokens=800)
             ans = (res.text or "").strip()
+            reason = _teacher_row_ok(ans)
+            if reason:
+                dropped += 1
+                continue
             if ans:
                 pairs.append({"instruction": t, "output": ans, "source": "teacher"})
         except Exception:
             continue
+    if dropped:
+        from .pipeline import _emit
+        _emit(emit, "lora", f"dropped {dropped} unverified teacher answer(s) "
+              f"(refusal / empty / degenerate) — the adapter only learns clean rows",
+              level="info")
     return pairs
 
 
@@ -556,6 +585,10 @@ def _existing_teacher_pairs() -> List[dict]:
         except Exception:
             continue
         if r.get("source") == "teacher" and r.get("instruction") and r.get("output"):
+            # Re-verify on load: a row written before verification existed (or by a
+            # teacher that has since degraded) must not survive by being old.
+            if _teacher_row_ok(str(r["output"])) is not None:
+                continue
             out.append(r)
     return out
 
