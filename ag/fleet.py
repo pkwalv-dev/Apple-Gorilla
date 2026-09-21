@@ -19,11 +19,12 @@ import time
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional
 
-from .config import STATE_DIR
+from .config import STATE_DIR, Config
 
 FLEET_DIR = STATE_DIR / "fleet"
 AGENTS_FILE = FLEET_DIR / "agents.jsonl"
 STOP_FILE = FLEET_DIR / "STOP"          # presence = kill switch engaged
+KILL_DIR = FLEET_DIR / "kill"           # one marker file per individually-killed agent
 
 # agents.jsonl is load-modify-write shared state. Serial spawns made that safe by
 # accident; parallel spawn_many makes it a real lost-update race, so every mutation
@@ -39,12 +40,28 @@ class AgentRecord:
     depth: int = 0
     created: str = ""
     last_active: str = ""
-    status: str = "active"              # active | done | disabled
+    status: str = "active"              # active | done | disabled | killed
     spawns: int = 0                     # sub-agents this one spawned
     skills_acquired: int = 0
+    # --- where this agent runs (populated for both local and remote sub-agents) ---
+    node: str = "local"                 # node id, or "local" for this machine
+    location: str = ""                  # human-readable host ("desktop @ 192.168.1.5")
+    pid: int = 0                        # OS pid of the worker running it (0 if unknown)
+    heartbeat: float = 0.0             # epoch seconds of the agent's last heartbeat
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["stale"] = self.is_stale()
+        return d
+
+    def is_stale(self, stale_s: Optional[float] = None) -> bool:
+        """A still-'active' agent whose heartbeat has gone quiet is stale — a candidate
+        for reaping. done/disabled/killed agents are never 'stale'."""
+        if self.status != "active" or not self.heartbeat:
+            return False
+        if stale_s is None:
+            stale_s = float(getattr(Config.load(), "net_agent_stale_s", 120.0) or 120.0)
+        return (time.time() - self.heartbeat) > stale_s
 
 
 def _ensure() -> None:
@@ -86,20 +103,41 @@ def _now() -> str:
 
 
 # --- registry --------------------------------------------------------------
-def record_spawn(agent: str, *, role: str, parent: str = "root", depth: int = 0) -> AgentRecord:
+def record_spawn(agent: str, *, role: str, parent: str = "root", depth: int = 0,
+                 node: str = "local", location: str = "", pid: int = 0) -> AgentRecord:
     with _LOCK:
         recs = _load()
         rec = recs.get(agent) or AgentRecord(agent=agent, role=role, parent=parent,
                                              depth=depth, created=_now())
         rec.role, rec.parent, rec.depth = role, parent, depth
+        rec.node, rec.location, rec.pid = node, location, pid
         rec.status = "active"
         rec.last_active = _now()
+        rec.heartbeat = time.time()
         recs[agent] = rec
         # bump the parent's spawn count
         if parent in recs:
             recs[parent].spawns += 1
         _save(recs)
         return rec
+
+
+def heartbeat(agent: str, *, node: str = "", location: str = "", pid: int = 0) -> None:
+    """A running agent (local or remote) signals it is still alive. Also refreshes the
+    where-it-runs fields so a remote node can report its own host/pid back to the fleet."""
+    recs = _load()
+    rec = recs.get(agent)
+    if not rec:
+        return
+    rec.heartbeat = time.time()
+    rec.last_active = _now()
+    if node:
+        rec.node = node
+    if location:
+        rec.location = location
+    if pid:
+        rec.pid = pid
+    _save(recs)
 
 
 def set_status(agent: str, status: str) -> bool:
@@ -138,6 +176,11 @@ def clear() -> int:
     recs = _load()
     n = len(recs)
     _save({})
+    try:  # drop any lingering per-agent kill markers too
+        for m in KILL_DIR.glob("*"):
+            m.unlink()
+    except OSError:
+        pass
     return n
 
 
@@ -160,3 +203,67 @@ def clear_kill() -> None:
 
 def kill_active() -> bool:
     return STOP_FILE.exists()
+
+
+# --- per-agent kill + stale reaping ----------------------------------------
+def _kill_marker(agent: str):
+    # A per-agent stop marker, named so it is filesystem-safe on every OS.
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in agent)
+    return KILL_DIR / safe
+
+
+def kill_agent(agent: str) -> bool:
+    """Signal one specific agent (and, by prefix, its descendants) to stop, and mark it
+    killed in the registry. A running reason loop checks `should_stop` between steps; a
+    remote node polls the same for the runs it hosts."""
+    recs = _load()
+    if agent not in recs:
+        return False
+    try:
+        KILL_DIR.mkdir(parents=True, exist_ok=True)
+        _kill_marker(agent).write_text(_now(), encoding="utf-8")
+    except OSError:
+        pass
+    recs[agent].status = "killed"
+    recs[agent].last_active = _now()
+    _save(recs)
+    return True
+
+
+def is_killed(agent: str) -> bool:
+    if _kill_marker(agent).exists():
+        return True
+    # A child inherits an ancestor's kill: root.a.b is killed if root.a was.
+    parts = agent.split(".")
+    for i in range(1, len(parts)):
+        if _kill_marker(".".join(parts[:i])).exists():
+            return True
+    return False
+
+
+def clear_agent_kill(agent: str) -> None:
+    try:
+        _kill_marker(agent).unlink()
+    except OSError:
+        pass
+
+
+def should_stop(agent: str) -> bool:
+    """The single check a running loop makes between steps: global kill switch, this
+    agent individually killed, or this agent disabled by the operator."""
+    if kill_active() or is_killed(agent):
+        return True
+    rec = _load().get(agent)
+    return bool(rec and rec.status == "disabled")
+
+
+def reap_stale(stale_s: Optional[float] = None) -> List[str]:
+    """Mark every stale 'active' agent as killed and signal it to stop. Returns the ids
+    reaped. This is the 'kill stale or superfluous sub-agents' broom for the swarm UI."""
+    reaped = []
+    recs = _load()
+    for name, rec in recs.items():
+        if rec.is_stale(stale_s):
+            kill_agent(name)
+            reaped.append(name)
+    return reaped

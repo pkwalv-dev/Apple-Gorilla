@@ -855,19 +855,111 @@ def cmd_fleet(args) -> int:
         killed = " (KILL SWITCH ENGAGED)" if fleet.kill_active() else ""
         print(f"{len(agents)} agent(s){killed}:")
         for a in agents:
-            print(f"  {a.agent} [{a.status}] role={a.role} parent={a.parent} "
-                  f"depth={a.depth} skills={a.skills_acquired}")
+            where = a.location or a.node
+            tag = " STALE" if a.is_stale() else ""
+            print(f"  {a.agent} [{a.status}{tag}] role={a.role} parent={a.parent} "
+                  f"depth={a.depth} @ {where} skills={a.skills_acquired}")
     elif args.action in ("disable", "enable"):
         ok = fleet.set_status(args.name or "", "disabled" if args.action == "disable" else "active")
         print("done" if ok else f"agent not found: {args.name}")
     elif args.action == "kill":
+        if not args.name:
+            print("usage: ag fleet kill <agent>  (or 'ag fleet killall' for the switch)")
+            return 2
+        ok = fleet.kill_agent(args.name)
+        print(f"killed {args.name}" if ok else f"agent not found: {args.name}")
+    elif args.action == "killall":
         fleet.engage_kill()
         print("kill switch ENGAGED — all spawning halted, running loops will stop")
     elif args.action == "revive":
         fleet.clear_kill()
         print("kill switch cleared — spawning allowed again")
+    elif args.action == "reap":
+        reaped = fleet.reap_stale()
+        print(f"reaped {len(reaped)} stale agent(s)" + (": " + ", ".join(reaped) if reaped else ""))
     elif args.action == "clear":
         print(f"cleared {fleet.clear()} agent record(s)")
+    return 0
+
+
+def cmd_node(args) -> int:
+    from .net import node
+    try:
+        node.serve_node(host=args.host, port=args.port, name=args.name)
+    except OSError as e:
+        print(f"could not start node: {e}")
+        return 1
+    return 0
+
+
+def cmd_cluster(args) -> int:
+    from .net import cluster, discovery
+    from .config import Config
+    cfg = Config.load()
+    if args.action == "scan":
+        found = discovery.probe_once(int(cfg.net_beacon_port), timeout=args.timeout)
+        for m in found:
+            cluster.ingest_beacon(m)
+        print(f"heard {len(found)} node beacon(s) in {args.timeout:g}s:")
+        for m in found:
+            c = m.get("caps", {})
+            print(f"  {m.get('name')} ({m.get('node_id')}) @ {m.get('host')}:{m.get('port')}"
+                  f"  {c.get('cpu_count','?')}cpu/{c.get('ram_gb','?')}GB/GPU {c.get('gpu','?')}")
+        return 0
+    if args.action == "list":
+        nodes = cluster.list_nodes(cfg)
+        print(f"{len(nodes)} known node(s):")
+        for n in nodes:
+            me = " (this device)" if n.self_node else ""
+            print(f"  {n.name} ({n.node_id}){me} [{n.status(cfg.net_node_stale_s)}] "
+                  f"@ {n.host}:{n.port} score={n.score()} "
+                  f"approved={'yes' if n.approved else 'NO'}")
+        return 0
+    if args.action in ("approve", "revoke"):
+        ok = cluster.approve(args.target, approved=(args.action == "approve"))
+        print("done" if ok else f"node not found: {args.target}")
+        return 0 if ok else 1
+    if args.action == "forget":
+        ok = cluster.forget(args.target)
+        print("forgotten" if ok else f"node not found: {args.target}")
+        return 0 if ok else 1
+    if args.action == "add":
+        if ":" not in args.target:
+            print("usage: ag cluster add <host:port>")
+            return 2
+        host, _, port = args.target.rpartition(":")
+        n = cluster.add_static(host, int(port))
+        if n:
+            print(f"added {n.name} ({n.node_id}) — approve it to use: "
+                  f"ag cluster approve {n.node_id}")
+            return 0
+        print(f"could not reach a node at {args.target}")
+        return 1
+    if args.action == "bench":
+        from .net import compute
+        iters = args.iters or compute.DEFAULT_ITERATIONS
+        print(f"distributing a {iters/1e6:.1f}M-iteration benchmark across your devices…")
+        res = cluster.fanout_bench(iters, cfg, emit=lambda m: print("  " + m))
+        if not res.get("ok"):
+            print("  " + res.get("reason", "failed"))
+            return 1
+        for p in res.get("per_node", []):
+            mark = "ok" if p["ok"] else "FAIL"
+            vf = "" if p.get("verified") else " (unverified)"
+            print(f"  {p['name']:<16} {p['mips']:>8} MIPS  {p['iterations']/1e6:.1f}M  [{mark}]{vf}")
+        print(f"aggregate: {res['aggregate_mips']} MIPS across {res['shards_done']} device(s)"
+              f" · {res['iterations']/1e6:.1f}M iterations"
+              f" · {'verified' if res['verified'] else 'UNVERIFIED'}")
+        return 0
+    if args.action == "tasks":
+        from .net import tasks
+        rows = tasks.recent(20)
+        print(f"{len(rows)} recent task(s):")
+        for t in rows:
+            r = t.get("result", {})
+            extra = (f" · {r.get('aggregate_mips')} MIPS" if r.get("aggregate_mips") else "")
+            print(f"  {t['title']} [{t['status']}]{extra}")
+        return 0
     return 0
 
 
@@ -1232,10 +1324,33 @@ def build_parser() -> argparse.ArgumentParser:
                     help="clip length for 'video' (default: config video_frames)")
     md.set_defaults(func=cmd_media)
 
-    fl = sub.add_parser("fleet", help="agent swarm control (list/enable/disable/kill/revive/clear)")
-    fl.add_argument("action", choices=["list", "enable", "disable", "kill", "revive", "clear"])
-    fl.add_argument("name", nargs="?", default="", help="agent name (for enable/disable)")
+    fl = sub.add_parser("fleet", help="agent swarm control (list/enable/disable/kill/"
+                                      "killall/revive/reap/clear)")
+    fl.add_argument("action", choices=["list", "enable", "disable", "kill", "killall",
+                                       "revive", "reap", "clear"])
+    fl.add_argument("name", nargs="?", default="",
+                    help="agent name (for enable/disable/kill)")
     fl.set_defaults(func=cmd_fleet)
+
+    nd = sub.add_parser("node", help="run THIS device as a worker node for the household "
+                                     "cluster (lends its CPU/GPU/RAM to AG)")
+    nd.add_argument("--host", default="0.0.0.0",
+                    help="bind address (default 0.0.0.0 so the LAN can reach it)")
+    nd.add_argument("--port", type=int, default=0, help="TCP port (default: config net_node_port)")
+    nd.add_argument("--name", default="", help="friendly name for this device")
+    nd.set_defaults(func=cmd_node)
+
+    cl = sub.add_parser("cluster", help="household cluster control "
+                                        "(list/scan/approve/forget/add)")
+    cl.add_argument("action", choices=["list", "scan", "approve", "revoke", "forget",
+                                       "add", "bench", "tasks"])
+    cl.add_argument("target", nargs="?", default="",
+                    help="node id (approve/revoke/forget) or host:port (add)")
+    cl.add_argument("--timeout", type=float, default=3.0, help="scan: seconds to listen")
+    cl.add_argument("--iters", type=int, default=0,
+                    help="bench: total iterations to split across devices "
+                         "(default: config-scaled)")
+    cl.set_defaults(func=cmd_cluster)
 
     lo = sub.add_parser("lora", help="LoRA fine-tune a local model "
                         "(status/options/build-data/train/list/merge)")

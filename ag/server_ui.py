@@ -40,6 +40,10 @@ table.hist td.rat{color:#8b949e;font-style:italic}
   border-radius:8px;background:rgba(127,127,127,.08);font-family:var(--mono),monospace;
   font-size:11px;line-height:1.45}
 #stopbtn{background:#b91c1c;color:#fff}
+tr.stalerow{opacity:.75}
+.linkbtn.danger{color:#f85149}
+#addhost{padding:5px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.35);
+  background:rgba(127,127,127,.06);color:inherit;font-size:13px}
 </style></head><body>
 <div class="wrap">
 <header>
@@ -69,7 +73,8 @@ table.hist td.rat{color:#8b949e;font-style:italic}
 <!-- ================= tab command bar ================= -->
 <nav class="tabs" id="tabs">
   <button class="tab active" data-pane="chat" onclick="switchTab('chat')">&#9656; Chat</button>
-  <button class="tab" data-pane="fleet" onclick="switchTab('fleet')">&#9670; Fleet <span class="tct" id="tc-fleet"></span></button>
+  <button class="tab" data-pane="cluster" onclick="switchTab('cluster')">&#9741; Cluster <span class="tct" id="tc-cluster"></span></button>
+  <button class="tab" data-pane="fleet" onclick="switchTab('fleet')">&#9670; Swarm <span class="tct" id="tc-fleet"></span></button>
   <button class="tab" data-pane="skills" onclick="switchTab('skills')">&#10022; Skills <span class="tct" id="tc-skills"></span></button>
   <button class="tab" data-pane="evolve" onclick="switchTab('evolve')">&#8635; Evolve</button>
   <button class="tab" data-pane="lora" onclick="switchTab('lora')">&#9881; LoRA</button>
@@ -139,21 +144,72 @@ __MODEL_PICKER__
 </div>
 </div><!-- /pane-chat -->
 
-<!-- ================= FLEET ================= -->
+<!-- ================= CLUSTER ================= -->
+<div class="tabpane" id="pane-cluster">
+  <div class="panel">
+    <p class="lede"><b>Household cluster.</b> Your other devices, discovered on the LAN.
+      Run <code>ag node</code> on a laptop or desktop and it appears here. A node is
+      <b>seen</b> automatically, but AG will not <b>run</b> anything on it until you
+      <b>Approve</b> it below — your approval is the credential. Approved, online nodes
+      are used automatically for sub-agents, matched to their CPU/GPU/RAM.</p>
+    <div class="fleet-bar">
+      <button class="view" onclick="loadCluster()">Refresh</button>
+      <label class="toggle" style="margin-left:6px">placement
+        <select id="placement" onchange="setPlacement()">
+          <option value="auto">auto (use other devices)</option>
+          <option value="local">local only (this machine)</option>
+        </select>
+      </label>
+      <span class="killbadge spacer" id="clbadge">nodes: —</span>
+    </div>
+    <table class="dtable" id="clustertbl" style="display:none">
+      <thead><tr><th>device</th><th>address</th><th>CPU/RAM/GPU</th>
+        <th class="n">score</th><th class="n">agents</th><th>status</th><th></th></tr></thead>
+      <tbody id="clusterbody"></tbody>
+    </table>
+    <div id="clusterempty" class="emptyrow">No devices found yet. On another machine you
+      own, run <code>python -m ag node</code> on the same Wi-Fi — it will show up here to
+      approve.</div>
+    <div class="fleet-bar" style="margin-top:10px">
+      <input id="addhost" placeholder="host:port (e.g. 192.168.1.9:8767)"
+        style="width:230px;vertical-align:middle">
+      <button class="view" onclick="clusterAddStatic()">Add by address</button>
+      <span class="ct-hint">for networks where broadcast is blocked</span>
+    </div>
+    <div class="fleet-bar" style="margin-top:14px;border-top:1px solid rgba(127,127,127,.15);padding-top:12px">
+      <b>Mutual processing.</b>&nbsp;
+      <label class="toggle">split
+        <select id="benchiters" class="ctl-select">
+          <option value="2000000">2M</option>
+          <option value="5000000" selected>5M</option>
+          <option value="20000000">20M</option>
+          <option value="50000000">50M</option>
+        </select>
+      </label>
+      <span class="ct-hint">iterations across every approved device, weighted by power</span>
+      <button class="cmd" id="benchbtn" onclick="clusterBench()">Run distributed benchmark</button>
+    </div>
+    <div id="benchout"></div>
+  </div>
+</div>
+
+<!-- ================= SWARM (fleet) ================= -->
 <div class="tabpane" id="pane-fleet">
   <div class="panel">
     <p class="lede"><b>Agent swarm.</b> Every sub-agent AG spawns is registered here —
-      named for the role it spawned as, with its parent, depth and how many skills it
-      acquired. The <b>kill switch</b> halts all spawning and stops running loops.</p>
+      its role, lineage, depth, <b>where it runs</b> (this machine or a cluster node) and
+      live status. Kill a single agent, sweep <b>stale</b> ones, or hit the master
+      <b>kill switch</b> to halt all spawning and stop running loops.</p>
     <div class="fleet-bar">
       <button class="view" onclick="loadFleet()">Refresh</button>
+      <button class="view" onclick="fleetReap()">Reap stale</button>
       <button class="danger" onclick="fleetKill()">Engage kill switch</button>
       <button class="view" onclick="fleetRevive()">Clear kill switch</button>
       <span class="killbadge spacer" id="killbadge">kill: —</span>
     </div>
     <table class="dtable" id="fleettbl" style="display:none">
-      <thead><tr><th>agent</th><th>role</th><th>parent</th><th>depth</th>
-        <th>status</th><th class="n">skills</th><th></th></tr></thead>
+      <thead><tr><th>agent</th><th>role</th><th>location</th><th>parent</th>
+        <th>depth</th><th>status</th><th class="n">skills</th><th></th></tr></thead>
       <tbody id="fleetbody"></tbody>
     </table>
     <div id="fleetempty" class="emptyrow">No sub-agents spawned yet. Delegation happens
@@ -941,6 +997,7 @@ function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.pane===name));
   document.querySelectorAll('.tabpane').forEach(p=>p.classList.toggle('active',p.id==='pane-'+name));
   try{ localStorage.setItem('ag_tab',name); }catch(e){}
+  if(name==='cluster') loadCluster();
   if(name==='fleet') loadFleet();
   if(name==='skills') loadSkills();
   if(name==='lora') loadLora();
@@ -1041,19 +1098,36 @@ async function loadFleet(){
     const tbl=$('fleettbl'), body=$('fleetbody'), empty=$('fleetempty');
     if(!agents.length){ tbl.style.display='none'; empty.style.display='block'; return; }
     empty.style.display='none'; tbl.style.display='table';
-    body.innerHTML=agents.map(a=>'<tr><td>'+escapeHtml(a.agent)+'</td><td>'+escapeHtml(a.role)
-      +'</td><td>'+escapeHtml(a.parent)+'</td><td class="n">'+a.depth
-      +'</td><td><span class="pill '+escapeHtml(a.status)+'">'+escapeHtml(a.status)+'</span></td>'
-      +'<td class="n">'+a.skills_acquired+'</td><td>'
-      +(a.status==='disabled'
-        ?'<button class="linkbtn" onclick="fleetAct(\\''+escapeHtml(a.agent)+'\\',\\'enable\\')">enable</button>'
-        :'<button class="linkbtn" onclick="fleetAct(\\''+escapeHtml(a.agent)+'\\',\\'disable\\')">disable</button>')
-      +'</td></tr>').join('');
+    body.innerHTML=agents.map(a=>{
+      const loc=a.node&&a.node!=='local'?(a.location||a.node):'this machine';
+      const st=a.stale?'stale':escapeHtml(a.status);
+      const alive=a.status==='active'||a.status==='disabled';
+      const A=escapeHtml(a.agent);
+      let act='';
+      if(a.status==='disabled') act='<button class="linkbtn" onclick="fleetAct(\\''+A+'\\',\\'enable\\')">enable</button> ';
+      else if(alive) act='<button class="linkbtn" onclick="fleetAct(\\''+A+'\\',\\'disable\\')">disable</button> ';
+      if(alive) act+='<button class="linkbtn danger" onclick="fleetKillAgent(\\''+A+'\\')">kill</button>';
+      return '<tr'+(a.stale?' class="stalerow"':'')+'><td>'+A+'</td><td>'+escapeHtml(a.role)
+        +'</td><td>'+escapeHtml(loc)+'</td><td>'+escapeHtml(a.parent)+'</td><td class="n">'+a.depth
+        +'</td><td><span class="pill '+(a.stale?'degraded':escapeHtml(a.status))+'">'+st+'</span></td>'
+        +'<td class="n">'+a.skills_acquired+'</td><td>'+act+'</td></tr>';
+    }).join('');
   }catch(e){ $('fleetempty').textContent='could not load fleet: '+e; }
 }
 async function fleetAct(agent,action){
   try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:action,agent:agent})}); }catch(e){}
+  loadFleet();
+}
+async function fleetKillAgent(agent){
+  if(!confirm('Kill agent "'+agent+'" (and any sub-agents it spawned)? It stops at its next step.')) return;
+  try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'kill_agent',agent:agent})}); }catch(e){}
+  loadFleet();
+}
+async function fleetReap(){
+  try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'reap'})}); }catch(e){}
   loadFleet();
 }
 async function fleetKill(){
@@ -1066,6 +1140,86 @@ async function fleetRevive(){
   try{ await fetch('/fleet/act',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'revive'})}); }catch(e){}
   loadFleet();
+}
+
+/* ---- cluster ---------------------------------------------------------- */
+async function loadCluster(){
+  try{
+    const d=await (await fetch('/cluster')).json();
+    const badge=$('clbadge');
+    if(!d.cluster_on){ badge.textContent='clustering off';
+      $('clustertbl').style.display='none'; $('clusterempty').style.display='block';
+      $('clusterempty').textContent='Clustering is disabled (config net_cluster=false).'; return; }
+    if($('placement')) $('placement').value=d.placement||'auto';
+    const nodes=d.nodes||[];
+    const online=nodes.filter(n=>n.online).length;
+    badge.textContent='nodes: '+online+' online / '+nodes.length+' known';
+    $('tc-cluster').textContent=nodes.length?('['+nodes.length+']'):'';
+    const tbl=$('clustertbl'), body=$('clusterbody'), empty=$('clusterempty');
+    if(!nodes.length){ tbl.style.display='none'; empty.style.display='block'; return; }
+    empty.style.display='none'; tbl.style.display='table';
+    body.innerHTML=nodes.map(n=>{
+      const c=n.caps||{};
+      const priv=c.elevated?' <span class="tagpill lan" title="this node runs elevated — its agents have admin/root on that device">admin</span>':'';
+      const mips=c.benchMips?(' · '+c.benchMips+' MIPS'):'';
+      const specs=(c.cpu_count||'?')+' cpu · '+(c.ram_gb||'?')+' GB · '+escapeHtml(c.gpu||'?')+mips+priv;
+      const me=n.self_node?' <span class="tagpill local">this device</span>':'';
+      const N=escapeHtml(n.node_id);
+      let act='';
+      if(n.self_node){ act='—'; }
+      else if(!n.approved){ act='<button class="linkbtn" onclick="clusterAct(\\''+N+'\\',\\'approve\\')">approve</button> '
+        +'<button class="linkbtn danger" onclick="clusterAct(\\''+N+'\\',\\'forget\\')">forget</button>'; }
+      else { act='<button class="linkbtn" onclick="clusterAct(\\''+N+'\\',\\'revoke\\')">revoke</button> '
+        +'<button class="linkbtn danger" onclick="clusterAct(\\''+N+'\\',\\'forget\\')">forget</button>'; }
+      return '<tr><td>'+escapeHtml(n.name||'?')+me+'</td><td>'+escapeHtml(n.host||'?')+':'+n.port
+        +'</td><td>'+specs+'</td><td class="n">'+n.score+'</td><td class="n">'+(n.agents_here||0)
+        +'</td><td><span class="pill '+(n.status==='online'?'available':(n.status==='pending'?'degraded':'unavailable'))
+        +'">'+escapeHtml(n.status)+'</span></td><td>'+act+'</td></tr>';
+    }).join('');
+  }catch(e){ $('clusterempty').textContent='could not load cluster: '+e; }
+}
+async function clusterAct(node_id,action){
+  if(action==='approve' && !confirm('Approve this device to run AG sub-agents? It will get this machine\\'s trust and full local tools for tasks you send it.')) return;
+  try{ await fetch('/cluster/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action,node_id:node_id})}); }catch(e){}
+  loadCluster();
+}
+async function clusterAddStatic(){
+  const v=($('addhost')?$('addhost').value.trim():''); if(!v||v.indexOf(':')<0) return;
+  const host=v.substring(0,v.lastIndexOf(':')), port=parseInt(v.substring(v.lastIndexOf(':')+1),10);
+  try{ await fetch('/cluster/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'add',host:host,port:port})}); }catch(e){}
+  if($('addhost')) $('addhost').value=''; loadCluster();
+}
+async function setPlacement(){
+  const v=$('placement')?$('placement').value:'auto';
+  try{ await fetch('/cluster/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'set_placement',placement:v})}); }catch(e){}
+}
+async function clusterBench(){
+  const btn=$('benchbtn'), out=$('benchout');
+  const iters=parseInt($('benchiters')?$('benchiters').value:'5000000',10);
+  if(btn){ btn.disabled=true; }
+  out.innerHTML='<div class="ct-hint">splitting '+(iters/1e6).toFixed(0)
+    +'M iterations across your devices and running them in parallel…</div>';
+  try{
+    const r=await fetch('/cluster/bench',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({iters:iters})}).then(r=>r.json());
+    if(!r.ok){ out.innerHTML='<div class="result bad">'+escapeHtml(r.reason||'benchmark failed')+'</div>'; }
+    else{
+      let h='<div class="result '+(r.verified?'ok':'')+'"><b>'+r.aggregate_mips
+        +' MIPS</b> aggregate across '+r.shards_done+' device(s) · '+(r.iterations/1e6).toFixed(1)
+        +'M iterations · '+(r.verified?'verified':'UNVERIFIED')
+        +(r.shards_failed?' · '+r.shards_failed+' failed':'')+'<table class="hist">';
+      for(const p of (r.per_node||[])){
+        h+='<tr><td>'+escapeHtml(p.name)+'</td><td>'+p.mips+' MIPS</td><td>'
+          +(p.iterations/1e6).toFixed(1)+'M</td><td>'+(p.ok?(p.verified?'ok ✓':'ok'):'failed')+'</td></tr>';
+      }
+      h+='</table></div>'; out.innerHTML=h;
+    }
+  }catch(e){ out.innerHTML='<div class="result bad">request failed: '+escapeHtml(''+e)+'</div>'; }
+  if(btn){ btn.disabled=false; }
+  loadCluster();
 }
 
 /* ---- skills ----------------------------------------------------------- */

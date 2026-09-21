@@ -217,6 +217,22 @@ class Config:
     # conventions) into the executor prompt. Cheap, and it removes a whole class of
     # confidently-wrong platform-specific answers.
     os_context: bool = True
+    # --- Household cluster: link this machine's power with your other devices -----
+    # AG can discover other devices on your LAN that are running an `ag node` worker
+    # (UDP beacon, stdlib-only) and dispatch sub-agents to them, matched to each node's
+    # CPU/GPU/RAM. Discovery is OPEN on the local network (anyone can be *seen*), but a
+    # node refuses to actually run anything until the controlling AG user APPROVES it in
+    # the dashboard — that human approval, not a pre-shared secret, is the credential.
+    net_cluster: bool = True                    # enable discovery + remote placement
+    net_beacon_port: int = 8766                 # UDP port nodes broadcast/listen on
+    net_node_port: int = 8767                   # TCP port a worker node serves on
+    net_node_name: str = ""                     # friendly name for this device ("" = hostname)
+    net_beacon_interval: float = 5.0            # seconds between a node's beacons
+    net_node_stale_s: float = 20.0              # no beacon for this long => node offline
+    net_agent_stale_s: float = 120.0            # no heartbeat for this long => agent stale
+    net_placement: str = "auto"                 # auto | local (auto may dispatch remotely)
+    net_confirm_remote_runs: bool = False       # node queues incoming runs for UI approval
+    net_auto_approve_nodes: bool = False        # skip the approve-in-UI step (trusts LAN)
     use_memory: bool = True                    # recall durable memory into context
     auto_memory: bool = True                    # after a run, distill+store durable facts
     max_history_turns: int = 12                 # conversation turns kept as working memory

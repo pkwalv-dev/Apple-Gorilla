@@ -373,7 +373,7 @@ def _is_not_an_answer(text: str, names) -> bool:
 def solve(client, cfg: Config, *, system: str, user: str, broker=None,
           emit=None, max_steps: Optional[int] = None, on_delta=None,
           cancel=None, agent: str = "root", parents=(), depth: int = 0,
-          budget=None) -> ReasonResult:
+          budget=None, stop_check=None, on_step=None) -> ReasonResult:
     """Run the reason→act→observe loop and return the final answer + trace.
 
     `on_delta(text)` streams each model call's output live; `cancel` (a Canceller) lets
@@ -382,8 +382,20 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     what the run may spend; when omitted it is built from the cfg.budget_* fields, and
     exhausting it returns the best answer so far WITH the stop declared in the text —
     a truncated result is never presented as a complete one.
+
+    `stop_check()` is consulted between steps and lets the operator halt THIS agent
+    specifically (the swarm UI's per-agent kill, or a remote node checking back with the
+    coordinator). It defaults to the fleet's own signal for this agent. `on_step()` is
+    called each step so a running agent can heartbeat its liveness.
     """
+    from . import fleet
     from .budget import Budget, BudgetExceeded
+    if stop_check is None:
+        def stop_check():
+            try:
+                return fleet.should_stop(agent)
+            except Exception:
+                return False
     from .pipeline import _emit  # reuse the pipeline's safe emitter
     if budget is None:
         budget = Budget.from_config(cfg)
@@ -416,12 +428,13 @@ def solve(client, cfg: Config, *, system: str, user: str, broker=None,
     repairs = 0
 
     for _ in range(max(1, max_steps)):
-        try:
-            from . import fleet
-            if fleet.kill_active():
-                return ReasonResult("(halted: fleet kill switch engaged)", steps, tin, tout)
-        except Exception:
-            pass
+        if stop_check():
+            return ReasonResult("(halted: agent stopped by operator)", steps, tin, tout)
+        if on_step is not None:
+            try:
+                on_step()
+            except Exception:
+                pass
         try:
             if budget is not None:
                 budget.check_wall()

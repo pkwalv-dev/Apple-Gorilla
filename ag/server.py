@@ -276,6 +276,37 @@ class _Handler(BaseHTTPRequestHandler):
                 "kill_active": fleet.kill_active(),
                 "agents": [a.as_dict() for a in fleet.list_agents()]}),
                 "application/json")
+        elif self.path == "/cluster":
+            from . import fleet
+            cfg = self.cfg
+            if not getattr(cfg, "net_cluster", False):
+                self._send(200, json.dumps({"cluster_on": False, "nodes": []}),
+                           "application/json")
+                return
+            from .net import cluster
+            cluster.ensure_self(cfg)
+            stale = float(getattr(cfg, "net_node_stale_s", 20.0) or 20.0)
+            # count agents currently placed on each node, for the dashboard
+            counts = {}
+            for a in fleet.list_agents():
+                if a.status == "active":
+                    counts[a.node] = counts.get(a.node, 0) + 1
+            nodes = []
+            for n in cluster.list_nodes(cfg):
+                d = n.as_dict(stale)
+                d["agents_here"] = counts.get(n.node_id, 0) + (
+                    counts.get("local", 0) if n.self_node else 0)
+                nodes.append(d)
+            self._send(200, json.dumps({
+                "cluster_on": True, "placement": getattr(cfg, "net_placement", "auto"),
+                "auto_approve": bool(getattr(cfg, "net_auto_approve_nodes", False)),
+                "nodes": nodes}), "application/json")
+        elif self.path == "/cluster/tasks":
+            if not getattr(self.cfg, "net_cluster", False):
+                self._send(200, json.dumps({"tasks": []}), "application/json")
+                return
+            from .net import tasks
+            self._send(200, json.dumps({"tasks": tasks.recent(20)}), "application/json")
         elif self.path == "/skills":
             from . import skills
             items = skills.get_registry("root").list(include_disabled=True)
@@ -407,10 +438,16 @@ class _Handler(BaseHTTPRequestHandler):
                 from . import fleet
                 action = str(payload.get("action", ""))
                 agent = str(payload.get("agent", ""))
-                if action == "kill":
+                if action == "kill":            # global kill switch (halts all spawning)
                     fleet.engage_kill(); msg = "kill switch engaged"
                 elif action == "revive":
                     fleet.clear_kill(); msg = "kill switch cleared"
+                elif action == "kill_agent":    # stop ONE agent (+ its descendants)
+                    ok = fleet.kill_agent(agent)
+                    msg = f"killed {agent}" if ok else "agent not found"
+                elif action == "reap":          # sweep stale/superfluous agents
+                    reaped = fleet.reap_stale()
+                    msg = f"reaped {len(reaped)} stale agent(s)"
                 elif action == "clear":
                     msg = f"cleared {fleet.clear()} record(s)"
                 elif action in ("disable", "enable"):
@@ -419,6 +456,48 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     msg = "unknown action"
                 self._send(200, json.dumps({"ok": True, "msg": msg}), "application/json")
+                return
+            if path == "/cluster/act":
+                from .net import cluster
+                action = str(payload.get("action", ""))
+                node_id = str(payload.get("node_id", ""))
+                if action == "approve":
+                    ok = cluster.approve(node_id, True); msg = "approved" if ok else "not found"
+                elif action == "revoke":
+                    ok = cluster.approve(node_id, False); msg = "revoked" if ok else "not found"
+                elif action == "forget":
+                    ok = cluster.forget(node_id); msg = "forgotten" if ok else "not found"
+                elif action == "add":
+                    n = cluster.add_static(str(payload.get("host", "")),
+                                           int(payload.get("port", 0) or 0))
+                    ok = n is not None; msg = ("added " + n.name) if n else "unreachable"
+                elif action == "set_placement":
+                    cfg = Config.load()
+                    cfg.net_placement = "local" if payload.get("placement") == "local" else "auto"
+                    cfg.save(); _Handler.cfg = cfg
+                    ok = True; msg = "placement " + cfg.net_placement
+                else:
+                    ok = False; msg = "unknown action"
+                self._send(200, json.dumps({"ok": bool(ok), "msg": msg}), "application/json")
+                return
+            if path == "/cluster/heartbeat":     # a remote node reporting a live agent
+                from . import fleet
+                fleet.heartbeat(str(payload.get("agent", "")),
+                                node=str(payload.get("node_id", "")),
+                                location=str(payload.get("location", "")),
+                                pid=int(payload.get("pid", 0) or 0))
+                self._send(200, json.dumps({"ok": True}), "application/json")
+                return
+            if path == "/cluster/stopped":       # a remote node asking whether to abort
+                from . import fleet
+                stop = fleet.should_stop(str(payload.get("agent", "")))
+                self._send(200, json.dumps({"stop": bool(stop)}), "application/json")
+                return
+            if path == "/cluster/bench":         # split one benchmark across all devices
+                from .net import cluster, compute
+                iters = int(payload.get("iters", 0) or 0) or compute.DEFAULT_ITERATIONS
+                res = cluster.fanout_bench(iters, self.cfg)
+                self._send(200, json.dumps(res), "application/json")
                 return
             if path == "/skills/act":
                 from . import skills
@@ -510,7 +589,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         if self.path in ("/fleet/act", "/skills/act", "/skills/acquire", "/bundle/export",
-                         "/lora/build", "/lora/train", "/lora/set-base", "/lora/merge"):
+                         "/lora/build", "/lora/train", "/lora/set-base", "/lora/merge",
+                         "/cluster/act", "/cluster/heartbeat", "/cluster/stopped",
+                         "/cluster/bench"):
             try:
                 n = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(n) or b"{}") if n else {}
@@ -1212,6 +1293,21 @@ def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
         import secrets
         _Handler.auth_token = token or secrets.token_urlsafe(24)
 
+    # --- household cluster: listen for worker-node beacons on the LAN ------------
+    # The coordinator collects beacons into the node registry and records its own port
+    # so dispatched nodes can call back for heartbeats / stop checks. Best-effort: any
+    # failure here leaves single-machine operation untouched.
+    if getattr(_Handler.cfg, "net_cluster", False):
+        try:
+            from .net import cluster, discovery
+            cluster.set_web_port(port)
+            cluster.ensure_self(_Handler.cfg)
+            lis = discovery.Listener(int(_Handler.cfg.net_beacon_port),
+                                     cluster.ingest_beacon)
+            lis.start()
+            _Handler._beacon_listener = lis
+        except Exception:
+            pass
     httpd = ThreadingHTTPServer((host, port), _Handler)
     tok = _Handler.auth_token
     qs = f"/?token={tok}" if tok else "/"
