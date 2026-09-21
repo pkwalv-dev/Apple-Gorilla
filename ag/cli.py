@@ -900,7 +900,7 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="run the browser web app (any OS / phone)")
     sv.add_argument("--host", default="127.0.0.1",
                     help="127.0.0.1 (local only) or 0.0.0.0 (reachable from phone/LAN)")
-    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--port", type=int, default=8770)
     sv.add_argument("--open", action="store_true", help="open a browser on start")
     sv.set_defaults(func=cmd_serve)
 

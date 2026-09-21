@@ -371,11 +371,11 @@ function setCard(id,v){ $(id).textContent=(v==null?'–':v);
 /* ---- conversation transcript (persisted locally) ---------------------- */
 let CHAT=[];
 function loadChat(){
-  try{ CHAT=JSON.parse(localStorage.getItem('ag_chat')||'[]'); }catch(e){ CHAT=[]; }
+  try{ CHAT=JSON.parse(localStorage.getItem('applegorilla_chat')||'[]'); }catch(e){ CHAT=[]; }
   renderChat();
 }
 function saveChat(){
-  try{ localStorage.setItem('ag_chat',JSON.stringify(CHAT.slice(-100))); }catch(e){}
+  try{ localStorage.setItem('applegorilla_chat',JSON.stringify(CHAT.slice(-100))); }catch(e){}
 }
 function clearChat(){
   if(!CHAT.length||confirm('Clear the whole conversation?')){ CHAT=[]; saveChat(); renderChat(); }
@@ -471,9 +471,9 @@ function stopActivity(ai){ if(ai&&ai._timer){clearInterval(ai._timer); ai._timer
 
 /* ---- per-tab working-memory session id ------------------------------- */
 const AG_SESSION=(function(){
-  try{let s=sessionStorage.getItem('ag_session');
+  try{let s=sessionStorage.getItem('applegorilla_session');
     if(!s){s='web-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
-      sessionStorage.setItem('ag_session',s);}
+      sessionStorage.setItem('applegorilla_session',s);}
     return s;
   }catch(e){return 'web-'+Date.now().toString(36);}
 })();
@@ -869,18 +869,18 @@ function syncCtls(){
 }
 function saveCtls(){ try{ for(const c of AG_CONTROLS){ const v=ctlGet(c);
   if(v===null) continue;
-  localStorage.setItem('ag_ctl_'+c.id, c.kind==='toggle'?(v?'1':'0'):String(v));
+  localStorage.setItem('applegorilla_ctl_'+c.id, c.kind==='toggle'?(v?'1':'0'):String(v));
 }}catch(e){} }
 function restoreCtls(){ try{ for(const c of AG_CONTROLS){
   if(!ctlEl(c)) continue;
-  const raw=localStorage.getItem('ag_ctl_'+c.id);
+  const raw=localStorage.getItem('applegorilla_ctl_'+c.id);
   if(raw==null) ctlSet(c,c.default);
   else ctlSet(c, c.kind==='toggle' ? raw==='1' : raw);
 }}catch(e){} syncCtls(); }
 function ctlPayload(){ const out={};
   for(const c of AG_CONTROLS){ const v=ctlGet(c); if(v!==null) out[c.id]=v; }
   return out; }
-function saveModel(){ try{ localStorage.setItem('ag_model',$('model').value); }catch(e){} }
+function saveModel(){ try{ localStorage.setItem('applegorilla_model',$('model').value); }catch(e){} }
 async function loadModels(){
   const sel=$('model'); if(!sel) return;
   try{
@@ -891,7 +891,7 @@ async function loadModels(){
         ?'(Ollama not reachable)':'(no models found)')+'</option>'; return; }
     for(const o of d.options){ const opt=document.createElement('option');
       opt.value=o.value; opt.textContent=o.label; sel.appendChild(opt); }
-    let saved=null; try{ saved=localStorage.getItem('ag_model'); }catch(e){}
+    let saved=null; try{ saved=localStorage.getItem('applegorilla_model'); }catch(e){}
     const vals=d.options.map(o=>o.value);
     sel.value=(saved&&vals.includes(saved))?saved:(d.current||d.options[0].value);
   }catch(e){ sel.innerHTML='<option value="">(could not load models)</option>'; }
@@ -1012,7 +1012,7 @@ window.addEventListener('resize', closeHelp);
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.pane===name));
   document.querySelectorAll('.tabpane').forEach(p=>p.classList.toggle('active',p.id==='pane-'+name));
-  try{ localStorage.setItem('ag_tab',name); }catch(e){}
+  try{ localStorage.setItem('applegorilla_tab',name); }catch(e){}
   if(name==='cluster') loadCluster();
   if(name==='fleet') loadFleet();
   if(name==='skills') loadSkills();
@@ -1099,7 +1099,7 @@ async function loraTrain(){
     loadLora();
   }catch(e){ $('loraout').innerHTML='<div class="result bad">train failed to start: '+escapeHtml(''+e)+'</div>'; }
 }
-function restoreTab(){ let t='chat'; try{ t=localStorage.getItem('ag_tab')||'chat'; }catch(e){}
+function restoreTab(){ let t='chat'; try{ t=localStorage.getItem('applegorilla_tab')||'chat'; }catch(e){}
   if(!document.getElementById('pane-'+t)) t='chat'; switchTab(t); }
 
 /* ---- fleet ------------------------------------------------------------ */
@@ -1296,8 +1296,8 @@ async function bundleExport(){
       +escapeHtml(d.path||'')+'</code>'+(d.bytes?(' &middot; '+Math.round(d.bytes/1024)+' KB'):'')+'</div>';
   }catch(e){ $('bundleout').innerHTML='<div class="result bad">export failed: '+escapeHtml(''+e)+'</div>'; }
 }
-function saveEvoGithub(){ try{ localStorage.setItem('ag_evogithub',$('evogithub').checked?'1':'0'); }catch(e){} }
-function restoreEvoGithub(){ try{ const v=localStorage.getItem('ag_evogithub');
+function saveEvoGithub(){ try{ localStorage.setItem('applegorilla_evogithub',$('evogithub').checked?'1':'0'); }catch(e){} }
+function restoreEvoGithub(){ try{ const v=localStorage.getItem('applegorilla_evogithub');
   if($('evogithub')) $('evogithub').checked=(v==='1'); }catch(e){}
   if($('evogithub')) $('evogithub').addEventListener('change',saveEvoGithub); }
 
@@ -1441,7 +1441,7 @@ class _Handler(BaseHTTPRequestHandler):
     # Where the server is bound (filled in by serve()), for the GUI "where am I
     # running" indicator.
     bind_host: str = "127.0.0.1"
-    bind_port: int = 8765
+    bind_port: int = 8770
     # Evolve self-modifies source, so only one may run at a time. The server keeps
     # serving during an evolve (ThreadingHTTPServer), so this flag lets the GUI show
     # that a cycle is in progress and lets us reject overlapping evolves.
@@ -2538,7 +2538,7 @@ def _lan_ip() -> str:
     except Exception:
         return "127.0.0.1"
 
-def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False):
+def serve(host: str = "127.0.0.1", port: int = 8770, open_browser: bool = False):
     _Handler.cfg = Config.load()
     _Handler.bind_host = host
     _Handler.bind_port = port
