@@ -205,6 +205,55 @@ def _print_evolve_history() -> int:
 def cmd_bench(args) -> int:
     from . import bench
     cfg = Config.load()
+
+    # --- task-proposal modes: the benchmark can grow, but only through a human ---
+    if getattr(args, "proposals", False):
+        props = bench.list_proposals()
+        if not props:
+            print("no pending proposals (make some with: ag bench --propose N)")
+            return 0
+        print(f"{len(props)} pending proposal(s) — review, then --accept or --reject:\n")
+        for p in props:
+            print(f"  [{p['id']}] ({p.get('category','?')}) check={p['check']}")
+            print(f"    prompt: {p['prompt'][:100]}")
+            print(f"    expect: {json.dumps(p.get('expect'))[:80]}")
+        return 0
+    if getattr(args, "accept", ""):
+        pid = args.accept
+        row = bench.accept_proposal(pid)
+        if not row:
+            print(f"cannot accept '{pid}': not found, or it fails validation "
+                  f"(it would not measure what it claims)", file=sys.stderr)
+            return 1
+        print(f"accepted into the curated suite (outranks generated tasks):")
+        print(f"  [{row['id']}] {row['prompt'][:80]}  ->  {json.dumps(row['expect'])}")
+        return 0
+    if getattr(args, "reject", ""):
+        print("rejected." if bench.reject_proposal(args.reject)
+              else f"no such proposal: {args.reject}")
+        return 0
+    if getattr(args, "propose", 0):
+        # --model benches a specific LOCAL model (e.g. the specialist) without touching
+        # config.json — the operator may want the abliterated coder's real numbers, and
+        # `--record` folds them into the routing doc as measured evidence.
+        bench_model = getattr(args, "model", None)
+        if bench_model:
+            import dataclasses
+            cfg = dataclasses.replace(cfg, ollama_model=bench_model, backend="ollama")
+        client = _client(args, cfg)
+        props = bench.propose_tasks(client, cfg, n=args.propose,
+                                    focus=getattr(args, "focus", "") or "")
+        if not props:
+            print("no valid proposals produced (the model's output did not survive "
+                  "shape validation — nothing was saved)")
+            return 1
+        print(f"{len(props)} proposal(s) saved as PENDING — they change nothing "
+              f"until you accept one:")
+        for p in props:
+            print(f"  [{p['id']}] {p['prompt'][:80]}")
+        print("review: ag bench --proposals   accept: ag bench --accept <id>")
+        return 0
+
     # --model benches a specific LOCAL model (e.g. the specialist) without touching
     # config.json — the operator may want the abliterated coder's real numbers, and
     # `--record` folds them into the routing doc as measured evidence.
@@ -1207,6 +1256,17 @@ def build_parser() -> argparse.ArgumentParser:
     bn.add_argument("--record", action="store_true",
                     help="fold this run's scores into the routing capability doc as "
                          "measured per-role evidence")
+    bn.add_argument("--propose", type=int, default=0, metavar="N",
+                    help="have the model PROPOSE N new benchmark tasks (saved as "
+                         "pending; nothing is measured by them until you accept)")
+    bn.add_argument("--focus", default="",
+                    help="steer --propose at a category (e.g. instruction)")
+    bn.add_argument("--proposals", action="store_true",
+                    help="list pending task proposals for review")
+    bn.add_argument("--accept", default="", metavar="ID",
+                    help="move a proposal into the curated suite (human gate)")
+    bn.add_argument("--reject", default="", metavar="ID",
+                    help="discard a pending proposal")
     bn.set_defaults(func=cmd_bench)
 
     sub.add_parser("versions", help="list source snapshots").set_defaults(
