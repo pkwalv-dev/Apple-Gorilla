@@ -98,6 +98,7 @@
     "ag/prompts.py",
     "ag/tools/web.py",
     "ag/theme.py",
+    "ag/server_ui.py",
     "profile/principles.md",
     "config.json"
   ],

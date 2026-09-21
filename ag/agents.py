@@ -128,14 +128,55 @@ def _promote_new_skills(child_agent: str) -> int:
 
 def spawn_many(client, cfg: Config, broker: PermissionBroker,
                tasks: List[dict], *, max_agents: int = 3,
-               parent_agent: str = "root", depth: int = 0) -> List[SubAgentResult]:
+               parent_agent: str = "root", depth: int = 0,
+               workers: Optional[int] = None) -> List[SubAgentResult]:
+    """Run focused sub-agents CONCURRENTLY and return their results IN INPUT ORDER.
+
+    Sub-agents share no memory between each other — each gets its own child broker,
+    its own namespace, its own transcript — so running them in parallel cannot
+    change any individual outcome; it only changes the wall clock. Three rules keep
+    that true:
+
+    - order-stable: results[i] always answers tasks[i], however the pool scheduled
+      them (fan-out must not reorder);
+    - one crash fails one child, not the batch: a dead model or tool becomes that
+      child's output string, the rest return normally;
+    - shared FILES are locked: fleet's agents.jsonl is load-modify-write, and its
+      mutations now hold a lock (the serial path made that race impossible by
+      accident only).
+
+    Each task dict may carry "model" (e.g. "specialist") exactly as delegate does —
+    an autonomous workflow can put its code/security-heavy leaves on the abliterated
+    coder while the primary coordinates. workers=None picks min(4, n).
+    """
     broker.require("spawn_agent")
-    results = []
-    for t in tasks[:max_agents]:
-        results.append(spawn(client, cfg, broker,
-                             role=t.get("role", "worker"), task=t.get("task", ""),
-                             parent_agent=parent_agent, depth=depth))
-    return results
+    chosen = [t for t in tasks[:max_agents] if (t or {}).get("task")]
+    if not chosen:
+        return []
+    if workers is None:
+        workers = min(4, len(chosen))
+
+    def _one(t: dict) -> SubAgentResult:
+        try:
+            return spawn(client, cfg, broker,
+                         role=t.get("role", "worker"), task=t["task"],
+                         parent_agent=parent_agent, depth=depth,
+                         model=str(t.get("model", "") or ""))
+        except Exception as e:
+            return SubAgentResult(role=t.get("role", "worker"), task=t["task"],
+                                  output=f"(sub-agent failed: {e})")
+
+    if workers <= 1 or len(chosen) == 1:
+        return [_one(t) for t in chosen]
+
+    from concurrent.futures import ThreadPoolExecutor
+    results: List[Optional[SubAgentResult]] = [None] * len(chosen)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # pool.map preserves input order regardless of completion order — the one
+        # property a parallel fan-out must not lose.
+        for i, res in enumerate(pool.map(_one, chosen)):
+            results[i] = res
+    return [r for r in results if r is not None]
 
 
 def _slug(name: str) -> str:
