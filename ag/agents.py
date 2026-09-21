@@ -62,6 +62,18 @@ def spawn(client, cfg: Config, broker: PermissionBroker, *, role: str, task: str
     max_depth = int(getattr(cfg, "max_subagent_depth", 2) or 2)
     child_agent = f"{parent_agent}.{_slug(role)}-{int(time.time() * 1000) % 100000}"
     child_broker = _child_broker(broker, can_spawn=child_depth < max_depth)
+
+    # --- household cluster: try to place this sub-agent on another device --------
+    # If clustering is on and an approved, online node is available, run the sub-agent
+    # THERE (using that device's model + full local tools) and use its result. GPU-ish
+    # tasks are steered to a GPU node. Any failure falls straight back to running locally
+    # so the swarm never stalls on a flaky node.
+    if getattr(cfg, "net_cluster", False):
+        remote = _try_remote(cfg, child_agent, role=role, task=task,
+                             parent_agent=parent_agent, depth=child_depth, emit=emit)
+        if remote is not None:
+            return remote
+
     fleet.record_spawn(child_agent, role=role, parent=parent_agent, depth=child_depth)
 
     system = (
@@ -110,6 +122,44 @@ def _model_client(cfg: Config, model: str, default_client):
     except Exception:
         return default_client, (f"[requested model '{name}' could not be initialised "
                                 f"— answered by the primary model]\n")
+
+
+_GPU_HINTS = ("image", "video", "render", "gpu", "cuda", "train", "diffus",
+              "stable diffusion", "comfy", "lora")
+
+
+def _wants_gpu(role: str, task: str) -> bool:
+    blob = f"{role} {task}".lower()
+    return any(h in blob for h in _GPU_HINTS)
+
+
+def _try_remote(cfg, child_agent, *, role, task, parent_agent, depth, emit):
+    """Attempt to run this sub-agent on a cluster node. Returns a SubAgentResult if a
+    node ran it, or None to fall back to local execution."""
+    try:
+        from .net import cluster
+        from . import fleet
+        from .pipeline import _emit
+    except Exception:
+        return None
+    node = cluster.pick_node(cfg, want_gpu=_wants_gpu(role, task))
+    if node is None:
+        return None
+    location = f"{node.name} @ {node.host}"
+    fleet.record_spawn(child_agent, role=role, parent=parent_agent, depth=depth,
+                       node=node.node_id, location=location)
+    _emit(emit, "reason", f"delegating '{role}' to {node.name} ({location})", level="tool")
+    try:
+        output = cluster.dispatch_run(node, agent=child_agent, role=role, task=task,
+                                      parent_agent=parent_agent, depth=depth, cfg=cfg)
+    except Exception:
+        output = None
+    if output is None:
+        # Node failed mid-flight — reset the record so the local path re-records it.
+        fleet.set_status(child_agent, "done")
+        return None
+    fleet.set_status(child_agent, "done")
+    return SubAgentResult(role=role, task=task, output=output, agent=child_agent)
 
 
 def _promote_new_skills(child_agent: str) -> int:
