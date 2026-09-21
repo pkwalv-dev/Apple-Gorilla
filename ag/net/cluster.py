@@ -350,11 +350,11 @@ def _send_pairing(node: NodeInfo) -> bool:
 
 def _coordinator_web_port(cfg: Optional[Config] = None) -> int:
     # The coordinator's web UI port — nodes call back here for heartbeat/stop. Overridable
-    # via the running server; defaults to the documented 8765.
+    # via the running server; defaults to the documented 8770.
     return int(_WEB_PORT[0])
 
 
-_WEB_PORT = [8765]
+_WEB_PORT = [8770]
 
 
 def set_web_port(port: int) -> None:
